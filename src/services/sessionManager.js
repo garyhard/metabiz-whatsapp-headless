@@ -150,6 +150,9 @@ export async function createSession(cookieString, existingSessionId = null, exis
       await saveSessionMetadata(sessionId, sessionData, cookieString);
     }
 
+    console.log(`[SessionManager] ✓ Session created successfully: ${sessionId}`);
+    console.log(`[SessionManager] Active sessions: ${sessions.size}`);
+    
     return sessionId;
   } catch (error) {
     // Cleanup on error
@@ -214,6 +217,9 @@ export async function destroySession(sessionId) {
     if (config.devMode) {
       await removeSessionMetadata(sessionId);
     }
+    
+    console.log(`[SessionManager] ✓ Session destroyed: ${sessionId}`);
+    console.log(`[SessionManager] Active sessions: ${sessions.size}`);
   }
 }
 
