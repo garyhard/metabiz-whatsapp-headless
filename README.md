@@ -340,6 +340,41 @@ Browser settings are configured in `src/config.js`:
 
 ### Production Deployment
 
+#### Option A: PM2 Deploy (matches `~/waha-web` workflow)
+
+If you already deploy via:
+
+```bash
+pm2 deploy ecosystem.config.js production
+```
+
+This repo includes the same Capistrano-style structure under `/opt`:
+- `/opt/metabiz-whatsapp-headless/current`
+- `/opt/metabiz-whatsapp-headless/shared` (logs + `.env`)
+
+**Steps:**
+
+1. Update `ecosystem.config.js` `deploy.production.repo` to your Git repo URL.
+2. Create `.env.production` locally (repo root), then copy it to the server:
+
+```bash
+./copy-env-to-server.sh
+```
+
+3. First-time setup:
+
+```bash
+pm2 deploy ecosystem.config.js production setup
+```
+
+4. Deploy:
+
+```bash
+pm2 deploy ecosystem.config.js production
+```
+
+#### Option B: Manual PM2 start
+
 1. **Process Manager**: Use PM2 for process management
 ```bash
 npm install -g pm2
