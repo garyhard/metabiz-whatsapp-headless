@@ -1,0 +1,8 @@
+node_modules/
+profiles/
+*.log
+.DS_Store
+.env
+.env.local
+profiles/sessions.json
+

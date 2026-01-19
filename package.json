@@ -1,0 +1,26 @@
+{
+  "name": "headless-metabiz-whatsapp",
+  "version": "1.0.0",
+  "description": "Headless browser automation service for Meta Business Suite WhatsApp messaging",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "DEV_MODE=true node --watch src/server.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "automation",
+    "playwright",
+    "headless"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "playwright": "^1.40.0",
+    "uuid": "^9.0.1"
+  }
+}
+
