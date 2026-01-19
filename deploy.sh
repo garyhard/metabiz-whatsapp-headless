@@ -25,7 +25,7 @@ echo "🎭 Installing Playwright Chromium (if needed)..."
 npx playwright install chromium
 
 echo "🔄 Restarting service..."
-pm2 reload ecosystem.config.js --env production
+pm2 reload ecosystem.config.cjs --env production
 
 echo "✅ Deployment complete!"
 

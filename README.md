@@ -345,7 +345,7 @@ Browser settings are configured in `src/config.js`:
 If you already deploy via:
 
 ```bash
-pm2 deploy ecosystem.config.js production
+pm2 deploy ecosystem.config.cjs production
 ```
 
 This repo includes the same Capistrano-style structure under `/opt`:
@@ -354,7 +354,7 @@ This repo includes the same Capistrano-style structure under `/opt`:
 
 **Steps:**
 
-1. Update `ecosystem.config.js` `deploy.production.repo` to your Git repo URL.
+1. Update `ecosystem.config.cjs` `deploy.production.repo` to your Git repo URL.
 2. Create `.env.production` locally (repo root), then copy it to the server:
 
 ```bash
@@ -364,13 +364,13 @@ This repo includes the same Capistrano-style structure under `/opt`:
 3. First-time setup:
 
 ```bash
-pm2 deploy ecosystem.config.js production setup
+pm2 deploy ecosystem.config.cjs production setup
 ```
 
 4. Deploy:
 
 ```bash
-pm2 deploy ecosystem.config.js production
+pm2 deploy ecosystem.config.cjs production
 ```
 
 #### Option B: Manual PM2 start

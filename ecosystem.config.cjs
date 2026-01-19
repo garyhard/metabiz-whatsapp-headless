@@ -1,7 +1,7 @@
 // PM2 Ecosystem File with Deploy Configuration
 // Usage:
-//   pm2 deploy ecosystem.config.js production setup
-//   pm2 deploy ecosystem.config.js production
+//   pm2 deploy ecosystem.config.cjs production setup
+//   pm2 deploy ecosystem.config.cjs production
 
 module.exports = {
   apps: [
@@ -39,5 +39,4 @@ module.exports = {
     },
   },
 };
-
 
