@@ -9,20 +9,33 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# Configuration - read from .env if available
-if [ -f .env ]; then
+# Optional: first argument or ENV_FILE env var can point to an env file (e.g. .env.production)
+ENV_FILE="${ENV_FILE:-}"
+if [ -z "$ENV_FILE" ] && [ -n "${1:-}" ]; then
+  ENV_FILE="$1"
+fi
+
+# Load from explicit env file first (if provided)
+if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
+  export $(grep -v '^#' "$ENV_FILE" | xargs)
+fi
+
+# Then, if API_KEY still empty, fall back to local .env
+if [ -z "${API_KEY:-}" ] && [ -f .env ]; then
   export $(grep -v '^#' .env | xargs)
 fi
 
 API_KEY="${API_KEY:-your-api-key-here}"
 PORT="${PORT:-3000}"
 BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
+# Extra curl options (e.g. -k for self-signed SSL). You can override this via env.
+CURL_OPTS="${CURL_OPTS:--k}"
 
 echo -e "${YELLOW}=== WhatsApp Automation API Test Script ===${NC}\n"
 
 # Test 1: Health Check
 echo -e "${YELLOW}1. Testing Health Check...${NC}"
-response=$(curl -s -w "\n%{http_code}" "${BASE_URL}/health")
+response=$(curl ${CURL_OPTS} -s -w "\n%{http_code}" "${BASE_URL}/health")
 http_code=$(echo "$response" | tail -n1)
 body=$(echo "$response" | sed '$d')
 if [ "$http_code" -eq 200 ]; then
@@ -36,9 +49,10 @@ echo ""
 
 # Test 2: Create or Reuse Session
 echo -e "${YELLOW}2. Session Management...${NC}"
+echo -e "${API_KEY}"
 
 # Check if there are existing sessions
-check_response=$(curl -s -w "\n%{http_code}" -X GET "${BASE_URL}/api/sessions" \
+check_response=$(curl ${CURL_OPTS} -s -w "\n%{http_code}" -X GET "${BASE_URL}/api/sessions" \
     -H "X-API-Key: ${API_KEY}" 2>/dev/null)
 check_http_code=$(echo "$check_response" | tail -n1)
 check_body=$(echo "$check_response" | sed '$d')
@@ -69,7 +83,7 @@ if [ "$session_option" = "2" ]; then
     # List sessions
     while true; do
         echo -e "${YELLOW}Listing active sessions...${NC}"
-        response=$(curl -s -w "\n%{http_code}" -X GET "${BASE_URL}/api/sessions" \
+        response=$(curl ${CURL_OPTS} -s -w "\n%{http_code}" -X GET "${BASE_URL}/api/sessions" \
             -H "X-API-Key: ${API_KEY}")
         http_code=$(echo "$response" | tail -n1)
         body=$(echo "$response" | sed '$d')
@@ -142,7 +156,7 @@ if [ "$session_option" = "2" ]; then
                 json_data="{\"cookies\": \"${escaped_cookies}\"}"
             fi
             
-            response=$(curl -s -w "\n%{http_code}" -X POST "${BASE_URL}/api/sessions" \
+            response=$(curl ${CURL_OPTS} -s -w "\n%{http_code}" -X POST "${BASE_URL}/api/sessions" \
                 -H "X-API-Key: ${API_KEY}" \
                 -H "Content-Type: application/json" \
                 -d "${json_data}")
@@ -167,7 +181,7 @@ if [ "$session_option" = "2" ]; then
         read -p "Enter existing session ID: " SESSION_ID
         if [ -n "$SESSION_ID" ]; then
             # Verify session exists
-            response=$(curl -s -w "\n%{http_code}" -X GET "${BASE_URL}/api/sessions/${SESSION_ID}" \
+            response=$(curl ${CURL_OPTS} -s -w "\n%{http_code}" -X GET "${BASE_URL}/api/sessions/${SESSION_ID}" \
                 -H "X-API-Key: ${API_KEY}")
             http_code=$(echo "$response" | tail -n1)
             if [ "$http_code" -eq 200 ]; then
@@ -197,7 +211,7 @@ elif [ "$session_option" = "3" ]; then
     read -p "Enter existing session ID: " SESSION_ID
     if [ -n "$SESSION_ID" ]; then
         # Verify session exists
-        response=$(curl -s -w "\n%{http_code}" -X GET "${BASE_URL}/api/sessions/${SESSION_ID}" \
+        response=$(curl ${CURL_OPTS} -s -w "\n%{http_code}" -X GET "${BASE_URL}/api/sessions/${SESSION_ID}" \
             -H "X-API-Key: ${API_KEY}")
         http_code=$(echo "$response" | tail -n1)
         if [ "$http_code" -eq 200 ]; then
@@ -229,7 +243,7 @@ elif [ "$session_option" = "1" ]; then
             json_data="{\"cookies\": \"${escaped_cookies}\"}"
         fi
         
-        response=$(curl -s -w "\n%{http_code}" -X POST "${BASE_URL}/api/sessions" \
+        response=$(curl ${CURL_OPTS} -s -w "\n%{http_code}" -X POST "${BASE_URL}/api/sessions" \
             -H "X-API-Key: ${API_KEY}" \
             -H "Content-Type: application/json" \
             -d "${json_data}")
@@ -284,7 +298,7 @@ if [ -n "$SESSION_ID" ]; then
     message=${message:-$DEFAULT_MESSAGE}
     
     if [ -n "$extension" ] && [ -n "$phone" ] && [ -n "$message" ]; then
-        response=$(curl -s -w "\n%{http_code}" -X POST "${BASE_URL}/api/sessions/${SESSION_ID}/send-message" \
+        response=$(curl ${CURL_OPTS} -s -w "\n%{http_code}" -X POST "${BASE_URL}/api/sessions/${SESSION_ID}/send-message" \
             -H "X-API-Key: ${API_KEY}" \
             -H "Content-Type: application/json" \
             -d "{\"extension\": \"${extension}\", \"phoneNumber\": \"${phone}\", \"message\": \"${message}\"}")
@@ -309,7 +323,7 @@ if [ -n "$SESSION_ID" ]; then
     read -p "Destroy session ${SESSION_ID}? (y/n) [n]: " confirm
     confirm=${confirm:-n}
     if [ "$confirm" = "y" ]; then
-        response=$(curl -s -w "\n%{http_code}" -X DELETE "${BASE_URL}/api/sessions/${SESSION_ID}" \
+        response=$(curl ${CURL_OPTS} -s -w "\n%{http_code}" -X DELETE "${BASE_URL}/api/sessions/${SESSION_ID}" \
             -H "X-API-Key: ${API_KEY}")
         
         http_code=$(echo "$response" | tail -n1)
@@ -332,7 +346,7 @@ fi
 
 # Test 5: Invalid API Key
 echo -e "${YELLOW}5. Testing Invalid API Key...${NC}"
-response=$(curl -s -w "\n%{http_code}" -X GET "${BASE_URL}/api/sessions" \
+response=$(curl ${CURL_OPTS} -s -w "\n%{http_code}" -X GET "${BASE_URL}/api/sessions" \
     -H "X-API-Key: invalid-key")
 http_code=$(echo "$response" | tail -n1)
 body=$(echo "$response" | sed '$d')

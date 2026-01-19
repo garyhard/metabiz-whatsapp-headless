@@ -373,6 +373,16 @@ pm2 deploy ecosystem.config.cjs production setup
 pm2 deploy ecosystem.config.cjs production
 ```
 
+**One-time server dependencies (Playwright):**
+
+On a fresh server, downloading Chromium is not enough — Playwright also needs OS libraries.
+If session creation fails with an error like `libatk-1.0.so.0: cannot open shared object file`, install deps once:
+
+```bash
+cd /opt/metabiz-whatsapp-headless/current
+npx playwright install-deps chromium
+```
+
 #### Option B: Manual PM2 start
 
 1. **Process Manager**: Use PM2 for process management
