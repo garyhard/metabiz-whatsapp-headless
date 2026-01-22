@@ -33,9 +33,6 @@ module.exports = {
       path: '/opt/metabiz-whatsapp-headless',
       'pre-setup': 'mkdir -p /opt/metabiz-whatsapp-headless/shared/{logs,profiles} && echo "⚠️  Remember to copy .env.production to /opt/metabiz-whatsapp-headless/shared/.env before first deploy"',
       'post-deploy': 'chmod +x /opt/metabiz-whatsapp-headless/current/deploy.sh && bash /opt/metabiz-whatsapp-headless/current/deploy.sh',
-      env: {
-        NODE_ENV: 'production',
-      },
     },
   },
 };
