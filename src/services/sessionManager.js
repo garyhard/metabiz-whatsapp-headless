@@ -69,9 +69,12 @@ function startActivitySimulation(page, sessionId) {
 /**
  * Create a new session
  * @param {string} cookieString - Cookie string in format "name=value; name2=value2"
+ * @param {string} [existingSessionId] - Optional session ID to reuse (for recreation)
+ * @param {Object} [existingFingerprint] - Optional fingerprint to reuse (for recreation)
+ * @param {Object} [proxy] - Optional proxy configuration {server, username?, password?}
  * @returns {Promise<string>} Session ID
  */
-export async function createSession(cookieString, existingSessionId = null, existingFingerprint = null) {
+export async function createSession(cookieString, existingSessionId = null, existingFingerprint = null, proxy = null) {
   if (!cookieString || !cookieString.trim()) {
     throw new InvalidInputError('Cookies are required');
   }
@@ -84,8 +87,11 @@ export async function createSession(cookieString, existingSessionId = null, exis
   let activityTimer = null;
 
   try {
-    // Create browser instance with existing fingerprint if provided (for recreation)
-    const browserInstance = await createBrowser(sessionId, existingFingerprint);
+    // Use provided proxy, or fall back to config proxy, or null
+    const proxyConfig = proxy || config.proxy || null;
+    
+    // Create browser instance with existing fingerprint and proxy if provided (for recreation)
+    const browserInstance = await createBrowser(sessionId, existingFingerprint, proxyConfig);
     browser = browserInstance.browser;
     context = browserInstance.context;
     page = browserInstance.page;
@@ -128,6 +134,42 @@ export async function createSession(cookieString, existingSessionId = null, exis
     // Log page title to verify it loaded correctly
     const pageTitle = await page.title();
     console.log(`[SessionManager] Page title: ${pageTitle}`);
+    
+    // Verify proxy is working by checking IP address
+    let ipAddress = null;
+    if (proxyConfig && proxyConfig.server) {
+      try {
+        console.log(`[SessionManager] Verifying proxy connection...`);
+        const ipCheckPage = await context.newPage();
+        await ipCheckPage.goto('https://api.ipify.org?format=json', {
+          waitUntil: 'networkidle',
+          timeout: 10000,
+        });
+        const ipResponse = await ipCheckPage.textContent('body');
+        const ipData = JSON.parse(ipResponse);
+        ipAddress = ipData.ip;
+        console.log(`[SessionManager] ✓ Proxy working! Browser IP: ${ipAddress}`);
+        await ipCheckPage.close();
+      } catch (error) {
+        console.warn(`[SessionManager] ⚠️  Could not verify proxy IP (this may be normal): ${error.message}`);
+      }
+    } else {
+      // Check IP even without proxy to show server IP
+      try {
+        const ipCheckPage = await context.newPage();
+        await ipCheckPage.goto('https://api.ipify.org?format=json', {
+          waitUntil: 'networkidle',
+          timeout: 10000,
+        });
+        const ipResponse = await ipCheckPage.textContent('body');
+        const ipData = JSON.parse(ipResponse);
+        ipAddress = ipData.ip;
+        console.log(`[SessionManager] Browser IP (no proxy): ${ipAddress}`);
+        await ipCheckPage.close();
+      } catch (error) {
+        // Ignore IP check errors
+      }
+    }
 
     // Start activity simulation
     activityTimer = startActivitySimulation(page, sessionId);
@@ -141,19 +183,23 @@ export async function createSession(cookieString, existingSessionId = null, exis
       createdAt: Date.now(),
       lastActivity: Date.now(),
       fingerprint: browserInstance.fingerprint, // Save the fingerprint
+      ipAddress: ipAddress, // Save the IP address
     };
     sessions.set(sessionId, sessionData);
 
-    // Save session metadata to disk (for dev mode persistence)
-    // Only save if session was successfully created (we're past the error handling)
-    if (config.devMode) {
-      await saveSessionMetadata(sessionId, sessionData, cookieString);
-    }
+        // Save session metadata to disk (for dev mode persistence)
+        // Only save if session was successfully created (we're past the error handling)
+        if (config.devMode) {
+          await saveSessionMetadata(sessionId, sessionData, cookieString, proxyConfig);
+        }
 
     console.log(`[SessionManager] ✓ Session created successfully: ${sessionId}`);
     console.log(`[SessionManager] Active sessions: ${sessions.size}`);
     
-    return sessionId;
+    return {
+      sessionId,
+      ipAddress,
+    };
   } catch (error) {
     // Cleanup on error
     if (activityTimer) clearInterval(activityTimer);
@@ -280,7 +326,7 @@ export function getSessionInfo(sessionId) {
 /**
  * Save session metadata to disk
  */
-async function saveSessionMetadata(sessionId, sessionData, cookieString) {
+async function saveSessionMetadata(sessionId, sessionData, cookieString, proxy = null) {
   try {
     let metadata = {};
     try {
@@ -297,6 +343,7 @@ async function saveSessionMetadata(sessionId, sessionData, cookieString) {
       profilePath: `session-${sessionId}`,
       cookieString: cookieString, // Save the cookie string for reconnection
       fingerprint: sessionData.fingerprint, // Save the fingerprint for recreation
+      proxy: proxy || null, // Save proxy config if provided
     };
 
     await fs.writeFile(SESSIONS_FILE, JSON.stringify(metadata, null, 2));
@@ -357,11 +404,19 @@ async function recreateSession(metadata) {
 
     console.log(`[SessionManager] Recreating session ${metadata.sessionId} with saved cookie string and fingerprint...`);
     
-    // Create a new session using the saved cookie string, sessionId, and fingerprint
-    const sessionId = await createSession(metadata.cookieString, metadata.sessionId, metadata.fingerprint);
+    // Use saved proxy, or fall back to config proxy, or null
+    const proxyConfig = metadata.proxy || config.proxy || null;
     
-    console.log(`[SessionManager] ✓ Successfully recreated session ${sessionId}`);
-    return sessionId;
+    // Create a new session using the saved cookie string, sessionId, fingerprint, and proxy
+    const result = await createSession(
+      metadata.cookieString,
+      metadata.sessionId,
+      metadata.fingerprint,
+      proxyConfig
+    );
+    
+    console.log(`[SessionManager] ✓ Successfully recreated session ${result.sessionId}`);
+    return result.sessionId;
   } catch (error) {
     console.warn(`[SessionManager] Failed to recreate session ${metadata.sessionId}: ${error.message}`);
     return null;

@@ -15,10 +15,21 @@ if (!API_KEY) {
   throw new Error('API_KEY environment variable is required');
 }
 
+// Proxy configuration from environment variables
+let defaultProxy = null;
+if (process.env.PROXY_SERVER) {
+  defaultProxy = {
+    server: process.env.PROXY_SERVER,
+    username: process.env.PROXY_USERNAME || undefined,
+    password: process.env.PROXY_PASSWORD || undefined,
+  };
+}
+
 export const config = {
   apiKey: API_KEY,
   port: PORT,
   devMode: DEV_MODE,
+  proxy: defaultProxy,
   browser: {
     // Allow non-headless mode for debugging (set HEADLESS=false in .env)
     headless: process.env.HEADLESS !== 'false',

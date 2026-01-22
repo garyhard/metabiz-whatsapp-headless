@@ -15,9 +15,10 @@ const __dirname = path.dirname(__filename);
  * Create a browser instance with unique fingerprint and persistent context
  * @param {string} sessionId - Unique session identifier
  * @param {Object} [existingFingerprint] - Optional fingerprint to reuse (for session recreation)
+ * @param {Object} [proxy] - Optional proxy configuration {server, username?, password?}
  * @returns {Promise<{browser: Browser, context: BrowserContext, page: Page, fingerprint: Object}>}
  */
-export async function createBrowser(sessionId, existingFingerprint = null) {
+export async function createBrowser(sessionId, existingFingerprint = null, proxy = null) {
   const fingerprint = existingFingerprint || generateFingerprint();
   const userDataDir = path.join(__dirname, '../../profiles', `session-${sessionId}`);
 
@@ -27,8 +28,8 @@ export async function createBrowser(sessionId, existingFingerprint = null) {
     args: config.browser.args,
   });
 
-  // Create persistent context with fingerprint
-  const context = await browser.newContext({
+  // Build context options
+  const contextOptions = {
     userDataDir,
     viewport: fingerprint.viewport,
     locale: fingerprint.locale, // Fixed to en-US
@@ -38,7 +39,27 @@ export async function createBrowser(sessionId, existingFingerprint = null) {
     extraHTTPHeaders: {
       'Accept-Language': 'en-US,en;q=0.9',
     },
-  });
+  };
+
+  // Add proxy if provided
+  if (proxy && proxy.server) {
+    contextOptions.proxy = {
+      server: proxy.server,
+    };
+    if (proxy.username) {
+      contextOptions.proxy.username = proxy.username;
+    }
+    if (proxy.password) {
+      contextOptions.proxy.password = proxy.password;
+    }
+    const authInfo = proxy.username ? ` (auth: ${proxy.username})` : ' (no auth)';
+    console.log(`[BrowserFactory] Using proxy: ${proxy.server}${authInfo}`);
+  } else {
+    console.log(`[BrowserFactory] No proxy configured`);
+  }
+
+  // Create persistent context with fingerprint
+  const context = await browser.newContext(contextOptions);
 
   // Override navigator and other properties to create unique fingerprint
   await context.addInitScript((fingerprint) => {

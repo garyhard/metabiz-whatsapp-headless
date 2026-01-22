@@ -22,6 +22,7 @@ router.get('/', async (req, res, next) => {
           sessionId: id,
           createdAt: session.createdAt,
           lastActivity: session.lastActivity,
+          ipAddress: session.ipAddress || null,
           status: 'active',
         };
       } catch {
@@ -53,6 +54,7 @@ router.get('/:sessionId', async (req, res, next) => {
       sessionId,
       createdAt: session.createdAt,
       lastActivity: session.lastActivity,
+      ipAddress: session.ipAddress || null,
       status: 'active',
     });
   } catch (error) {
@@ -72,7 +74,7 @@ router.get('/:sessionId', async (req, res, next) => {
  */
 router.post('/', async (req, res, next) => {
   try {
-    const { cookies } = req.body;
+    const { cookies, proxy } = req.body;
 
     if (!cookies || typeof cookies !== 'string') {
       return res.status(400).json({
@@ -81,10 +83,27 @@ router.post('/', async (req, res, next) => {
       });
     }
 
-    const sessionId = await createSession(cookies);
+    // Validate proxy if provided
+    let proxyConfig = null;
+    if (proxy) {
+      if (typeof proxy !== 'object' || !proxy.server) {
+        return res.status(400).json({
+          ok: false,
+          error: 'Invalid proxy format. Expected {server: string, username?: string, password?: string}.',
+        });
+      }
+      proxyConfig = {
+        server: proxy.server,
+        username: proxy.username || undefined,
+        password: proxy.password || undefined,
+      };
+    }
+
+    const result = await createSession(cookies, null, null, proxyConfig);
 
     res.status(201).json({
-      sessionId,
+      sessionId: result.sessionId,
+      ipAddress: result.ipAddress,
       status: 'active',
     });
   } catch (error) {

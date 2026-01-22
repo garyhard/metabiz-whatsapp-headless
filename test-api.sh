@@ -144,16 +144,61 @@ if [ "$session_option" = "2" ]; then
             echo -e "${YELLOW}Skipping session creation${NC}\n"
             SESSION_ID=""
         else
-            # Properly escape the cookie string for JSON using jq (most reliable)
+            # Ask for proxy (optional)
+            read -p "Enter proxy server (e.g., http://proxy.example.com:8080 or socks5://proxy.example.com:1080) [optional]: " proxy_server
+            proxy_username=""
+            proxy_password=""
+            if [ -n "$proxy_server" ]; then
+                read -p "Enter proxy username [optional]: " proxy_username
+                read -p "Enter proxy password [optional]: " proxy_password
+            fi
+            
+            # Properly escape the cookie string and build JSON using jq (most reliable)
             if command -v jq &> /dev/null; then
-                json_data=$(jq -n --arg cookies "$cookie_string" '{cookies: $cookies}')
+                if [ -n "$proxy_server" ]; then
+                    if [ -n "$proxy_username" ] && [ -n "$proxy_password" ]; then
+                        json_data=$(jq -n --arg cookies "$cookie_string" --arg server "$proxy_server" --arg username "$proxy_username" --arg password "$proxy_password" '{cookies: $cookies, proxy: {server: $server, username: $username, password: $password}}')
+                    elif [ -n "$proxy_username" ]; then
+                        json_data=$(jq -n --arg cookies "$cookie_string" --arg server "$proxy_server" --arg username "$proxy_username" '{cookies: $cookies, proxy: {server: $server, username: $username}}')
+                    else
+                        json_data=$(jq -n --arg cookies "$cookie_string" --arg server "$proxy_server" '{cookies: $cookies, proxy: {server: $server}}')
+                    fi
+                else
+                    json_data=$(jq -n --arg cookies "$cookie_string" '{cookies: $cookies}')
+                fi
             else
                 # Fallback: Use printf with %q for shell escaping, then manually construct JSON
                 escaped_cookies=$(printf '%q' "$cookie_string")
                 escaped_cookies=${escaped_cookies#\'}
                 escaped_cookies=${escaped_cookies%\'}
                 escaped_cookies=$(echo "$escaped_cookies" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
-                json_data="{\"cookies\": \"${escaped_cookies}\"}"
+                if [ -n "$proxy_server" ]; then
+                    escaped_server=$(printf '%q' "$proxy_server")
+                    escaped_server=${escaped_server#\'}
+                    escaped_server=${escaped_server%\'}
+                    escaped_server=$(echo "$escaped_server" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+                    if [ -n "$proxy_username" ] && [ -n "$proxy_password" ]; then
+                        escaped_user=$(printf '%q' "$proxy_username")
+                        escaped_user=${escaped_user#\'}
+                        escaped_user=${escaped_user%\'}
+                        escaped_user=$(echo "$escaped_user" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+                        escaped_pass=$(printf '%q' "$proxy_password")
+                        escaped_pass=${escaped_pass#\'}
+                        escaped_pass=${escaped_pass%\'}
+                        escaped_pass=$(echo "$escaped_pass" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+                        json_data="{\"cookies\": \"${escaped_cookies}\", \"proxy\": {\"server\": \"${escaped_server}\", \"username\": \"${escaped_user}\", \"password\": \"${escaped_pass}\"}}"
+                    elif [ -n "$proxy_username" ]; then
+                        escaped_user=$(printf '%q' "$proxy_username")
+                        escaped_user=${escaped_user#\'}
+                        escaped_user=${escaped_user%\'}
+                        escaped_user=$(echo "$escaped_user" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+                        json_data="{\"cookies\": \"${escaped_cookies}\", \"proxy\": {\"server\": \"${escaped_server}\", \"username\": \"${escaped_user}\"}}"
+                    else
+                        json_data="{\"cookies\": \"${escaped_cookies}\", \"proxy\": {\"server\": \"${escaped_server}\"}}"
+                    fi
+                else
+                    json_data="{\"cookies\": \"${escaped_cookies}\"}"
+                fi
             fi
             
             response=$(curl ${CURL_OPTS} -s -w "\n%{http_code}" -X POST "${BASE_URL}/api/sessions" \
@@ -184,10 +229,13 @@ if [ "$session_option" = "2" ]; then
             response=$(curl ${CURL_OPTS} -s -w "\n%{http_code}" -X GET "${BASE_URL}/api/sessions/${SESSION_ID}" \
                 -H "X-API-Key: ${API_KEY}")
             http_code=$(echo "$response" | tail -n1)
+            body=$(echo "$response" | sed '$d')
             if [ "$http_code" -eq 200 ]; then
                 echo -e "${GREEN}✓ Session found and ready to use${NC}"
+                echo "Response: $body" | jq '.' 2>/dev/null || echo "Response: $body"
             else
                 echo -e "${RED}✗ Session not found or invalid${NC}"
+                echo "Response: $body"
                 SESSION_ID=""
             fi
         fi
@@ -214,10 +262,13 @@ elif [ "$session_option" = "3" ]; then
         response=$(curl ${CURL_OPTS} -s -w "\n%{http_code}" -X GET "${BASE_URL}/api/sessions/${SESSION_ID}" \
             -H "X-API-Key: ${API_KEY}")
         http_code=$(echo "$response" | tail -n1)
+        body=$(echo "$response" | sed '$d')
         if [ "$http_code" -eq 200 ]; then
             echo -e "${GREEN}✓ Session found and ready to use${NC}"
+            echo "Response: $body" | jq '.' 2>/dev/null || echo "Response: $body"
         else
             echo -e "${RED}✗ Session not found or invalid${NC}"
+            echo "Response: $body"
             SESSION_ID=""
         fi
     fi
@@ -231,16 +282,61 @@ elif [ "$session_option" = "1" ]; then
         echo -e "${YELLOW}Skipping session creation${NC}\n"
         SESSION_ID=""
     else
-        # Properly escape the cookie string for JSON using jq (most reliable)
+        # Ask for proxy (optional)
+        read -p "Enter proxy server (e.g., http://proxy.example.com:8080 or socks5://proxy.example.com:1080) [optional]: " proxy_server
+        proxy_username=""
+        proxy_password=""
+        if [ -n "$proxy_server" ]; then
+            read -p "Enter proxy username [optional]: " proxy_username
+            read -p "Enter proxy password [optional]: " proxy_password
+        fi
+        
+        # Properly escape the cookie string and build JSON using jq (most reliable)
         if command -v jq &> /dev/null; then
-            json_data=$(jq -n --arg cookies "$cookie_string" '{cookies: $cookies}')
+            if [ -n "$proxy_server" ]; then
+                if [ -n "$proxy_username" ] && [ -n "$proxy_password" ]; then
+                    json_data=$(jq -n --arg cookies "$cookie_string" --arg server "$proxy_server" --arg username "$proxy_username" --arg password "$proxy_password" '{cookies: $cookies, proxy: {server: $server, username: $username, password: $password}}')
+                elif [ -n "$proxy_username" ]; then
+                    json_data=$(jq -n --arg cookies "$cookie_string" --arg server "$proxy_server" --arg username "$proxy_username" '{cookies: $cookies, proxy: {server: $server, username: $username}}')
+                else
+                    json_data=$(jq -n --arg cookies "$cookie_string" --arg server "$proxy_server" '{cookies: $cookies, proxy: {server: $server}}')
+                fi
+            else
+                json_data=$(jq -n --arg cookies "$cookie_string" '{cookies: $cookies}')
+            fi
         else
             # Fallback: Use printf with %q for shell escaping, then manually construct JSON
             escaped_cookies=$(printf '%q' "$cookie_string")
             escaped_cookies=${escaped_cookies#\'}
             escaped_cookies=${escaped_cookies%\'}
             escaped_cookies=$(echo "$escaped_cookies" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
-            json_data="{\"cookies\": \"${escaped_cookies}\"}"
+            if [ -n "$proxy_server" ]; then
+                escaped_server=$(printf '%q' "$proxy_server")
+                escaped_server=${escaped_server#\'}
+                escaped_server=${escaped_server%\'}
+                escaped_server=$(echo "$escaped_server" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+                if [ -n "$proxy_username" ] && [ -n "$proxy_password" ]; then
+                    escaped_user=$(printf '%q' "$proxy_username")
+                    escaped_user=${escaped_user#\'}
+                    escaped_user=${escaped_user%\'}
+                    escaped_user=$(echo "$escaped_user" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+                    escaped_pass=$(printf '%q' "$proxy_password")
+                    escaped_pass=${escaped_pass#\'}
+                    escaped_pass=${escaped_pass%\'}
+                    escaped_pass=$(echo "$escaped_pass" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+                    json_data="{\"cookies\": \"${escaped_cookies}\", \"proxy\": {\"server\": \"${escaped_server}\", \"username\": \"${escaped_user}\", \"password\": \"${escaped_pass}\"}}"
+                elif [ -n "$proxy_username" ]; then
+                    escaped_user=$(printf '%q' "$proxy_username")
+                    escaped_user=${escaped_user#\'}
+                    escaped_user=${escaped_user%\'}
+                    escaped_user=$(echo "$escaped_user" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+                    json_data="{\"cookies\": \"${escaped_cookies}\", \"proxy\": {\"server\": \"${escaped_server}\", \"username\": \"${escaped_user}\"}}"
+                else
+                    json_data="{\"cookies\": \"${escaped_cookies}\", \"proxy\": {\"server\": \"${escaped_server}\"}}"
+                fi
+            else
+                json_data="{\"cookies\": \"${escaped_cookies}\"}"
+            fi
         fi
         
         response=$(curl ${CURL_OPTS} -s -w "\n%{http_code}" -X POST "${BASE_URL}/api/sessions" \

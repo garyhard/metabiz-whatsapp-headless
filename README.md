@@ -57,6 +57,9 @@ API_KEY=your-secret-api-key-here
 PORT=3000
 DEV_MODE=false
 HEADLESS=true
+PROXY_SERVER=http://proxy.example.com:8080
+PROXY_USERNAME=your-proxy-username
+PROXY_PASSWORD=your-proxy-password
 EOF
 ```
 
@@ -66,6 +69,9 @@ API_KEY=your-secret-api-key-here
 PORT=3000
 DEV_MODE=false
 HEADLESS=true
+PROXY_SERVER=http://proxy.example.com:8080
+PROXY_USERNAME=your-proxy-username
+PROXY_PASSWORD=your-proxy-password
 ```
 
 **Environment Variables:**
@@ -73,6 +79,18 @@ HEADLESS=true
 - `PORT` (optional): Server port (default: 3000)
 - `DEV_MODE` (optional): Set to `true` to preserve sessions across server restarts (default: `false`)
 - `HEADLESS` (optional): Set to `false` to run browser in visible mode for debugging (default: `true`)
+- `PROXY_SERVER` (optional): Proxy server URL. Formats:
+  - `http://proxy.example.com:8080` - HTTP proxy (most common)
+  - `https://proxy.example.com:8080` - HTTP proxy with TLS encryption
+  - `socks5://proxy.example.com:1080` - SOCKS5 proxy (supports any protocol)
+  - `proxy.example.com:8080` - HTTP proxy (protocol assumed if omitted)
+- `PROXY_USERNAME` (optional): Proxy username (required if proxy requires authentication)
+- `PROXY_PASSWORD` (optional): Proxy password (required if proxy requires authentication)
+
+**Proxy Protocol Notes:**
+- **HTTP/HTTPS Proxy**: Application-level proxy designed for HTTP/HTTPS traffic. `https://` means the connection to the proxy is encrypted, but it still proxies HTTP/HTTPS traffic.
+- **SOCKS5 Proxy**: Transport-level proxy that can handle any protocol (HTTP, SMTP, FTP, etc.). More flexible but typically slower than HTTP proxies.
+- **Protocol Prefix**: If you omit the protocol (e.g., just `192.168.1.1:8080`), Playwright assumes `http://` by default.
 
 **Note**: The `.env` file is already in `.gitignore` and will not be committed to version control.
 
@@ -127,9 +145,11 @@ export API_KEY=your-api-key-here
 The script will guide you through:
 1. Health check
 2. Creating a session (requires Facebook cookies)
-3. Sending a message
-4. Destroying a session
-5. Testing invalid API key
+3. Listing sessions
+4. Getting session details
+5. Sending a message
+6. Destroying a session
+7. Testing invalid API key
 
 ### Manual Testing with curl
 
@@ -146,7 +166,20 @@ curl -X POST http://localhost:3000/api/sessions \
   -d '{"cookies": "datr=abc123;sb=def456;c_user=123456789;xs=xyz789;fr=token123;"}'
 ```
 
-#### 3. Send Message
+#### 3. List All Sessions
+```bash
+curl -X GET http://localhost:3000/api/sessions \
+  -H "X-API-Key: your-api-key-here"
+```
+
+#### 4. Get Session Details
+```bash
+# Replace SESSION_ID with the sessionId from step 2
+curl -X GET http://localhost:3000/api/sessions/SESSION_ID \
+  -H "X-API-Key: your-api-key-here"
+```
+
+#### 5. Send Message
 ```bash
 # Replace SESSION_ID with the sessionId from step 2
 curl -X POST http://localhost:3000/api/sessions/SESSION_ID/send-message \
@@ -159,7 +192,7 @@ curl -X POST http://localhost:3000/api/sessions/SESSION_ID/send-message \
   }'
 ```
 
-#### 4. Destroy Session
+#### 6. Destroy Session
 ```bash
 curl -X DELETE http://localhost:3000/api/sessions/SESSION_ID \
   -H "X-API-Key: your-api-key-here"
@@ -191,17 +224,34 @@ Content-Type: application/json
 **Body:**
 ```json
 {
-  "cookies": "datr=...;sb=...;c_user=...;xs=...;fr=...;"
+  "cookies": "datr=...;sb=...;c_user=...;xs=...;fr=...;",
+  "proxy": {
+    "server": "http://proxy.example.com:8080",
+    "username": "user",
+    "password": "pass"
+  }
+```
+
+**Proxy Server Formats:**
+- `http://proxy.example.com:8080` - HTTP proxy (most common)
+- `https://proxy.example.com:8080` - HTTP proxy with TLS encryption
+- `socks5://proxy.example.com:1080` - SOCKS5 proxy
+- `proxy.example.com:8080` - HTTP proxy (protocol assumed if omitted)
 }
 ```
+
+**Note:** The `proxy` field is optional. If not provided, the service will use the proxy configured via `PROXY_SERVER` environment variable (if set). If a proxy is provided in the request, it will override the environment variable proxy for this session.
 
 **Response (201):**
 ```json
 {
   "sessionId": "uuid",
+  "ipAddress": "123.45.67.89",
   "status": "active"
 }
 ```
+
+**Note:** `ipAddress` shows the IP address the browser is using (proxy IP if proxy is configured, otherwise server IP). This helps verify that the proxy is working correctly.
 
 **Errors:**
 - `401`: Invalid API key
@@ -216,7 +266,77 @@ curl -X POST http://localhost:3000/api/sessions \
   -d '{"cookies": "datr=abc123;sb=def456;c_user=123456789;xs=xyz789;fr=token123;"}'
 ```
 
-### 2. Destroy Session
+### 2. List All Sessions
+
+Get a list of all active sessions.
+
+**Endpoint:** `GET /api/sessions`
+
+**Headers:**
+```
+X-API-Key: <your-api-key>
+```
+
+**Response (200):**
+```json
+{
+  "ok": true,
+  "sessions": [
+    {
+      "sessionId": "uuid",
+      "createdAt": 1234567890123,
+      "lastActivity": 1234567890123,
+      "ipAddress": "123.45.67.89",
+      "status": "active"
+    }
+  ],
+  "count": 1
+}
+```
+
+**Errors:**
+- `401`: Invalid API key
+
+**Example:**
+```bash
+curl -X GET http://localhost:3000/api/sessions \
+  -H "X-API-Key: your-api-key"
+```
+
+### 3. Get Session Details
+
+Get details for a specific session.
+
+**Endpoint:** `GET /api/sessions/:sessionId`
+
+**Headers:**
+```
+X-API-Key: <your-api-key>
+```
+
+**Response (200):**
+```json
+{
+  "ok": true,
+  "sessionId": "uuid",
+  "createdAt": 1234567890123,
+  "lastActivity": 1234567890123,
+  "ipAddress": "123.45.67.89",
+  "status": "active"
+}
+```
+
+**Errors:**
+- `401`: Invalid API key
+- `404`: Session not found
+
+**Example:**
+```bash
+curl -X GET http://localhost:3000/api/sessions/123e4567-e89b-12d3-a456-426614174000 \
+  -H "X-API-Key: your-api-key"
+```
+
+### 4. Destroy Session
 
 Destroy a browser session and clean up resources.
 
@@ -245,7 +365,7 @@ curl -X DELETE http://localhost:3000/api/sessions/123e4567-e89b-12d3-a456-426614
   -H "X-API-Key: your-api-key"
 ```
 
-### 3. Send Message
+### 5. Send Message
 
 Send a WhatsApp message through a session.
 
