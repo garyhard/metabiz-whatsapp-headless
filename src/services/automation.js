@@ -45,7 +45,10 @@ function isBadAuthUrl(url) {
 async function ensureOnInbox(page, label = 'Automation') {
   const url = page.url();
   if (isBadAuthUrl(url)) {
-    throw new AutomationError(`${label}: Redirected to auth/checkpoint URL: ${url}`);
+    throw new AutomationError(
+      `${label}: Redirected to auth/checkpoint URL: ${url}`,
+      { url }
+    );
   }
   const isBusiness = url.includes('business.facebook.com');
   const isInbox = url.includes('inbox');
@@ -54,14 +57,17 @@ async function ensureOnInbox(page, label = 'Automation') {
     try {
       await page.goto(INBOX_URL, { waitUntil: 'networkidle', timeout: 30000 });
     } catch (error) {
-      throw new AutomationError(`${label}: Unexpected URL after reload: ${url}`);
+      throw new AutomationError(`${label}: Unexpected URL after reload: ${url}`, { url });
     }
     const nextUrl = page.url();
     if (isBadAuthUrl(nextUrl)) {
-      throw new AutomationError(`${label}: Redirected to auth/checkpoint URL: ${nextUrl}`);
+      throw new AutomationError(
+        `${label}: Redirected to auth/checkpoint URL: ${nextUrl}`,
+        { url: nextUrl }
+      );
     }
     if (!nextUrl.includes('business.facebook.com') || (!nextUrl.includes('inbox') && !nextUrl.includes('messages'))) {
-      throw new AutomationError(`${label}: Unexpected URL after reload: ${nextUrl}`);
+      throw new AutomationError(`${label}: Unexpected URL after reload: ${nextUrl}`, { url: nextUrl });
     }
   }
 }
@@ -962,8 +968,14 @@ export async function checkSessionFlow(page) {
     console.error(`[Automation] Error: ${error.message}`);
     console.error('[Automation] ========================================');
     if (error instanceof AutomationError) {
+      if (!error.details) {
+        error.details = { url: page.url() };
+      }
       throw error;
     }
-    throw new AutomationError(`Session check failed: ${error.message}`, error);
+    throw new AutomationError(
+      `Session check failed: ${error.message}`,
+      { url: page.url(), cause: error }
+    );
   }
 }
