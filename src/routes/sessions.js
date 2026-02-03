@@ -121,12 +121,16 @@ router.post('/', async (req, res, next) => {
       return res.status(400).json({
         ok: false,
         error: error.message,
+        errorCode: 'invalid_input',
       });
     }
     if (error instanceof SessionAlreadyExistsError) {
       return res.status(409).json({
         ok: false,
         error: error.message,
+        errorCode: 'session_exists',
+        cUser: error.cUser || null,
+        existingSessionId: error.sessionId || null,
       });
     }
     next(error);
@@ -152,6 +156,8 @@ router.delete('/:sessionId', async (req, res, next) => {
       return res.status(404).json({
         ok: false,
         error: error.message,
+        errorCode: 'session_not_found',
+        sessionId,
       });
     }
     next(error);
@@ -175,12 +181,15 @@ router.post('/:sessionId/check', async (req, res, next) => {
       return res.status(404).json({
         ok: false,
         error: error.message,
+        errorCode: 'session_not_found',
+        sessionId,
       });
     }
     if (error instanceof InvalidInputError) {
       return res.status(400).json({
         ok: false,
         error: error.message,
+        errorCode: 'invalid_input',
       });
     }
     next(error);
@@ -214,12 +223,15 @@ router.put('/:sessionId/cookies', async (req, res, next) => {
       return res.status(404).json({
         ok: false,
         error: error.message,
+        errorCode: 'session_not_found',
+        sessionId,
       });
     }
     if (error instanceof InvalidInputError) {
       return res.status(400).json({
         ok: false,
         error: error.message,
+        errorCode: 'invalid_input',
       });
     }
     next(error);

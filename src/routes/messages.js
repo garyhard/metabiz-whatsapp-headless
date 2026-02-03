@@ -43,18 +43,22 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
       return res.status(404).json({
         ok: false,
         error: error.message,
+        errorCode: 'session_not_found',
+        sessionId,
       });
     }
     if (error instanceof InvalidInputError) {
       return res.status(400).json({
         ok: false,
         error: error.message,
+        errorCode: 'invalid_input',
       });
     }
     if (error instanceof AutomationError) {
       return res.status(500).json({
         ok: false,
         error: error.message,
+        errorCode: 'automation_error',
         details: error.details,
       });
     }
@@ -63,4 +67,3 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
 });
 
 export default router;
-

@@ -36,9 +36,12 @@ export class BrowserCrashError extends Error {
 }
 
 export class SessionAlreadyExistsError extends Error {
-  constructor(cUser) {
-    super(`Session already exists for c_user: ${cUser}`);
+  constructor(cUser, sessionId = null) {
+    const suffix = sessionId ? ` (session_id=${sessionId})` : '';
+    super(`Session already exists for c_user: ${cUser}${suffix}`);
     this.name = 'SessionAlreadyExistsError';
     this.statusCode = 409;
+    this.cUser = cUser;
+    this.sessionId = sessionId;
   }
 }

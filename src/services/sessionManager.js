@@ -355,7 +355,7 @@ export async function createSession(
   if (!skipCUserCheck) {
     const existing = sessionStore.getByCUser(finalCUser);
     if (existing && existing.sessionId !== existingSessionId) {
-      throw new SessionAlreadyExistsError(finalCUser);
+      throw new SessionAlreadyExistsError(finalCUser, existing.sessionId);
     }
   }
 
