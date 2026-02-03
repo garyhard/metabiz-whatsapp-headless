@@ -7,3 +7,4 @@ profiles/
 .env.production
 profiles/sessions.json
 
+cookie.json

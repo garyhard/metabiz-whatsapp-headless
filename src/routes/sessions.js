@@ -3,7 +3,15 @@
  */
 
 import express from 'express';
-import { createSession, destroySession, getAllSessionIds, getSession } from '../services/sessionManager.js';
+import {
+  createSession,
+  destroySession,
+  getAllSessionIds,
+  getSession,
+  checkSessionForSession,
+  updateSessionCookies,
+  cleanupSessions,
+} from '../services/sessionManager.js';
 import { InvalidInputError, SessionNotFoundError } from '../errors.js';
 
 const router = express.Router();
@@ -23,7 +31,7 @@ router.get('/', async (req, res, next) => {
           createdAt: session.createdAt,
           lastActivity: session.lastActivity,
           ipAddress: session.ipAddress || null,
-          status: 'active',
+          status: session.page && session.context && session.browser ? 'active' : 'suspended',
         };
       } catch {
         return null;
@@ -76,10 +84,12 @@ router.post('/', async (req, res, next) => {
   try {
     const { cookies, proxy } = req.body;
 
-    if (!cookies || typeof cookies !== 'string') {
+    const cookiesIsString = typeof cookies === 'string';
+    const cookiesIsArray = Array.isArray(cookies);
+    if (!cookies || (!cookiesIsString && !cookiesIsArray)) {
       return res.status(400).json({
         ok: false,
-        error: 'Invalid cookies format. Expected a string.',
+        error: 'Invalid cookies format. Expected a string or array.',
       });
     }
 
@@ -142,5 +152,89 @@ router.delete('/:sessionId', async (req, res, next) => {
   }
 });
 
-export default router;
+/**
+ * POST /api/sessions/:sessionId/check
+ * Validate session can run WhatsApp flow (no message sent)
+ */
+router.post('/:sessionId/check', async (req, res, next) => {
+  try {
+    const { sessionId } = req.params;
+    await checkSessionForSession(sessionId);
+    res.json({
+      ok: true,
+      message: 'Session check ok',
+    });
+  } catch (error) {
+    if (error instanceof SessionNotFoundError) {
+      return res.status(404).json({
+        ok: false,
+        error: error.message,
+      });
+    }
+    if (error instanceof InvalidInputError) {
+      return res.status(400).json({
+        ok: false,
+        error: error.message,
+      });
+    }
+    next(error);
+  }
+});
 
+/**
+ * PUT /api/sessions/:sessionId/cookies
+ * Update cookies for an existing session
+ */
+router.put('/:sessionId/cookies', async (req, res, next) => {
+  try {
+    const { sessionId } = req.params;
+    const { cookies } = req.body || {};
+    const cookiesIsString = typeof cookies === 'string';
+    const cookiesIsArray = Array.isArray(cookies);
+    if (!cookies || (!cookiesIsString && !cookiesIsArray)) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Invalid cookies format. Expected a string or array.',
+      });
+    }
+
+    await updateSessionCookies(sessionId, cookies);
+    res.json({
+      ok: true,
+      message: 'Cookies updated',
+    });
+  } catch (error) {
+    if (error instanceof SessionNotFoundError) {
+      return res.status(404).json({
+        ok: false,
+        error: error.message,
+      });
+    }
+    if (error instanceof InvalidInputError) {
+      return res.status(400).json({
+        ok: false,
+        error: error.message,
+      });
+    }
+    next(error);
+  }
+});
+
+/**
+ * POST /api/sessions/cleanup
+ * Destroy all sessions except those listed in keep
+ */
+router.post('/cleanup', async (req, res, next) => {
+  try {
+    const keep = Array.isArray(req.body?.keep) ? req.body.keep : [];
+    const result = await cleanupSessions(keep);
+    res.json({
+      ok: true,
+      ...result,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+export default router;

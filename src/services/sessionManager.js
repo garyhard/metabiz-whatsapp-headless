@@ -4,8 +4,8 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import { createBrowser } from './browserFactory.js';
-import { parseCookieString, toPlaywrightCookies } from '../utils/cookies.js';
-import { sendMessage } from './automation.js';
+import { normalizeCookiesInput, parseCookieString, toPlaywrightCookies, toPlaywrightCookiesFromJson } from '../utils/cookies.js';
+import { sendMessage, checkSessionFlow } from './automation.js';
 import { SessionNotFoundError, InvalidInputError, BrowserCrashError } from '../errors.js';
 import { config } from '../config.js';
 import fs from 'fs/promises';
@@ -20,6 +20,226 @@ const SESSIONS_FILE = path.join(__dirname, '../../profiles/sessions.json');
 
 // In-memory session registry
 const sessions = new Map();
+// Simple per-session mutex to serialize UI automation
+const sessionLocks = new Map();
+// Global mutex to avoid noisy concurrent UI automation across sessions
+let globalSendLock = Promise.resolve();
+
+function withTimeout(promise, ms, label) {
+  if (!ms || ms <= 0) return promise;
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new BrowserCrashError(`${label} timed out after ${ms}ms`));
+    }, ms);
+  });
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    timeout,
+  ]);
+}
+
+async function withSessionLock(sessionId, task) {
+  const previous = sessionLocks.get(sessionId) || Promise.resolve();
+  let release;
+  const current = new Promise((resolve) => {
+    release = resolve;
+  });
+  sessionLocks.set(sessionId, previous.then(() => current));
+
+  try {
+    await previous;
+    return await task();
+  } finally {
+    release();
+    if (sessionLocks.get(sessionId) === current) {
+      sessionLocks.delete(sessionId);
+    }
+  }
+}
+
+async function withGlobalSendLock(task) {
+  const previous = globalSendLock;
+  let release;
+  const current = new Promise((resolve) => {
+    release = resolve;
+  });
+  globalSendLock = previous.then(() => current);
+
+  try {
+    await previous;
+    return await task();
+  } finally {
+    release();
+    if (globalSendLock === current) {
+      globalSendLock = Promise.resolve();
+    }
+  }
+}
+
+function isBrowserClosedError(error) {
+  const message = error?.message?.toLowerCase() || '';
+  return (
+    message.includes('target page') ||
+    message.includes('context or browser has been closed') ||
+    message.includes('browser has been closed') ||
+    message.includes('target closed') ||
+    message.includes('browser closed') ||
+    message.includes('session closed')
+  );
+}
+
+function setIdleTimer(sessionId) {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+
+  if (session.idleTimer) {
+    clearTimeout(session.idleTimer);
+    session.idleTimer = null;
+  }
+
+  if (!config.idleTimeoutMs || config.idleTimeoutMs <= 0) return;
+
+  session.idleTimer = setTimeout(async () => {
+    try {
+      await suspendSession(sessionId);
+    } catch (error) {
+      console.warn(`[SessionManager] Idle suspend failed for session ${sessionId}:`, error.message);
+    }
+  }, config.idleTimeoutMs);
+}
+
+function touchSession(sessionId) {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+  session.lastActivity = Date.now();
+  setIdleTimer(sessionId);
+}
+
+async function suspendSession(sessionId) {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+
+  if (session.activityTimer) {
+    clearInterval(session.activityTimer);
+    session.activityTimer = null;
+  }
+  if (session.idleTimer) {
+    clearTimeout(session.idleTimer);
+    session.idleTimer = null;
+  }
+
+  try {
+    if (session.page) {
+      await session.page.close().catch(() => {});
+    }
+    if (session.context) {
+      await session.context.close().catch(() => {});
+    }
+    if (session.browser) {
+      await session.browser.close().catch(() => {});
+    }
+  } catch (error) {
+    console.warn(`[SessionManager] Error suspending session ${sessionId}:`, error.message);
+  }
+
+  session.page = null;
+  session.context = null;
+  session.browser = null;
+  session.activityTimer = null;
+  session.ipAddress = null;
+  session.status = 'suspended';
+  session.suspendedAt = Date.now();
+}
+
+async function ensureSessionActive(sessionId) {
+  const session = sessions.get(sessionId);
+  if (!session) {
+    throw new SessionNotFoundError(sessionId);
+  }
+  if (session.page && session.context && session.browser) {
+    session.status = 'active';
+    return session;
+  }
+
+  const created = await createSession(
+    session.cookieString,
+    sessionId,
+    session.fingerprint,
+    session.proxy || null
+  );
+  const refreshed = sessions.get(created.sessionId);
+  if (refreshed) {
+    refreshed.status = 'active';
+    return refreshed;
+  }
+  return getSession(sessionId);
+}
+
+async function recreateSessionFromMemory(sessionId) {
+  const session = sessions.get(sessionId);
+  if (!session || !session.cookieString) {
+    throw new InvalidInputError(`No cookies available to recreate session ${sessionId}`);
+  }
+
+  try {
+    if (session.activityTimer) {
+      clearInterval(session.activityTimer);
+    }
+    if (session.page) {
+      await session.page.close().catch(() => {});
+    }
+    if (session.context) {
+      await session.context.close().catch(() => {});
+    }
+    if (session.browser) {
+      await session.browser.close().catch(() => {});
+    }
+  } catch {
+    // Ignore timer cleanup errors
+  }
+
+  return createSession(session.cookieString, sessionId, session.fingerprint, session.proxy || null);
+}
+
+async function detectLoginOrCheckpoint(page) {
+  const url = page.url();
+  const urlLower = url.toLowerCase();
+  if (
+    urlLower.includes('login') ||
+    urlLower.includes('checkpoint') ||
+    urlLower.includes('recover') ||
+    urlLower.includes('twofactor')
+  ) {
+    return { blocked: true, reason: `Unexpected auth URL: ${url}` };
+  }
+
+  try {
+    const indicators = await page.evaluate(() => {
+      const text = (document.body?.innerText || '').toLowerCase();
+      const hasLoginForm =
+        !!document.querySelector('input[name="email"], input#email, input[name="pass"], #pass') ||
+        !!document.querySelector('[data-testid="royal_login_form"], form[action*="login"]');
+      const keywordHit =
+        text.includes('log in') ||
+        text.includes('login') ||
+        text.includes('masuk') ||
+        text.includes('kata sandi') ||
+        text.includes('password') ||
+        text.includes('checkpoint') ||
+        text.includes('two-factor');
+      return { hasLoginForm, keywordHit };
+    });
+
+    if (indicators.hasLoginForm || indicators.keywordHit) {
+      return { blocked: true, reason: 'Login/checkpoint indicators detected' };
+    }
+  } catch {
+    // Ignore DOM inspection failures
+  }
+
+  return { blocked: false, reason: null };
+}
 
 /**
  * Generate random number between min and max
@@ -68,14 +288,20 @@ function startActivitySimulation(page, sessionId) {
 
 /**
  * Create a new session
- * @param {string} cookieString - Cookie string in format "name=value; name2=value2"
+ * @param {string|Array<Object>} cookieInput - Cookie string or JSON cookie array
  * @param {string} [existingSessionId] - Optional session ID to reuse (for recreation)
  * @param {Object} [existingFingerprint] - Optional fingerprint to reuse (for recreation)
  * @param {Object} [proxy] - Optional proxy configuration {server, username?, password?}
  * @returns {Promise<string>} Session ID
  */
-export async function createSession(cookieString, existingSessionId = null, existingFingerprint = null, proxy = null) {
-  if (!cookieString || !cookieString.trim()) {
+export async function createSession(cookieInput, existingSessionId = null, existingFingerprint = null, proxy = null) {
+  const normalized = normalizeCookiesInput(cookieInput);
+  if (normalized.format === 'string') {
+    if (!normalized.raw || !String(normalized.raw).trim()) {
+      throw new InvalidInputError('Cookies are required');
+    }
+  }
+  if (normalized.format === 'json' && (!Array.isArray(normalized.raw) || normalized.raw.length === 0)) {
     throw new InvalidInputError('Cookies are required');
   }
 
@@ -96,22 +322,30 @@ export async function createSession(cookieString, existingSessionId = null, exis
     context = browserInstance.context;
     page = browserInstance.page;
 
-    // Parse and set cookies
-    const cookies = parseCookieString(cookieString);
-    if (cookies.length === 0) {
-      throw new InvalidInputError('No valid cookies found in the input string');
-    }
-
-    // Convert to Playwright format and set for multiple domains
-    const domains = ['business.facebook.com', '.facebook.com'];
-    for (const domain of domains) {
-      try {
-        const playwrightCookies = toPlaywrightCookies(cookies, domain);
-        await context.addCookies(playwrightCookies);
-      } catch (error) {
-        // Some cookies might fail for certain domains, continue
-        console.warn(`[SessionManager] Failed to set cookies for ${domain}:`, error.message);
+    // Parse and set cookies (string header or JSON array)
+    if (normalized.format === 'string') {
+      const cookies = parseCookieString(normalized.raw);
+      if (cookies.length === 0) {
+        throw new InvalidInputError('No valid cookies found in the input string');
       }
+
+      // Convert to Playwright format and set for multiple domains
+      const domains = ['business.facebook.com', '.facebook.com'];
+      for (const domain of domains) {
+        try {
+          const playwrightCookies = toPlaywrightCookies(cookies, domain);
+          await context.addCookies(playwrightCookies);
+        } catch (error) {
+          // Some cookies might fail for certain domains, continue
+          console.warn(`[SessionManager] Failed to set cookies for ${domain}:`, error.message);
+        }
+      }
+    } else {
+      const playwrightCookies = toPlaywrightCookiesFromJson(normalized.raw);
+      if (playwrightCookies.length === 0) {
+        throw new InvalidInputError('No valid cookies found in the input array');
+      }
+      await context.addCookies(playwrightCookies);
     }
 
     // Navigate to inbox
@@ -134,6 +368,12 @@ export async function createSession(cookieString, existingSessionId = null, exis
     // Log page title to verify it loaded correctly
     const pageTitle = await page.title();
     console.log(`[SessionManager] Page title: ${pageTitle}`);
+
+    // Fail fast if redirected to login/checkpoint
+    const authCheck = await detectLoginOrCheckpoint(page);
+    if (authCheck.blocked) {
+      throw new InvalidInputError(`Session not authenticated: ${authCheck.reason}`);
+    }
     
     // Verify proxy is working by checking IP address
     let ipAddress = null;
@@ -180,17 +420,25 @@ export async function createSession(cookieString, existingSessionId = null, exis
       context,
       page,
       activityTimer,
+      idleTimer: null,
       createdAt: Date.now(),
       lastActivity: Date.now(),
       fingerprint: browserInstance.fingerprint, // Save the fingerprint
       ipAddress: ipAddress, // Save the IP address
+      cookieString: normalized.format === 'string' ? normalized.raw : null,
+      cookieJson: normalized.format === 'json' ? normalized.raw : null,
+      cookieFormat: normalized.format,
+      proxy: proxyConfig, // Save proxy for recreation
+      status: 'active',
+      suspendedAt: null,
     };
     sessions.set(sessionId, sessionData);
+    setIdleTimer(sessionId);
 
         // Save session metadata to disk (for dev mode persistence)
         // Only save if session was successfully created (we're past the error handling)
         if (config.devMode) {
-          await saveSessionMetadata(sessionId, sessionData, cookieString, proxyConfig);
+          await saveSessionMetadata(sessionId, sessionData, normalized, proxyConfig);
         }
 
     console.log(`[SessionManager] ✓ Session created successfully: ${sessionId}`);
@@ -212,6 +460,66 @@ export async function createSession(cookieString, existingSessionId = null, exis
     }
     throw new BrowserCrashError(`Failed to create session: ${error.message}`);
   }
+}
+
+/**
+ * Update cookies for an existing session (without destroying it)
+ * @param {string} sessionId - Session ID
+ * @param {string|Array<Object>} cookieInput - Cookie string or JSON array
+ */
+export async function updateSessionCookies(sessionId, cookieInput) {
+  const normalized = normalizeCookiesInput(cookieInput);
+  if (normalized.format === 'string') {
+    if (!normalized.raw || !String(normalized.raw).trim()) {
+      throw new InvalidInputError('Cookies are required');
+    }
+  }
+  if (normalized.format === 'json' && (!Array.isArray(normalized.raw) || normalized.raw.length === 0)) {
+    throw new InvalidInputError('Cookies are required');
+  }
+
+  const session = getSession(sessionId);
+  if (normalized.format === 'string') {
+    const cookies = parseCookieString(normalized.raw);
+    if (cookies.length === 0) {
+      throw new InvalidInputError('No valid cookies found in the input string');
+    }
+
+    const domains = ['business.facebook.com', '.facebook.com'];
+    for (const domain of domains) {
+      try {
+        const playwrightCookies = toPlaywrightCookies(cookies, domain);
+        await session.context.addCookies(playwrightCookies);
+      } catch (error) {
+        console.warn(`[SessionManager] Failed to set cookies for ${domain}:`, error.message);
+      }
+    }
+  } else {
+    const playwrightCookies = toPlaywrightCookiesFromJson(normalized.raw);
+    if (playwrightCookies.length === 0) {
+      throw new InvalidInputError('No valid cookies found in the input array');
+    }
+    await session.context.addCookies(playwrightCookies);
+  }
+
+  // Refresh page to ensure cookies are applied
+  if (session.page) {
+    try {
+      await session.page.reload({ waitUntil: 'networkidle', timeout: 30000 });
+    } catch (error) {
+      console.warn(`[SessionManager] Cookie update reload failed: ${error.message}`);
+    }
+  }
+
+  session.cookieString = normalized.format === 'string' ? normalized.raw : null;
+  session.cookieJson = normalized.format === 'json' ? normalized.raw : null;
+  session.cookieFormat = normalized.format;
+  touchSession(sessionId);
+
+  if (config.devMode) {
+    await saveSessionMetadata(sessionId, session, normalized, session.proxy || null);
+  }
+  return { ok: true };
 }
 
 /**
@@ -241,6 +549,9 @@ export async function destroySession(sessionId) {
     // Clear activity timer
     if (session.activityTimer) {
       clearInterval(session.activityTimer);
+    }
+    if (session.idleTimer) {
+      clearTimeout(session.idleTimer);
     }
 
     // Close page, context, and browser
@@ -275,26 +586,77 @@ export async function destroySession(sessionId) {
  * @param {Object} options - {extension, phoneNumber, message}
  */
 export async function sendMessageForSession(sessionId, { extension, phoneNumber, message }) {
-  const session = getSession(sessionId);
+  return withGlobalSendLock(() =>
+    withSessionLock(sessionId, async () => {
+      const session = await ensureSessionActive(sessionId);
 
-  try {
-    // Update last activity
-    session.lastActivity = Date.now();
+      try {
+        // Update last activity
+        touchSession(sessionId);
 
-    // Run automation
-    await sendMessage(session.page, { extension, phoneNumber, message });
-  } catch (error) {
-    // If browser crashed, mark session as dead
-    if (
-      error.message.includes('Target closed') ||
-      error.message.includes('Browser closed') ||
-      error.message.includes('Session closed')
-    ) {
-      sessions.delete(sessionId);
-      throw new BrowserCrashError(`Browser crashed for session ${sessionId}`);
-    }
-    throw error;
-  }
+        // Run automation
+        await withTimeout(
+          sendMessage(session.page, { extension, phoneNumber, message }),
+          config.flowTimeoutMs,
+          'Send flow'
+        );
+        return { ok: true };
+      } catch (error) {
+        if (isBrowserClosedError(error)) {
+          try {
+            await recreateSessionFromMemory(sessionId);
+            const recreated = getSession(sessionId);
+            recreated.lastActivity = Date.now();
+            await withTimeout(
+              sendMessage(recreated.page, { extension, phoneNumber, message }),
+              config.flowTimeoutMs,
+              'Send flow (retry)'
+            );
+            return { ok: true, retried: true };
+          } catch (retryError) {
+            sessions.delete(sessionId);
+            throw new BrowserCrashError(`Browser crashed for session ${sessionId}: ${retryError.message}`);
+          }
+        }
+        throw error;
+      }
+    })
+  );
+}
+
+export async function checkSessionForSession(sessionId) {
+  return withGlobalSendLock(() =>
+    withSessionLock(sessionId, async () => {
+      const session = await ensureSessionActive(sessionId);
+      try {
+        touchSession(sessionId);
+        await withTimeout(
+          checkSessionFlow(session.page),
+          config.flowTimeoutMs,
+          'Check flow'
+        );
+        return { ok: true };
+      } catch (error) {
+        if (isBrowserClosedError(error)) {
+          try {
+            await recreateSessionFromMemory(sessionId);
+            const recreated = getSession(sessionId);
+            recreated.lastActivity = Date.now();
+            await withTimeout(
+              checkSessionFlow(recreated.page),
+              config.flowTimeoutMs,
+              'Check flow (retry)'
+            );
+            return { ok: true, retried: true };
+          } catch (retryError) {
+            sessions.delete(sessionId);
+            throw new BrowserCrashError(`Browser crashed for session ${sessionId}: ${retryError.message}`);
+          }
+        }
+        throw error;
+      }
+    })
+  );
 }
 
 /**
@@ -303,6 +665,18 @@ export async function sendMessageForSession(sessionId, { extension, phoneNumber,
  */
 export function getAllSessionIds() {
   return Array.from(sessions.keys());
+}
+
+/**
+ * Destroy all sessions except those in keepIds
+ * @param {Array<string>} keepIds
+ */
+export async function cleanupSessions(keepIds = []) {
+  const keepSet = new Set(Array.isArray(keepIds) ? keepIds : []);
+  const sessionIds = Array.from(sessions.keys());
+  const toDestroy = sessionIds.filter((id) => !keepSet.has(id));
+  await Promise.all(toDestroy.map((id) => destroySession(id).catch(() => {})));
+  return { destroyed: toDestroy.length, kept: keepSet.size };
 }
 
 /**
@@ -319,7 +693,7 @@ export function getSessionInfo(sessionId) {
     sessionId,
     createdAt: session.createdAt,
     lastActivity: session.lastActivity,
-    status: 'active',
+    status: session.page && session.context && session.browser ? 'active' : 'suspended',
   };
 }
 
@@ -336,12 +710,17 @@ async function saveSessionMetadata(sessionId, sessionData, cookieString, proxy =
       // File doesn't exist yet, start fresh
     }
 
+    const cookieFormat = cookieString?.format || 'string';
+    const cookieRaw = cookieString?.raw ?? cookieString ?? null;
+
     metadata[sessionId] = {
       sessionId,
       createdAt: sessionData.createdAt,
       lastActivity: sessionData.lastActivity,
       profilePath: `session-${sessionId}`,
-      cookieString: cookieString, // Save the cookie string for reconnection
+      cookieFormat,
+      cookieString: cookieFormat === 'string' ? cookieRaw : null,
+      cookieJson: cookieFormat === 'json' ? cookieRaw : null,
       fingerprint: sessionData.fingerprint, // Save the fingerprint for recreation
       proxy: proxy || null, // Save proxy config if provided
     };
@@ -391,8 +770,10 @@ async function removeSessionMetadata(sessionId) {
 async function recreateSession(metadata) {
   try {
     // Check if we have a saved cookie string
-    if (!metadata.cookieString) {
-      console.warn(`[SessionManager] No cookie string saved for session ${metadata.sessionId}, cannot recreate`);
+    const cookieFormat = metadata.cookieFormat || (metadata.cookieJson ? 'json' : 'string');
+    const cookiePayload = cookieFormat === 'json' ? metadata.cookieJson : metadata.cookieString;
+    if (!cookiePayload || (Array.isArray(cookiePayload) && cookiePayload.length === 0)) {
+      console.warn(`[SessionManager] No cookies saved for session ${metadata.sessionId}, cannot recreate`);
       return null;
     }
 
@@ -409,7 +790,7 @@ async function recreateSession(metadata) {
     
     // Create a new session using the saved cookie string, sessionId, fingerprint, and proxy
     const result = await createSession(
-      metadata.cookieString,
+      cookiePayload,
       metadata.sessionId,
       metadata.fingerprint,
       proxyConfig
@@ -482,4 +863,3 @@ export async function destroyAllSessions() {
     }
   }
 }
-

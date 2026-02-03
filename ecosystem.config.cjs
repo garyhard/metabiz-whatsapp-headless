@@ -3,6 +3,11 @@
 //   pm2 deploy ecosystem.config.cjs production setup
 //   pm2 deploy ecosystem.config.cjs production
 
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || process.env.GITHUB_PAT;
+const REPO_URL = GITHUB_TOKEN
+  ? `https://x-access-token:${GITHUB_TOKEN}@github.com/garyhard/metabiz-whatsapp-headless.git`
+  : 'git@github.com:garyhard/metabiz-whatsapp-headless.git';
+
 module.exports = {
   apps: [
     {
@@ -29,11 +34,10 @@ module.exports = {
       host: ['wahaweb'], // Uses SSH config alias
       ref: 'origin/main',
       // TODO: replace with your repo
-      repo: 'git@github.com:garyhard/metabiz-whatsapp-headless.git',
+      repo: REPO_URL,
       path: '/opt/metabiz-whatsapp-headless',
       'pre-setup': 'mkdir -p /opt/metabiz-whatsapp-headless/shared/{logs,profiles} && echo "⚠️  Remember to copy .env.production to /opt/metabiz-whatsapp-headless/shared/.env before first deploy"',
       'post-deploy': 'chmod +x /opt/metabiz-whatsapp-headless/current/deploy.sh && bash /opt/metabiz-whatsapp-headless/current/deploy.sh',
     },
   },
 };
-

@@ -22,15 +22,8 @@ export async function createBrowser(sessionId, existingFingerprint = null, proxy
   const fingerprint = existingFingerprint || generateFingerprint();
   const userDataDir = path.join(__dirname, '../../profiles', `session-${sessionId}`);
 
-  // Launch browser
-  const browser = await chromium.launch({
-    headless: config.browser.headless,
-    args: config.browser.args,
-  });
-
   // Build context options
   const contextOptions = {
-    userDataDir,
     viewport: fingerprint.viewport,
     locale: fingerprint.locale, // Fixed to en-US
     timezoneId: fingerprint.timezoneId, // Fixed to America/New_York
@@ -59,7 +52,12 @@ export async function createBrowser(sessionId, existingFingerprint = null, proxy
   }
 
   // Create persistent context with fingerprint
-  const context = await browser.newContext(contextOptions);
+  const context = await chromium.launchPersistentContext(userDataDir, {
+    headless: config.browser.headless,
+    args: config.browser.args,
+    ...contextOptions,
+  });
+  const browser = context.browser();
 
   // Override navigator and other properties to create unique fingerprint
   await context.addInitScript((fingerprint) => {
@@ -151,4 +149,3 @@ export async function createBrowser(sessionId, existingFingerprint = null, proxy
     fingerprint,
   };
 }
-

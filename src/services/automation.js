@@ -3,11 +3,13 @@
  */
 
 import { AutomationError } from '../errors.js';
+import { config } from '../config.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const INBOX_URL = 'https://business.facebook.com/latest/inbox';
 
 /**
  * Sleep utility
@@ -24,6 +26,44 @@ function normalizeText(s) {
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
+}
+
+function normalizeList(list) {
+  return Array.isArray(list) ? list.map(normalizeText).filter(Boolean) : [];
+}
+
+function isBadAuthUrl(url) {
+  const value = String(url || '').toLowerCase();
+  return (
+    value.includes('login') ||
+    value.includes('checkpoint') ||
+    value.includes('recover') ||
+    value.includes('twofactor')
+  );
+}
+
+async function ensureOnInbox(page, label = 'Automation') {
+  const url = page.url();
+  if (isBadAuthUrl(url)) {
+    throw new AutomationError(`${label}: Redirected to auth/checkpoint URL: ${url}`);
+  }
+  const isBusiness = url.includes('business.facebook.com');
+  const isInbox = url.includes('inbox');
+  const isMessages = url.includes('messages');
+  if (!isBusiness || (!isInbox && !isMessages)) {
+    try {
+      await page.goto(INBOX_URL, { waitUntil: 'networkidle', timeout: 30000 });
+    } catch (error) {
+      throw new AutomationError(`${label}: Unexpected URL after reload: ${url}`);
+    }
+    const nextUrl = page.url();
+    if (isBadAuthUrl(nextUrl)) {
+      throw new AutomationError(`${label}: Redirected to auth/checkpoint URL: ${nextUrl}`);
+    }
+    if (!nextUrl.includes('business.facebook.com') || (!nextUrl.includes('inbox') && !nextUrl.includes('messages'))) {
+      throw new AutomationError(`${label}: Unexpected URL after reload: ${nextUrl}`);
+    }
+  }
 }
 
 /**
@@ -82,8 +122,26 @@ async function findFirstVisible(page, selector) {
 /**
  * Find element by text content
  */
+async function elementTextMatches(page, el, wants) {
+  const textContent = await page.evaluate((e) => {
+    return {
+      text: e.textContent || e.innerText || '',
+      aria: e.getAttribute('aria-label') || '',
+      title: e.getAttribute('title') || '',
+    };
+  }, el);
+
+  const candidates = [
+    normalizeText(textContent.text),
+    normalizeText(textContent.aria),
+    normalizeText(textContent.title),
+  ].filter(Boolean);
+
+  return candidates.some((value) => wants.some((want) => value === want || value.includes(want)));
+}
+
 async function findByText(page, { text, root = null, selector = '*' }) {
-  const want = normalizeText(text);
+  const wants = normalizeList([text]);
 
   // If root is provided and is an ElementHandle, search within it
   if (root && root.$$) {
@@ -92,13 +150,7 @@ async function findByText(page, { text, root = null, selector = '*' }) {
       const isElVisible = await isVisible(page, el);
       if (!isElVisible) continue;
 
-      const textContent = await page.evaluate((e) => {
-        return e.textContent || e.innerText || '';
-      }, el);
-
-      const normalized = normalizeText(textContent);
-      if (!normalized) continue;
-      if (normalized === want || normalized.includes(want)) {
+      if (await elementTextMatches(page, el, wants)) {
         return el;
       }
     }
@@ -109,13 +161,33 @@ async function findByText(page, { text, root = null, selector = '*' }) {
       const isElVisible = await isVisible(page, el);
       if (!isElVisible) continue;
 
-      const textContent = await page.evaluate((e) => {
-        return e.textContent || e.innerText || '';
-      }, el);
+      if (await elementTextMatches(page, el, wants)) {
+        return el;
+      }
+    }
+  }
+  return null;
+}
 
-      const normalized = normalizeText(textContent);
-      if (!normalized) continue;
-      if (normalized === want || normalized.includes(want)) {
+async function findByAnyText(page, { texts, root = null, selector = '*' }) {
+  const wants = normalizeList(texts);
+  if (wants.length === 0) return null;
+
+  if (root && root.$$) {
+    const elements = await root.$$(selector);
+    for (const el of elements) {
+      const isElVisible = await isVisible(page, el);
+      if (!isElVisible) continue;
+      if (await elementTextMatches(page, el, wants)) {
+        return el;
+      }
+    }
+  } else {
+    const elements = await page.$$(selector);
+    for (const el of elements) {
+      const isElVisible = await isVisible(page, el);
+      if (!isElVisible) continue;
+      if (await elementTextMatches(page, el, wants)) {
         return el;
       }
     }
@@ -221,8 +293,16 @@ async function openWhatsappModal(page) {
   // Fallback to text search
   if (!btn) {
     console.log('[Automation] Step 1: Button not found by data-surface, trying text search...');
-    btn = await findByText(page, {
-      text: 'Send a Message on WhatsApp',
+    btn = await findByAnyText(page, {
+      texts: config.texts.openWhatsappModal,
+      selector: '[role="button"],button,div[role],a',
+    });
+  }
+
+  if (!btn) {
+    console.log('[Automation] Step 1: Button not found by text list, trying brand keyword...');
+    btn = await findByAnyText(page, {
+      texts: ['whatsapp'],
       selector: '[role="button"],button,div[role],a',
     });
   }
@@ -311,9 +391,9 @@ async function clickNewWhatsappNumber(page) {
 
   // Strategy 3: Find by exact text match
   if (!target) {
-    console.log('[Automation] Step 2: Trying exact text match...');
-    target = await findByText(page, {
-      text: 'New WhatsApp number',
+    console.log('[Automation] Step 2: Trying text list...');
+    target = await findByAnyText(page, {
+      texts: config.texts.newWhatsappNumber,
       selector: '[role="button"],button,div[role="button"]',
     });
   }
@@ -689,17 +769,18 @@ async function clickSendMessage(page) {
     throw new AutomationError('Step 6: Dialog not found');
   }
 
-  // Find button with text "Send Message" or "Send message"
-  let btn = await findByText(page, {
+  // Find button with text list (locale-safe)
+  let btn = await findByAnyText(page, {
     root: dialog,
-    text: 'Send Message',
+    texts: config.texts.sendMessage,
     selector: '[role="button"],button,div[role="button"]',
   });
 
   if (!btn) {
-    btn = await findByText(page, {
+    console.log('[Automation] Step 6: Button not found by text list, trying brand keyword...');
+    btn = await findByAnyText(page, {
       root: dialog,
-      text: 'Send message',
+      texts: ['send', 'kirim', 'enviar', 'envoyer', 'senden', 'invia', 'whatsapp'],
       selector: '[role="button"],button,div[role="button"]',
     });
   }
@@ -756,6 +837,7 @@ export async function sendMessage(page, { extension, phoneNumber, message }) {
   console.log('[Automation] Refreshing page to ensure clean state...');
   await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
   await sleep(2000); // Wait for page to fully load
+  await ensureOnInbox(page, 'Send');
   console.log('[Automation] ✓ Page refreshed');
   console.log('[Automation] ========================================');
 
@@ -814,3 +896,74 @@ export async function sendMessage(page, { extension, phoneNumber, message }) {
   }
 }
 
+/**
+ * Lightweight UI check to validate session can open WhatsApp flow
+ * @param {Page} page - Playwright page instance
+ */
+export async function checkSessionFlow(page) {
+  console.log('[Automation] ========================================');
+  console.log('[Automation] Starting WhatsApp session check');
+  console.log(`[Automation] Current URL: ${page.url()}`);
+
+  // Refresh for clean state
+  await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
+  await sleep(1500);
+  await ensureOnInbox(page, 'Check');
+
+  try {
+    // Step 1: Open WhatsApp modal
+    await openWhatsappModal(page);
+
+    // Step 2: Click "New WhatsApp number"
+    await clickNewWhatsappNumber(page);
+
+    // Step 3: Ensure extension combobox exists
+    const dialog = await waitFor(
+      page,
+      async () => findFirstVisible(page, '[role="dialog"]'),
+      { timeoutMs: 10000 }
+    );
+    if (!dialog) {
+      throw new AutomationError('Check: Dialog not found');
+    }
+
+    const combo = await findFirstVisible(page, '[role="dialog"] [role="combobox"][aria-haspopup="listbox"]');
+    if (!combo) {
+      throw new AutomationError('Check: Extension dropdown not found');
+    }
+
+    // Step 4: Ensure phone input exists
+    const phoneInput = await findFirstVisible(page, 'input[type="tel"],input[inputmode="tel"]');
+    if (!phoneInput) {
+      throw new AutomationError('Check: Phone input not found');
+    }
+
+    // Step 5: Ensure message input exists
+    const textarea = await findFirstVisible(page, 'textarea');
+    const editable = await findFirstVisible(page, '[contenteditable="true"]');
+    if (!textarea && !editable) {
+      throw new AutomationError('Check: Message input not found');
+    }
+
+    // Close dialog
+    try {
+      await page.keyboard.press('Escape');
+      await sleep(300);
+    } catch {
+      // Ignore close failures
+    }
+
+    console.log('[Automation] ✓ Session check completed successfully');
+    console.log('[Automation] ========================================');
+    return true;
+  } catch (error) {
+    console.error('[Automation] ========================================');
+    console.error('[Automation] ✗ Session check failed');
+    console.error(`[Automation] Error: ${error.message}`);
+    console.error('[Automation] ========================================');
+    if (error instanceof AutomationError) {
+      throw error;
+    }
+    throw new AutomationError(`Session check failed: ${error.message}`, error);
+  }
+}

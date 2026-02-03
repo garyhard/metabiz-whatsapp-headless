@@ -1,6 +1,6 @@
 /**
- * Parse cookie strings from format "name=value; name2=value2"
- * Replicates the logic from background.js
+ * Cookie helpers
+ * Supports both header cookie strings and JSON cookie arrays (e.g. Chrome export)
  */
 
 /**
@@ -42,6 +42,65 @@ export function parseCookieString(cookieString) {
   return cookies;
 }
 
+function normalizeSameSite(value) {
+  const v = String(value || '').toLowerCase();
+  if (v === 'strict') return 'Strict';
+  if (v === 'none' || v === 'no_restriction') return 'None';
+  return 'Lax';
+}
+
+function normalizeDomain(domain, hostOnly) {
+  if (!domain) return null;
+  const trimmed = String(domain).trim();
+  if (!trimmed) return null;
+  if (hostOnly) {
+    return trimmed.startsWith('.') ? trimmed.slice(1) : trimmed;
+  }
+  return trimmed.startsWith('.') ? trimmed : `.${trimmed}`;
+}
+
+/**
+ * Convert JSON cookies (Chrome/extension format) to Playwright cookie format
+ * @param {Array<Object>} cookies - JSON cookies
+ * @param {string} defaultDomain
+ * @returns {Array}
+ */
+export function toPlaywrightCookiesFromJson(cookies, defaultDomain = 'business.facebook.com') {
+  if (!Array.isArray(cookies)) return [];
+
+  return cookies
+    .map((cookie) => {
+      const name = cookie?.name;
+      const value = cookie?.value;
+      if (!name || typeof name !== 'string') return null;
+      if (value === undefined || value === null) return null;
+
+      const domain = normalizeDomain(cookie.domain || defaultDomain, !!cookie.hostOnly);
+      const path = cookie.path || '/';
+      const secure = cookie.secure === undefined ? true : !!cookie.secure;
+      const httpOnly = !!cookie.httpOnly;
+      const sameSite = normalizeSameSite(cookie.sameSite);
+
+      const rawExpires =
+        cookie.session === true
+          ? undefined
+          : (cookie.expirationDate ?? cookie.expires);
+      const expires = Number.isFinite(rawExpires) ? Math.floor(rawExpires) : undefined;
+
+      return {
+        name,
+        value: String(value),
+        domain: domain || `.${defaultDomain}`,
+        path,
+        secure,
+        httpOnly,
+        sameSite,
+        ...(expires ? { expires } : {}),
+      };
+    })
+    .filter(Boolean);
+}
+
 /**
  * Convert parsed cookies to Playwright cookie format
  * @param {Array<{name: string, value: string}>} cookies - Parsed cookies
@@ -60,3 +119,32 @@ export function toPlaywrightCookies(cookies, domain = 'business.facebook.com') {
   }));
 }
 
+/**
+ * Normalize input cookies (string or JSON array) into Playwright cookies
+ * @param {string|Array<Object>} input
+ * @returns {{format: 'string'|'json', raw: string|Array<Object>, cookies: Array}}
+ */
+export function normalizeCookiesInput(input) {
+  if (typeof input === 'string') {
+    const parsed = parseCookieString(input);
+    return {
+      format: 'string',
+      raw: input,
+      cookies: parsed,
+    };
+  }
+
+  if (Array.isArray(input)) {
+    return {
+      format: 'json',
+      raw: input,
+      cookies: input,
+    };
+  }
+
+  return {
+    format: 'string',
+    raw: '',
+    cookies: [],
+  };
+}
