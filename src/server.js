@@ -7,6 +7,7 @@ import { config } from './config.js';
 import { apiKeyAuth } from './middleware/auth.js';
 import sessionsRouter from './routes/sessions.js';
 import messagesRouter from './routes/messages.js';
+import cookiesRouter from './routes/cookies.js';
 import { destroyAllSessions, restoreSessions } from './services/sessionManager.js';
 import {
   SessionNotFoundError,
@@ -30,6 +31,8 @@ app.get('/health', (req, res) => {
 app.use('/api/sessions', apiKeyAuth, sessionsRouter);
 // Mount messages router (handles POST /:sessionId/send-message)
 app.use('/api/sessions', apiKeyAuth, messagesRouter);
+// Cookies validation
+app.use('/api/cookies', apiKeyAuth, cookiesRouter);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -136,4 +139,3 @@ server = app.listen(config.port, async () => {
     await restoreSessions();
   }
 });
-

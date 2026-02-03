@@ -18,6 +18,7 @@ const __dirname = path.dirname(__filename);
 
 const INBOX_URL = 'https://business.facebook.com/latest/inbox';
 const SESSIONS_FILE = path.join(__dirname, '../../profiles/sessions.json');
+const PROFILE_ROOT = path.join(__dirname, '../../profiles');
 
 // In-memory session registry
 const sessions = new Map();
@@ -277,6 +278,15 @@ async function detectLoginOrCheckpoint(page) {
   return { blocked: false, reason: null };
 }
 
+async function cleanupProfile(sessionId) {
+  const dir = path.join(PROFILE_ROOT, `session-${sessionId}`);
+  try {
+    await fs.rm(dir, { recursive: true, force: true });
+  } catch {
+    // ignore cleanup errors
+  }
+}
+
 /**
  * Generate random number between min and max
  */
@@ -525,6 +535,81 @@ export async function createSession(
       throw error;
     }
     throw new BrowserCrashError(`Failed to create session: ${error.message}`);
+  }
+}
+
+/**
+ * Validate cookies without creating a persisted session
+ * @param {string|Array<Object>} cookieInput
+ * @param {Object} [proxy]
+ */
+export async function validateCookies(cookieInput, proxy = null) {
+  const normalized = normalizeCookiesInput(cookieInput);
+  const cUser = extractCUser(normalized);
+  if (normalized.format === 'string') {
+    if (!normalized.raw || !String(normalized.raw).trim()) {
+      throw new InvalidInputError('Cookies are required');
+    }
+  }
+  if (normalized.format === 'json' && (!Array.isArray(normalized.raw) || normalized.raw.length === 0)) {
+    throw new InvalidInputError('Cookies are required');
+  }
+  if (!cUser) {
+    throw new InvalidInputError('c_user cookie is required');
+  }
+
+  const tempSessionId = `validate-${uuidv4()}`;
+  let browser = null;
+  let context = null;
+  let page = null;
+
+  try {
+    const browserInstance = await createBrowser(tempSessionId, null, proxy);
+    browser = browserInstance.browser;
+    context = browserInstance.context;
+    page = browserInstance.page;
+
+    if (normalized.format === 'string') {
+      const cookies = parseCookieString(normalized.raw);
+      if (cookies.length === 0) {
+        throw new InvalidInputError('No valid cookies found in the input string');
+      }
+      const domains = ['business.facebook.com', '.facebook.com'];
+      for (const domain of domains) {
+        try {
+          const playwrightCookies = toPlaywrightCookies(cookies, domain);
+          await context.addCookies(playwrightCookies);
+        } catch {
+          // ignore per-domain cookie failures
+        }
+      }
+    } else {
+      const playwrightCookies = toPlaywrightCookiesFromJson(normalized.raw);
+      if (playwrightCookies.length === 0) {
+        throw new InvalidInputError('No valid cookies found in the input array');
+      }
+      await context.addCookies(playwrightCookies);
+    }
+
+    await page.goto(INBOX_URL, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.waitForTimeout(1500);
+
+    const authCheck = await detectLoginOrCheckpoint(page);
+    if (authCheck.blocked) {
+      throw new InvalidInputError(`Session not authenticated: ${authCheck.reason}`);
+    }
+
+    return { ok: true, cUser };
+  } catch (error) {
+    if (error instanceof InvalidInputError) {
+      throw error;
+    }
+    throw new BrowserCrashError(`Validate cookies failed: ${error.message}`);
+  } finally {
+    if (page) await page.close().catch(() => {});
+    if (context) await context.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
+    await cleanupProfile(tempSessionId);
   }
 }
 
