@@ -12,7 +12,7 @@ import {
   updateSessionCookies,
   cleanupSessions,
 } from '../services/sessionManager.js';
-import { InvalidInputError, SessionNotFoundError } from '../errors.js';
+import { InvalidInputError, SessionNotFoundError, SessionAlreadyExistsError } from '../errors.js';
 
 const router = express.Router();
 
@@ -119,6 +119,12 @@ router.post('/', async (req, res, next) => {
   } catch (error) {
     if (error instanceof InvalidInputError) {
       return res.status(400).json({
+        ok: false,
+        error: error.message,
+      });
+    }
+    if (error instanceof SessionAlreadyExistsError) {
+      return res.status(409).json({
         ok: false,
         error: error.message,
       });

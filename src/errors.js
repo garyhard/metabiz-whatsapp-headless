@@ -35,3 +35,10 @@ export class BrowserCrashError extends Error {
   }
 }
 
+export class SessionAlreadyExistsError extends Error {
+  constructor(cUser) {
+    super(`Session already exists for c_user: ${cUser}`);
+    this.name = 'SessionAlreadyExistsError';
+    this.statusCode = 409;
+  }
+}

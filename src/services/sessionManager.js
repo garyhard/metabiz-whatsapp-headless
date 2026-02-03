@@ -6,8 +6,9 @@ import { v4 as uuidv4 } from 'uuid';
 import { createBrowser } from './browserFactory.js';
 import { normalizeCookiesInput, parseCookieString, toPlaywrightCookies, toPlaywrightCookiesFromJson } from '../utils/cookies.js';
 import { sendMessage, checkSessionFlow } from './automation.js';
-import { SessionNotFoundError, InvalidInputError, BrowserCrashError } from '../errors.js';
+import { SessionNotFoundError, InvalidInputError, BrowserCrashError, SessionAlreadyExistsError } from '../errors.js';
 import { config } from '../config.js';
+import { sessionStore } from './sessionStore.js';
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -24,6 +25,16 @@ const sessions = new Map();
 const sessionLocks = new Map();
 // Global mutex to avoid noisy concurrent UI automation across sessions
 let globalSendLock = Promise.resolve();
+
+function extractCUser(normalized) {
+  if (!normalized || !normalized.cookies) return '';
+  if (normalized.format === 'string') {
+    const match = normalized.cookies.find((cookie) => cookie.name === 'c_user');
+    return match?.value?.toString().trim() || '';
+  }
+  const match = normalized.cookies.find((cookie) => String(cookie?.name) === 'c_user');
+  return match?.value?.toString().trim() || '';
+}
 
 function withTimeout(promise, ms, label) {
   if (!ms || ms <= 0) return promise;
@@ -114,6 +125,7 @@ function touchSession(sessionId) {
   if (!session) return;
   session.lastActivity = Date.now();
   setIdleTimer(sessionId);
+  sessionStore.updateStatus(sessionId, session.status || 'active', session.lastActivity);
 }
 
 async function suspendSession(sessionId) {
@@ -150,10 +162,25 @@ async function suspendSession(sessionId) {
   session.ipAddress = null;
   session.status = 'suspended';
   session.suspendedAt = Date.now();
+  sessionStore.updateStatus(sessionId, 'suspended', session.lastActivity || Date.now());
 }
 
 async function ensureSessionActive(sessionId) {
-  const session = sessions.get(sessionId);
+  let session = sessions.get(sessionId);
+  if (!session) {
+    const stored = sessionStore.getBySessionId(sessionId);
+    if (!stored) {
+      throw new SessionNotFoundError(sessionId);
+    }
+    await createSession(
+      stored.cookies,
+      sessionId,
+      stored.fingerprint,
+      stored.proxy || null,
+      { skipCUserCheck: true, cUserOverride: stored.cUser }
+    );
+    session = sessions.get(sessionId);
+  }
   if (!session) {
     throw new SessionNotFoundError(sessionId);
   }
@@ -162,13 +189,15 @@ async function ensureSessionActive(sessionId) {
     return session;
   }
 
-  const created = await createSession(
-    session.cookieString,
+  const cookiePayload = session.cookieString || session.cookieJson;
+  await createSession(
+    cookiePayload,
     sessionId,
     session.fingerprint,
-    session.proxy || null
+    session.proxy || null,
+    { skipCUserCheck: true, cUserOverride: session.cUser }
   );
-  const refreshed = sessions.get(created.sessionId);
+  const refreshed = sessions.get(sessionId);
   if (refreshed) {
     refreshed.status = 'active';
     return refreshed;
@@ -178,7 +207,7 @@ async function ensureSessionActive(sessionId) {
 
 async function recreateSessionFromMemory(sessionId) {
   const session = sessions.get(sessionId);
-  if (!session || !session.cookieString) {
+  if (!session || (!session.cookieString && !session.cookieJson)) {
     throw new InvalidInputError(`No cookies available to recreate session ${sessionId}`);
   }
 
@@ -199,7 +228,14 @@ async function recreateSessionFromMemory(sessionId) {
     // Ignore timer cleanup errors
   }
 
-  return createSession(session.cookieString, sessionId, session.fingerprint, session.proxy || null);
+  const cookiePayload = session.cookieString || session.cookieJson;
+  return createSession(
+    cookiePayload,
+    sessionId,
+    session.fingerprint,
+    session.proxy || null,
+    { skipCUserCheck: true, cUserOverride: session.cUser }
+  );
 }
 
 async function detectLoginOrCheckpoint(page) {
@@ -294,8 +330,17 @@ function startActivitySimulation(page, sessionId) {
  * @param {Object} [proxy] - Optional proxy configuration {server, username?, password?}
  * @returns {Promise<string>} Session ID
  */
-export async function createSession(cookieInput, existingSessionId = null, existingFingerprint = null, proxy = null) {
+export async function createSession(
+  cookieInput,
+  existingSessionId = null,
+  existingFingerprint = null,
+  proxy = null,
+  options = {}
+) {
   const normalized = normalizeCookiesInput(cookieInput);
+  const cUser = extractCUser(normalized);
+  const { skipCUserCheck = false, cUserOverride = null } = options || {};
+  const finalCUser = cUserOverride || cUser;
   if (normalized.format === 'string') {
     if (!normalized.raw || !String(normalized.raw).trim()) {
       throw new InvalidInputError('Cookies are required');
@@ -304,9 +349,18 @@ export async function createSession(cookieInput, existingSessionId = null, exist
   if (normalized.format === 'json' && (!Array.isArray(normalized.raw) || normalized.raw.length === 0)) {
     throw new InvalidInputError('Cookies are required');
   }
+  if (!finalCUser) {
+    throw new InvalidInputError('c_user cookie is required');
+  }
+  if (!skipCUserCheck) {
+    const existing = sessionStore.getByCUser(finalCUser);
+    if (existing && existing.sessionId !== existingSessionId) {
+      throw new SessionAlreadyExistsError(finalCUser);
+    }
+  }
 
   // Use existing sessionId if provided (for recreation), otherwise generate new one
-  const sessionId = existingSessionId || uuidv4();
+    const sessionId = existingSessionId || uuidv4();
   let browser = null;
   let context = null;
   let page = null;
@@ -431,15 +485,27 @@ export async function createSession(cookieInput, existingSessionId = null, exist
       proxy: proxyConfig, // Save proxy for recreation
       status: 'active',
       suspendedAt: null,
+      cUser: finalCUser,
     };
     sessions.set(sessionId, sessionData);
     setIdleTimer(sessionId);
 
-        // Save session metadata to disk (for dev mode persistence)
-        // Only save if session was successfully created (we're past the error handling)
-        if (config.devMode) {
-          await saveSessionMetadata(sessionId, sessionData, normalized, proxyConfig);
-        }
+    sessionStore.saveSession({
+      sessionId,
+      cUser: finalCUser,
+      cookieFormat: normalized.format,
+      cookies: normalized.raw,
+      fingerprint: browserInstance.fingerprint,
+      proxy: proxyConfig,
+      status: 'active',
+      lastActivity: sessionData.lastActivity,
+    });
+
+    // Save session metadata to disk (for dev mode persistence)
+    // Only save if session was successfully created (we're past the error handling)
+    if (config.devMode) {
+      await saveSessionMetadata(sessionId, sessionData, normalized, proxyConfig);
+    }
 
     console.log(`[SessionManager] ✓ Session created successfully: ${sessionId}`);
     console.log(`[SessionManager] Active sessions: ${sessions.size}`);
@@ -479,6 +545,15 @@ export async function updateSessionCookies(sessionId, cookieInput) {
   }
 
   const session = getSession(sessionId);
+  const cUser = extractCUser(normalized);
+  if (!cUser) {
+    throw new InvalidInputError('c_user cookie is required');
+  }
+  const stored = sessionStore.getBySessionId(sessionId);
+  const expectedCUser = stored?.cUser || session.cUser;
+  if (expectedCUser && expectedCUser !== cUser) {
+    throw new InvalidInputError('c_user does not match existing session');
+  }
   if (normalized.format === 'string') {
     const cookies = parseCookieString(normalized.raw);
     if (cookies.length === 0) {
@@ -514,7 +589,10 @@ export async function updateSessionCookies(sessionId, cookieInput) {
   session.cookieString = normalized.format === 'string' ? normalized.raw : null;
   session.cookieJson = normalized.format === 'json' ? normalized.raw : null;
   session.cookieFormat = normalized.format;
+  session.cUser = expectedCUser || cUser;
   touchSession(sessionId);
+
+  sessionStore.updateCookies(sessionId, normalized.format, normalized.raw);
 
   if (config.devMode) {
     await saveSessionMetadata(sessionId, session, normalized, session.proxy || null);
@@ -569,6 +647,9 @@ export async function destroySession(sessionId) {
   } finally {
     // Remove from registry
     sessions.delete(sessionId);
+
+    // Remove from session store
+    sessionStore.deleteSession(sessionId);
     
     // Remove from metadata file
     if (config.devMode) {
