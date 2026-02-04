@@ -58,6 +58,11 @@ async function withRetry(fn, { retries = 2, delayMs = 1000 } = {}) {
   }
 }
 
+function logStep(label, details = {}) {
+  const payload = Object.keys(details).length ? ` ${JSON.stringify(details)}` : '';
+  console.log(`[SessionManager] ${label}${payload}`);
+}
+
 function withTimeout(promise, ms, label) {
   if (!ms || ms <= 0) return promise;
   let timer;
@@ -396,6 +401,7 @@ export async function createSession(
   const finalCUser = cUserOverride || cUser;
 
   return withCUserLock(finalCUser, async () => {
+    logStep('createSession:start', { cUser: finalCUser });
     if (normalized.format === 'string') {
       if (!normalized.raw || !String(normalized.raw).trim()) {
         throw new InvalidInputError('Cookies are required');
@@ -410,6 +416,7 @@ export async function createSession(
     if (!skipCUserCheck) {
       const existing = sessionStore.getByCUser(finalCUser);
       if (existing && existing.sessionId !== existingSessionId) {
+        logStep('createSession:exists', { cUser: finalCUser, existingSessionId: existing.sessionId });
         throw new SessionAlreadyExistsError(finalCUser, existing.sessionId);
       }
     }
@@ -424,6 +431,7 @@ export async function createSession(
     let activityTimer = null;
 
     try {
+      logStep('createSession:browser:init', { sessionId, cUser: finalCUser });
       // Use provided proxy, or fall back to config proxy, or null
       const proxyConfig = proxy || config.proxy || null;
       
@@ -432,6 +440,7 @@ export async function createSession(
       browser = browserInstance.browser;
       context = browserInstance.context;
       page = browserInstance.page;
+      logStep('createSession:browser:ready', { sessionId, cUser: finalCUser });
 
       // Parse and set cookies (string header or JSON array)
       if (normalized.format === 'string') {
@@ -445,19 +454,20 @@ export async function createSession(
         for (const domain of domains) {
           try {
             const playwrightCookies = toPlaywrightCookies(cookies, domain);
-            await context.addCookies(playwrightCookies);
-          } catch (error) {
-            // Some cookies might fail for certain domains, continue
-            console.warn(`[SessionManager] Failed to set cookies for ${domain}:`, error.message);
-          }
+          await context.addCookies(playwrightCookies);
+        } catch (error) {
+          // Some cookies might fail for certain domains, continue
+          console.warn(`[SessionManager] Failed to set cookies for ${domain}:`, error.message);
         }
-      } else {
-        const playwrightCookies = toPlaywrightCookiesFromJson(normalized.raw);
-        if (playwrightCookies.length === 0) {
-          throw new InvalidInputError('No valid cookies found in the input array');
-        }
-        await context.addCookies(playwrightCookies);
       }
+    } else {
+      const playwrightCookies = toPlaywrightCookiesFromJson(normalized.raw);
+      if (playwrightCookies.length === 0) {
+        throw new InvalidInputError('No valid cookies found in the input array');
+      }
+      await context.addCookies(playwrightCookies);
+    }
+      logStep('createSession:cookies:applied', { sessionId, cUser: finalCUser, format: normalized.format });
 
       // Navigate to inbox
       console.log(`[SessionManager] Navigating to ${INBOX_URL}...`);
@@ -465,6 +475,7 @@ export async function createSession(
         () => page.goto(INBOX_URL, { waitUntil: 'networkidle', timeout: 30000 }),
         { retries: 2, delayMs: 1000 }
       );
+      logStep('createSession:navigate:done', { sessionId, cUser: finalCUser });
 
       // Verify we're on the right page
       const finalUrl = page.url();
@@ -483,8 +494,10 @@ export async function createSession(
       // Fail fast if redirected to login/checkpoint
       const authCheck = await detectLoginOrCheckpoint(page);
       if (authCheck.blocked) {
+        logStep('createSession:auth:blocked', { sessionId, cUser: finalCUser, reason: authCheck.reason });
         throw new InvalidInputError(`Session not authenticated: ${authCheck.reason}`);
       }
+      logStep('createSession:auth:ok', { sessionId, cUser: finalCUser });
       
       // Verify proxy is working by checking IP address
       let ipAddress = null;
@@ -566,6 +579,7 @@ export async function createSession(
 
       console.log(`[SessionManager] ✓ Session created successfully: ${sessionId}`);
       console.log(`[SessionManager] Active sessions: ${sessions.size}`);
+      logStep('createSession:done', { sessionId, cUser: finalCUser });
       
       return {
         sessionId,
@@ -574,6 +588,7 @@ export async function createSession(
         cUser: finalCUser,
       };
     } catch (error) {
+      logStep('createSession:error', { sessionId, cUser: finalCUser, error: error?.message || error?.toString() });
       // Cleanup on error
       if (activityTimer) clearInterval(activityTimer);
       if (page) await page.close().catch(() => {});
@@ -583,7 +598,8 @@ export async function createSession(
       if (error instanceof InvalidInputError) {
         throw error;
       }
-      throw new BrowserCrashError(`Failed to create session: ${error.message}`);
+      const message = error?.message || error?.toString() || 'unknown error';
+      throw new BrowserCrashError(`Failed to create session: ${message}`);
     }
   });
 }
@@ -614,6 +630,7 @@ export async function validateCookies(cookieInput, proxy = null) {
   let page = null;
 
   try {
+    logStep('validateCookies:start', { cUser });
     const browserInstance = await createBrowser(tempSessionId, null, proxy);
     browser = browserInstance.browser;
     context = browserInstance.context;
@@ -649,11 +666,14 @@ export async function validateCookies(cookieInput, proxy = null) {
 
     const authCheck = await detectLoginOrCheckpoint(page);
     if (authCheck.blocked) {
+      logStep('validateCookies:blocked', { cUser, reason: authCheck.reason });
       throw new InvalidInputError(`Session not authenticated: ${authCheck.reason}`);
     }
 
+    logStep('validateCookies:ok', { cUser });
     return { ok: true, cUser };
   } catch (error) {
+    logStep('validateCookies:error', { cUser, error: error?.message || error?.toString() });
     if (error instanceof InvalidInputError) {
       throw error;
     }
@@ -688,6 +708,7 @@ export async function updateSessionCookies(sessionId, cookieInput) {
     if (!stored) {
       throw new SessionNotFoundError(sessionId);
     }
+    logStep('updateSessionCookies:restore', { sessionId, cUser: stored.cUser });
     await createSession(
       stored.cookies,
       sessionId,
@@ -743,6 +764,7 @@ export async function updateSessionCookies(sessionId, cookieInput) {
       console.warn(`[SessionManager] Cookie update reload failed: ${error.message}`);
     }
   }
+  logStep('updateSessionCookies:done', { sessionId, cUser: session.cUser || cUser });
 
   session.cookieString = normalized.format === 'string' ? normalized.raw : null;
   session.cookieJson = normalized.format === 'json' ? normalized.raw : null;
@@ -835,7 +857,7 @@ export async function sendMessageForSession(sessionId, { extension, phoneNumber,
 
         // Run automation
         await withTimeout(
-          sendMessage(session.page, { extension, phoneNumber, message }),
+          sendMessage(session.page, { extension, phoneNumber, message, sessionId }),
           config.flowTimeoutMs,
           'Send flow'
         );
@@ -847,7 +869,7 @@ export async function sendMessageForSession(sessionId, { extension, phoneNumber,
             const recreated = getSession(sessionId);
             recreated.lastActivity = Date.now();
             await withTimeout(
-              sendMessage(recreated.page, { extension, phoneNumber, message }),
+              sendMessage(recreated.page, { extension, phoneNumber, message, sessionId }),
               config.flowTimeoutMs,
               'Send flow (retry)'
             );
@@ -870,7 +892,7 @@ export async function checkSessionForSession(sessionId) {
       try {
         touchSession(sessionId);
         await withTimeout(
-          checkSessionFlow(session.page),
+          checkSessionFlow(session.page, { sessionId }),
           config.flowTimeoutMs,
           'Check flow'
         );
@@ -882,7 +904,7 @@ export async function checkSessionForSession(sessionId) {
             const recreated = getSession(sessionId);
             recreated.lastActivity = Date.now();
             await withTimeout(
-              checkSessionFlow(recreated.page),
+              checkSessionFlow(recreated.page, { sessionId }),
               config.flowTimeoutMs,
               'Check flow (retry)'
             );

@@ -157,9 +157,8 @@ router.post('/', async (req, res, next) => {
  * Destroy a session
  */
 router.delete('/:sessionId', async (req, res, next) => {
+  const { sessionId } = req.params;
   try {
-    const { sessionId } = req.params;
-
     await destroySession(sessionId);
 
     res.json({
@@ -184,8 +183,8 @@ router.delete('/:sessionId', async (req, res, next) => {
  * Validate session can run WhatsApp flow (no message sent)
  */
 router.post('/:sessionId/check', async (req, res, next) => {
+  const { sessionId } = req.params;
   try {
-    const { sessionId } = req.params;
     await checkSessionForSession(sessionId);
     res.json({
       ok: true,

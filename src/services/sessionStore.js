@@ -77,51 +77,27 @@ function deserializeCookies(format, raw) {
   return raw || '';
 }
 
-function run(stmt, params) {
-  stmt.run(params);
+function runStatement(sql, params) {
+  const stmt = db.prepare(sql);
+  try {
+    stmt.run(params);
+  } finally {
+    stmt.free();
+  }
   persistDb();
 }
 
-const insertStmt = db.prepare(`
-  INSERT INTO sessions (
-    session_id, c_user, cookie_format, cookies, fingerprint, proxy, status, last_activity, created_at, updated_at
-  ) VALUES (
-    :session_id, :c_user, :cookie_format, :cookies, :fingerprint, :proxy, :status, :last_activity, :created_at, :updated_at
-  )
-  ON CONFLICT(session_id) DO UPDATE SET
-    c_user = excluded.c_user,
-    cookie_format = excluded.cookie_format,
-    cookies = excluded.cookies,
-    fingerprint = excluded.fingerprint,
-    proxy = excluded.proxy,
-    status = excluded.status,
-    last_activity = excluded.last_activity,
-    updated_at = excluded.updated_at
-`);
-
-const updateStatusStmt = db.prepare(`
-  UPDATE sessions SET status = :status, last_activity = :last_activity, updated_at = :updated_at
-  WHERE session_id = :session_id
-`);
-
-const updateCookiesStmt = db.prepare(`
-  UPDATE sessions SET cookie_format = :cookie_format, cookies = :cookies, updated_at = :updated_at
-  WHERE session_id = :session_id
-`);
-
-const deleteStmt = db.prepare('DELETE FROM sessions WHERE session_id = :session_id');
-const getByIdStmt = db.prepare('SELECT * FROM sessions WHERE session_id = :session_id');
-const getByCUserStmt = db.prepare('SELECT * FROM sessions WHERE c_user = :c_user');
-
-function getRow(stmt, params) {
-  stmt.bind(params);
-  if (!stmt.step()) {
-    stmt.reset();
-    return null;
+function getRow(sql, params) {
+  const stmt = db.prepare(sql);
+  try {
+    stmt.bind(params);
+    if (!stmt.step()) {
+      return null;
+    }
+    return stmt.getAsObject();
+  } finally {
+    stmt.free();
   }
-  const row = stmt.getAsObject();
-  stmt.reset();
-  return row;
 }
 
 function normalizeRow(row) {
@@ -142,12 +118,12 @@ function normalizeRow(row) {
 
 export const sessionStore = {
   getBySessionId(sessionId) {
-    const row = getRow(getByIdStmt, { ':session_id': sessionId });
+    const row = getRow('SELECT * FROM sessions WHERE session_id = :session_id', { ':session_id': sessionId });
     return normalizeRow(row);
   },
 
   getByCUser(cUser) {
-    const row = getRow(getByCUserStmt, { ':c_user': cUser });
+    const row = getRow('SELECT * FROM sessions WHERE c_user = :c_user', { ':c_user': cUser });
     return normalizeRow(row);
   },
 
@@ -162,7 +138,22 @@ export const sessionStore = {
     lastActivity,
   }) {
     const now = Date.now();
-    run(insertStmt, {
+    runStatement(`
+      INSERT INTO sessions (
+        session_id, c_user, cookie_format, cookies, fingerprint, proxy, status, last_activity, created_at, updated_at
+      ) VALUES (
+        :session_id, :c_user, :cookie_format, :cookies, :fingerprint, :proxy, :status, :last_activity, :created_at, :updated_at
+      )
+      ON CONFLICT(session_id) DO UPDATE SET
+        c_user = excluded.c_user,
+        cookie_format = excluded.cookie_format,
+        cookies = excluded.cookies,
+        fingerprint = excluded.fingerprint,
+        proxy = excluded.proxy,
+        status = excluded.status,
+        last_activity = excluded.last_activity,
+        updated_at = excluded.updated_at
+    `, {
       ':session_id': sessionId,
       ':c_user': cUser,
       ':cookie_format': cookieFormat,
@@ -178,7 +169,10 @@ export const sessionStore = {
 
   updateStatus(sessionId, status, lastActivity) {
     const now = Date.now();
-    run(updateStatusStmt, {
+    runStatement(`
+      UPDATE sessions SET status = :status, last_activity = :last_activity, updated_at = :updated_at
+      WHERE session_id = :session_id
+    `, {
       ':session_id': sessionId,
       ':status': status,
       ':last_activity': lastActivity || now,
@@ -188,7 +182,10 @@ export const sessionStore = {
 
   updateCookies(sessionId, cookieFormat, cookies) {
     const now = Date.now();
-    run(updateCookiesStmt, {
+    runStatement(`
+      UPDATE sessions SET cookie_format = :cookie_format, cookies = :cookies, updated_at = :updated_at
+      WHERE session_id = :session_id
+    `, {
       ':session_id': sessionId,
       ':cookie_format': cookieFormat,
       ':cookies': serializeCookies(cookieFormat, cookies),
@@ -197,6 +194,6 @@ export const sessionStore = {
   },
 
   deleteSession(sessionId) {
-    run(deleteStmt, { ':session_id': sessionId });
+    runStatement('DELETE FROM sessions WHERE session_id = :session_id', { ':session_id': sessionId });
   },
 };

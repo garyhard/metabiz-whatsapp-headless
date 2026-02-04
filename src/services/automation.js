@@ -6,10 +6,26 @@ import { AutomationError } from '../errors.js';
 import { config } from '../config.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import fs from 'fs/promises';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const INBOX_URL = 'https://business.facebook.com/latest/inbox';
+const DEBUG_DIR = path.join(__dirname, '../../profiles/debug');
+
+async function captureDebugScreenshot(page, label, sessionId = 'unknown') {
+  try {
+    await fs.mkdir(DEBUG_DIR, { recursive: true });
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const safeLabel = String(label || 'error').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const filename = `session-${sessionId}-${safeLabel}-${ts}.png`;
+    const filePath = path.join(DEBUG_DIR, filename);
+    await page.screenshot({ path: filePath, fullPage: true });
+    return { path: filePath, url: page.url() };
+  } catch (error) {
+    return { path: null, url: page?.url?.() || null, error: error?.message || String(error) };
+  }
+}
 
 /**
  * Sleep utility
@@ -821,7 +837,7 @@ async function clickSendMessage(page) {
  * @param {Page} page - Playwright page instance
  * @param {Object} options - {extension, phoneNumber, message}
  */
-export async function sendMessage(page, { extension, phoneNumber, message }) {
+export async function sendMessage(page, { extension, phoneNumber, message, sessionId = null }) {
   if (!extension || !phoneNumber || !message) {
     throw new AutomationError('Missing required fields: extension, phoneNumber, message');
   }
@@ -895,10 +911,18 @@ export async function sendMessage(page, { extension, phoneNumber, message }) {
     }
     
     console.error('[Automation] ========================================');
+    const debug = await captureDebugScreenshot(page, 'send', sessionId || 'unknown');
     if (error instanceof AutomationError) {
+      if (!error.details) {
+        error.details = { url: debug.url, screenshotPath: debug.path };
+      }
       throw error;
     }
-    throw new AutomationError(`Automation failed: ${error.message}`, error);
+    throw new AutomationError(`Automation failed: ${error.message}`, {
+      url: debug.url,
+      screenshotPath: debug.path,
+      cause: error,
+    });
   }
 }
 
@@ -906,7 +930,7 @@ export async function sendMessage(page, { extension, phoneNumber, message }) {
  * Lightweight UI check to validate session can open WhatsApp flow
  * @param {Page} page - Playwright page instance
  */
-export async function checkSessionFlow(page) {
+export async function checkSessionFlow(page, { sessionId = null } = {}) {
   console.log('[Automation] ========================================');
   console.log('[Automation] Starting WhatsApp session check');
   console.log(`[Automation] Current URL: ${page.url()}`);
@@ -967,15 +991,16 @@ export async function checkSessionFlow(page) {
     console.error('[Automation] ✗ Session check failed');
     console.error(`[Automation] Error: ${error.message}`);
     console.error('[Automation] ========================================');
+    const debug = await captureDebugScreenshot(page, 'check', sessionId || 'unknown');
     if (error instanceof AutomationError) {
       if (!error.details) {
-        error.details = { url: page.url() };
+        error.details = { url: debug.url, screenshotPath: debug.path };
       }
       throw error;
     }
     throw new AutomationError(
       `Session check failed: ${error.message}`,
-      { url: page.url(), cause: error }
+      { url: debug.url, screenshotPath: debug.path, cause: error }
     );
   }
 }
