@@ -57,9 +57,11 @@ app.use((err, req, res, next) => {
   }
 
   if (err instanceof AutomationError) {
+    const isRestricted = String(err.message || '').toLowerCase().includes('account restricted');
     return res.status(500).json({
       ok: false,
       error: err.message,
+      errorCode: isRestricted ? 'account_restricted' : 'automation_error',
       details: err.details,
     });
   }

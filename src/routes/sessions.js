@@ -206,6 +206,15 @@ router.post('/:sessionId/check', async (req, res, next) => {
         errorCode: 'invalid_input',
       });
     }
+    if (error instanceof AutomationError) {
+      const isRestricted = String(error.message || '').toLowerCase().includes('account restricted');
+      return res.status(500).json({
+        ok: false,
+        error: error.message,
+        errorCode: isRestricted ? 'account_restricted' : 'automation_error',
+        details: error.details,
+      });
+    }
     next(error);
   }
 });

@@ -16,6 +16,32 @@ const DEBUG_DIR = path.join(__dirname, '../../profiles/debug');
 async function captureDebugScreenshot(page, label, sessionId = 'unknown') {
   try {
     await fs.mkdir(DEBUG_DIR, { recursive: true });
+    try {
+      const viewport = page.viewportSize();
+      if (!viewport || viewport.width < 1600) {
+        await page.setViewportSize({ width: 1600, height: viewport?.height || 900 });
+      }
+    } catch {
+      // Ignore viewport resize errors for debug screenshots
+    }
+    try {
+      await page.addStyleTag({
+        content: `
+          [role="navigation"],
+          [data-pagelet*="LeftRail"],
+          [aria-label*="Navigation"],
+          [aria-label*="Meta Business Suite"],
+          [role="complementary"],
+          [data-testid*="right_rail"],
+          [data-pagelet*="RightRail"] {
+            display: none !important;
+          }
+          body { overflow: hidden !important; }
+        `,
+      });
+    } catch {
+      // Ignore style injection errors for debug screenshots
+    }
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
     const safeLabel = String(label || 'error').replace(/[^a-zA-Z0-9_-]/g, '_');
     const filename = `session-${sessionId}-${safeLabel}-${ts}.png`;
@@ -58,6 +84,30 @@ function isBadAuthUrl(url) {
   );
 }
 
+async function detectAccountRestricted(page, label = 'Automation') {
+  try {
+    const text = await page.evaluate(() => (document.body?.innerText || '').toLowerCase());
+    const indicators = [
+      'account restricted',
+      'messaging restricted',
+      "you can't send or receive messages",
+      'cannot send or receive messages',
+      "your account's messaging",
+      'does not comply with whatsapp',
+      'request a review',
+    ];
+    const hit = indicators.find((entry) => text.includes(entry));
+    if (hit) {
+      throw new AutomationError(`${label}: Account restricted detected`, { indicator: hit });
+    }
+  } catch (error) {
+    if (error instanceof AutomationError) {
+      throw error;
+    }
+    // Ignore detection failures
+  }
+}
+
 async function ensureOnInbox(page, label = 'Automation') {
   const url = page.url();
   if (isBadAuthUrl(url)) {
@@ -86,6 +136,7 @@ async function ensureOnInbox(page, label = 'Automation') {
       throw new AutomationError(`${label}: Unexpected URL after reload: ${nextUrl}`, { url: nextUrl });
     }
   }
+  await detectAccountRestricted(page, label);
 }
 
 /**

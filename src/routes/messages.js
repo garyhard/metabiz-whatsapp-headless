@@ -55,10 +55,11 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
       });
     }
     if (error instanceof AutomationError) {
+      const isRestricted = String(error.message || '').toLowerCase().includes('account restricted');
       return res.status(500).json({
         ok: false,
         error: error.message,
-        errorCode: 'automation_error',
+        errorCode: isRestricted ? 'account_restricted' : 'automation_error',
         details: error.details,
       });
     }
