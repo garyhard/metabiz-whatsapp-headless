@@ -3,7 +3,7 @@
  */
 
 import express from 'express';
-import { validateCookies } from '../services/sessionManager.js';
+import { validateCookies, validateProxy } from '../services/sessionManager.js';
 import { InvalidInputError } from '../errors.js';
 
 const router = express.Router();
@@ -41,6 +41,9 @@ router.post('/validate', async (req, res, next) => {
         username: proxy.username || undefined,
         password: proxy.password || undefined,
       };
+      console.log(
+        `[Routes] validateCookies proxy config: ${proxyConfig.server} (auth: ${proxyConfig.username ? 'yes' : 'no'})`
+      );
     }
 
     const result = await validateCookies(cookies, proxyConfig);
@@ -48,6 +51,49 @@ router.post('/validate', async (req, res, next) => {
     res.json({
       ok: true,
       cUser: result.cUser,
+      status: 'valid',
+    });
+  } catch (error) {
+    if (error instanceof InvalidInputError) {
+      return res.status(400).json({
+        ok: false,
+        error: error.message,
+        errorCode: 'invalid_input',
+      });
+    }
+    next(error);
+  }
+});
+
+/**
+ * POST /api/cookies/validate-proxy
+ * Validate proxy connectivity using Playwright (no cookies required)
+ */
+router.post('/validate-proxy', async (req, res, next) => {
+  try {
+    const { proxy } = req.body || {};
+    if (!proxy || typeof proxy !== 'object' || !proxy.server) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Invalid proxy format. Expected {server: string, username?: string, password?: string}.',
+        errorCode: 'invalid_input',
+      });
+    }
+
+    const proxyConfig = {
+      server: proxy.server,
+      username: proxy.username || undefined,
+      password: proxy.password || undefined,
+    };
+
+    console.log(
+      `[Routes] validateProxy proxy config: ${proxyConfig.server} (auth: ${proxyConfig.username ? 'yes' : 'no'})`
+    );
+
+    await validateProxy(proxyConfig);
+
+    res.json({
+      ok: true,
       status: 'valid',
     });
   } catch (error) {

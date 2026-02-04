@@ -17,6 +17,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const INBOX_URL = 'https://business.facebook.com/latest/inbox';
+const PROXY_IP_CHECK_URL = 'https://api.ipify.org?format=json';
+const PROXY_IP_CHECK_TIMEOUT = 15000;
+const PROXY_META_CHECK_TIMEOUT = 60000;
 const SESSIONS_FILE = path.join(__dirname, '../../profiles/sessions.json');
 const PROFILE_ROOT = path.join(__dirname, '../../profiles');
 
@@ -61,6 +64,43 @@ async function withRetry(fn, { retries = 2, delayMs = 1000 } = {}) {
 function logStep(label, details = {}) {
   const payload = Object.keys(details).length ? ` ${JSON.stringify(details)}` : '';
   console.log(`[SessionManager] ${label}${payload}`);
+}
+
+async function verifyProxyConnection(context, proxyConfig, cUser = null) {
+  if (!proxyConfig || !proxyConfig.server) {
+    return null;
+  }
+
+  logStep('proxy:check:start', { cUser, server: proxyConfig.server });
+  const checkPage = await context.newPage();
+  let ipAddress = null;
+  let ipCheckFailed = false;
+
+  try {
+    try {
+      logStep('proxy:check:ip:start', { cUser, url: PROXY_IP_CHECK_URL, timeout: PROXY_IP_CHECK_TIMEOUT });
+      await checkPage.goto(PROXY_IP_CHECK_URL, { waitUntil: 'domcontentloaded', timeout: PROXY_IP_CHECK_TIMEOUT });
+      const ipResponse = await checkPage.textContent('body');
+      const ipData = JSON.parse(ipResponse);
+      ipAddress = ipData?.ip;
+      if (!ipAddress) {
+        throw new Error('invalid IP response');
+      }
+    } catch (error) {
+      ipCheckFailed = true;
+      logStep('proxy:check:ip:warn', { cUser, server: proxyConfig.server, error: error?.message || String(error) });
+    }
+
+    logStep('proxy:check:meta:start', { cUser, url: INBOX_URL, timeout: PROXY_META_CHECK_TIMEOUT });
+    await checkPage.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: PROXY_META_CHECK_TIMEOUT });
+    logStep('proxy:check:ok', { cUser, server: proxyConfig.server, ip: ipAddress || null, ipCheckFailed });
+    return ipAddress;
+  } catch (error) {
+    logStep('proxy:check:error', { cUser, server: proxyConfig.server, error: error?.message || String(error) });
+    throw new InvalidInputError(`Proxy invalid: ${error?.message || 'unable to connect'}`);
+  } finally {
+    await checkPage.close().catch(() => {});
+  }
 }
 
 function withTimeout(promise, ms, label) {
@@ -429,6 +469,7 @@ export async function createSession(
     let context = null;
     let page = null;
     let activityTimer = null;
+    let ipAddress = null;
 
     try {
       logStep('createSession:browser:init', { sessionId, cUser: finalCUser });
@@ -441,6 +482,10 @@ export async function createSession(
       context = browserInstance.context;
       page = browserInstance.page;
       logStep('createSession:browser:ready', { sessionId, cUser: finalCUser });
+
+      if (proxyConfig && proxyConfig.server) {
+        ipAddress = await verifyProxyConnection(context, proxyConfig, finalCUser);
+      }
 
       // Parse and set cookies (string header or JSON array)
       if (normalized.format === 'string') {
@@ -472,7 +517,7 @@ export async function createSession(
       // Navigate to inbox
       console.log(`[SessionManager] Navigating to ${INBOX_URL}...`);
       await withRetry(
-        () => page.goto(INBOX_URL, { waitUntil: 'networkidle', timeout: 30000 }),
+        () => page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }),
         { retries: 2, delayMs: 1000 }
       );
       logStep('createSession:navigate:done', { sessionId, cUser: finalCUser });
@@ -500,12 +545,11 @@ export async function createSession(
       logStep('createSession:auth:ok', { sessionId, cUser: finalCUser });
       
       // Verify proxy is working by checking IP address
-      let ipAddress = null;
-      if (proxyConfig && proxyConfig.server) {
+      if (!ipAddress && proxyConfig && proxyConfig.server) {
         try {
           console.log(`[SessionManager] Verifying proxy connection...`);
           const ipCheckPage = await context.newPage();
-          await ipCheckPage.goto('https://api.ipify.org?format=json', {
+          await ipCheckPage.goto(PROXY_IP_CHECK_URL, {
             waitUntil: 'networkidle',
             timeout: 10000,
           });
@@ -517,11 +561,11 @@ export async function createSession(
         } catch (error) {
           console.warn(`[SessionManager] ⚠️  Could not verify proxy IP (this may be normal): ${error.message}`);
         }
-      } else {
+      } else if (!proxyConfig || !proxyConfig.server) {
         // Check IP even without proxy to show server IP
         try {
           const ipCheckPage = await context.newPage();
-          await ipCheckPage.goto('https://api.ipify.org?format=json', {
+          await ipCheckPage.goto(PROXY_IP_CHECK_URL, {
             waitUntil: 'networkidle',
             timeout: 10000,
           });
@@ -636,6 +680,10 @@ export async function validateCookies(cookieInput, proxy = null) {
     context = browserInstance.context;
     page = browserInstance.page;
 
+    if (proxy && proxy.server) {
+      await verifyProxyConnection(context, proxy, cUser);
+    }
+
     if (normalized.format === 'string') {
       const cookies = parseCookieString(normalized.raw);
       if (cookies.length === 0) {
@@ -659,7 +707,7 @@ export async function validateCookies(cookieInput, proxy = null) {
     }
 
     await withRetry(
-      () => page.goto(INBOX_URL, { waitUntil: 'networkidle', timeout: 30000 }),
+      () => page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }),
       { retries: 2, delayMs: 1000 }
     );
     await page.waitForTimeout(1500);
@@ -680,6 +728,41 @@ export async function validateCookies(cookieInput, proxy = null) {
     throw new BrowserCrashError(`Validate cookies failed: ${error.message}`);
   } finally {
     if (page) await page.close().catch(() => {});
+    if (context) await context.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
+    await cleanupProfile(tempSessionId);
+  }
+}
+
+/**
+ * Validate proxy connectivity using Playwright (no cookies required)
+ * @param {Object} [proxy]
+ */
+export async function validateProxy(proxy = null) {
+  if (!proxy || !proxy.server) {
+    throw new InvalidInputError('Proxy is required');
+  }
+
+  const tempSessionId = `proxy-${uuidv4()}`;
+  let browser = null;
+  let context = null;
+
+  try {
+    logStep('validateProxy:start', { server: proxy.server });
+    const browserInstance = await createBrowser(tempSessionId, null, proxy);
+    browser = browserInstance.browser;
+    context = browserInstance.context;
+
+    await verifyProxyConnection(context, proxy, null);
+    logStep('validateProxy:ok', { server: proxy.server });
+    return { ok: true };
+  } catch (error) {
+    logStep('validateProxy:error', { server: proxy?.server, error: error?.message || error?.toString() });
+    if (error instanceof InvalidInputError) {
+      throw error;
+    }
+    throw new BrowserCrashError(`Validate proxy failed: ${error.message}`);
+  } finally {
     if (context) await context.close().catch(() => {});
     if (browser) await browser.close().catch(() => {});
     await cleanupProfile(tempSessionId);

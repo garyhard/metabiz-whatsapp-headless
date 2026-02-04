@@ -31,7 +31,8 @@ BASE_URL="${BASE_URL:-http://localhost:${PORT}}"
 # Extra curl options (e.g. -k for self-signed SSL). You can override this via env.
 CURL_OPTS="${CURL_OPTS:--k}"
 
-echo -e "${YELLOW}=== WhatsApp Automation API Test Script ===${NC}\n"
+echo -e "${YELLOW}=== WhatsApp Automation API Test Script ===${NC}"
+echo -e "${YELLOW}Base URL: ${BASE_URL}${NC}\n"
 
 read_cookie_payload() {
     local prompt="$1"
@@ -140,6 +141,38 @@ build_json_payload() {
         fi
     fi
 }
+
+# Playwright-based proxy + cookie validation (via API)
+echo -e "${YELLOW}0. Proxy Validate (Playwright)...${NC}"
+read -p "Test proxy via Playwright now? (y/n) [n]: " do_proxy_check
+do_proxy_check=${do_proxy_check:-n}
+if [ "$do_proxy_check" = "y" ]; then
+    read -p "Enter proxy server (e.g., http://host:port or socks5://host:port): " proxy_server
+    if [ -z "$proxy_server" ]; then
+        echo -e "${RED}Proxy server is required for proxy check.${NC}"
+    else
+        read -p "Enter proxy username [optional]: " proxy_username
+        read -p "Enter proxy password [optional]: " proxy_password
+        payload=$(jq -n --arg server "$proxy_server" --arg username "$proxy_username" --arg password "$proxy_password" \
+          '{proxy: {server: $server, username: ($username | select(length>0)), password: ($password | select(length>0))}}')
+        if [ -z "$payload" ] || [ "$payload" = "null" ]; then
+          payload="{\"proxy\":{\"server\":\"${proxy_server}\"}}"
+        fi
+        echo -e "${YELLOW}Calling /api/cookies/validate-proxy (Playwright)...${NC}"
+        response=$(curl ${CURL_OPTS} -s -w "\n%{http_code}" -H "Content-Type: application/json" -H "x-api-key: ${API_KEY}" \
+            -d "$payload" "${BASE_URL}/api/cookies/validate-proxy")
+        http_code=$(echo "$response" | tail -n1)
+        body=$(echo "$response" | sed '$d')
+        if [ "$http_code" -eq 200 ]; then
+            echo -e "${GREEN}✓ Proxy OK${NC}"
+            echo "Response: $body"
+        else
+            echo -e "${RED}✗ Proxy check failed (HTTP $http_code)${NC}"
+            echo "Response: $body"
+        fi
+    fi
+fi
+echo ""
 
 # Test 1: Health Check
 echo -e "${YELLOW}1. Testing Health Check...${NC}"

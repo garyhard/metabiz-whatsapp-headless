@@ -34,6 +34,12 @@ export async function createBrowser(sessionId, existingFingerprint = null, proxy
     },
   };
 
+  const launchArgs = Array.isArray(config.browser.args) ? [...config.browser.args] : [];
+  if (proxy && proxy.server) {
+    launchArgs.push(`--proxy-server=${proxy.server}`);
+    launchArgs.push('--proxy-bypass-list=<-loopback>');
+  }
+
   // Add proxy if provided
   if (proxy && proxy.server) {
     contextOptions.proxy = {
@@ -54,7 +60,8 @@ export async function createBrowser(sessionId, existingFingerprint = null, proxy
   // Create persistent context with fingerprint
   const context = await chromium.launchPersistentContext(userDataDir, {
     headless: config.browser.headless,
-    args: config.browser.args,
+    args: launchArgs,
+    ignoreHTTPSErrors: true,
     ...contextOptions,
   });
   const browser = context.browser();

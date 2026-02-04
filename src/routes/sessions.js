@@ -120,6 +120,9 @@ router.post('/', async (req, res, next) => {
         username: proxy.username || undefined,
         password: proxy.password || undefined,
       };
+      console.log(
+        `[Routes] createSession proxy config: ${proxyConfig.server} (auth: ${proxyConfig.username ? 'yes' : 'no'})`
+      );
     }
 
     const result = await createSession(cookies, null, null, proxyConfig);
