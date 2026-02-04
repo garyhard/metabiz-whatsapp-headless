@@ -26,11 +26,24 @@ router.get('/', async (req, res, next) => {
     const sessions = sessionIds.map(id => {
       try {
         const session = getSession(id);
+        let cUser = null;
+        if (session.cookieFormat === 'json' && Array.isArray(session.cookieJson)) {
+          const cUserCookie = session.cookieJson.find(c => c && c.name === 'c_user');
+          if (cUserCookie && cUserCookie.value) {
+            cUser = String(cUserCookie.value);
+          }
+        } else if (session.cookieString) {
+          const match = session.cookieString.match(/(?:^|;)\s*c_user=([^;]+)/);
+          if (match && match[1]) {
+            cUser = match[1].trim();
+          }
+        }
         return {
           sessionId: id,
           createdAt: session.createdAt,
           lastActivity: session.lastActivity,
           ipAddress: session.ipAddress || null,
+          cUser,
           status: session.page && session.context && session.browser ? 'active' : 'suspended',
         };
       } catch {

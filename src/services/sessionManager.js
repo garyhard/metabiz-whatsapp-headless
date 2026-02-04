@@ -24,6 +24,8 @@ const PROFILE_ROOT = path.join(__dirname, '../../profiles');
 const sessions = new Map();
 // Simple per-session mutex to serialize UI automation
 const sessionLocks = new Map();
+// Simple per-c_user mutex to prevent duplicate sessions
+const cUserLocks = new Map();
 // Global mutex to avoid noisy concurrent UI automation across sessions
 let globalSendLock = Promise.resolve();
 
@@ -85,6 +87,28 @@ async function withSessionLock(sessionId, task) {
     release();
     if (sessionLocks.get(sessionId) === current) {
       sessionLocks.delete(sessionId);
+    }
+  }
+}
+
+async function withCUserLock(cUser, task) {
+  if (!cUser) {
+    return task();
+  }
+  const previous = cUserLocks.get(cUser) || Promise.resolve();
+  let release;
+  const current = new Promise((resolve) => {
+    release = resolve;
+  });
+  cUserLocks.set(cUser, previous.then(() => current));
+
+  try {
+    await previous;
+    return await task();
+  } finally {
+    release();
+    if (cUserLocks.get(cUser) === current) {
+      cUserLocks.delete(cUser);
     }
   }
 }
@@ -370,195 +394,198 @@ export async function createSession(
   const cUser = extractCUser(normalized);
   const { skipCUserCheck = false, cUserOverride = null } = options || {};
   const finalCUser = cUserOverride || cUser;
-  if (normalized.format === 'string') {
-    if (!normalized.raw || !String(normalized.raw).trim()) {
+
+  return withCUserLock(finalCUser, async () => {
+    if (normalized.format === 'string') {
+      if (!normalized.raw || !String(normalized.raw).trim()) {
+        throw new InvalidInputError('Cookies are required');
+      }
+    }
+    if (normalized.format === 'json' && (!Array.isArray(normalized.raw) || normalized.raw.length === 0)) {
       throw new InvalidInputError('Cookies are required');
     }
-  }
-  if (normalized.format === 'json' && (!Array.isArray(normalized.raw) || normalized.raw.length === 0)) {
-    throw new InvalidInputError('Cookies are required');
-  }
-  if (!finalCUser) {
-    throw new InvalidInputError('c_user cookie is required');
-  }
-  if (!skipCUserCheck) {
-    const existing = sessionStore.getByCUser(finalCUser);
-    if (existing && existing.sessionId !== existingSessionId) {
-      throw new SessionAlreadyExistsError(finalCUser, existing.sessionId);
+    if (!finalCUser) {
+      throw new InvalidInputError('c_user cookie is required');
     }
-  }
+    if (!skipCUserCheck) {
+      const existing = sessionStore.getByCUser(finalCUser);
+      if (existing && existing.sessionId !== existingSessionId) {
+        throw new SessionAlreadyExistsError(finalCUser, existing.sessionId);
+      }
+    }
 
-  // Use existing sessionId if provided (for recreation), otherwise generate new one
-  const sessionId = existingSessionId || uuidv4();
-  const stored = sessionStore.getByCUser(finalCUser);
-  const fingerprintToUse = existingFingerprint || (stored ? stored.fingerprint : null);
-  let browser = null;
-  let context = null;
-  let page = null;
-  let activityTimer = null;
+    // Use existing sessionId if provided (for recreation), otherwise generate new one
+    const sessionId = existingSessionId || uuidv4();
+    const stored = sessionStore.getByCUser(finalCUser);
+    const fingerprintToUse = existingFingerprint || (stored ? stored.fingerprint : null);
+    let browser = null;
+    let context = null;
+    let page = null;
+    let activityTimer = null;
 
-  try {
-    // Use provided proxy, or fall back to config proxy, or null
-    const proxyConfig = proxy || config.proxy || null;
-    
-    // Create browser instance with existing fingerprint and proxy if provided (for recreation)
-    const browserInstance = await createBrowser(sessionId, fingerprintToUse, proxyConfig);
-    browser = browserInstance.browser;
-    context = browserInstance.context;
-    page = browserInstance.page;
+    try {
+      // Use provided proxy, or fall back to config proxy, or null
+      const proxyConfig = proxy || config.proxy || null;
+      
+      // Create browser instance with existing fingerprint and proxy if provided (for recreation)
+      const browserInstance = await createBrowser(sessionId, fingerprintToUse, proxyConfig);
+      browser = browserInstance.browser;
+      context = browserInstance.context;
+      page = browserInstance.page;
 
-    // Parse and set cookies (string header or JSON array)
-    if (normalized.format === 'string') {
-      const cookies = parseCookieString(normalized.raw);
-      if (cookies.length === 0) {
-        throw new InvalidInputError('No valid cookies found in the input string');
+      // Parse and set cookies (string header or JSON array)
+      if (normalized.format === 'string') {
+        const cookies = parseCookieString(normalized.raw);
+        if (cookies.length === 0) {
+          throw new InvalidInputError('No valid cookies found in the input string');
+        }
+
+        // Convert to Playwright format and set for multiple domains
+        const domains = ['business.facebook.com', '.facebook.com'];
+        for (const domain of domains) {
+          try {
+            const playwrightCookies = toPlaywrightCookies(cookies, domain);
+            await context.addCookies(playwrightCookies);
+          } catch (error) {
+            // Some cookies might fail for certain domains, continue
+            console.warn(`[SessionManager] Failed to set cookies for ${domain}:`, error.message);
+          }
+        }
+      } else {
+        const playwrightCookies = toPlaywrightCookiesFromJson(normalized.raw);
+        if (playwrightCookies.length === 0) {
+          throw new InvalidInputError('No valid cookies found in the input array');
+        }
+        await context.addCookies(playwrightCookies);
       }
 
-      // Convert to Playwright format and set for multiple domains
-      const domains = ['business.facebook.com', '.facebook.com'];
-      for (const domain of domains) {
+      // Navigate to inbox
+      console.log(`[SessionManager] Navigating to ${INBOX_URL}...`);
+      await withRetry(
+        () => page.goto(INBOX_URL, { waitUntil: 'networkidle', timeout: 30000 }),
+        { retries: 2, delayMs: 1000 }
+      );
+
+      // Verify we're on the right page
+      const finalUrl = page.url();
+      console.log(`[SessionManager] Page loaded. Final URL: ${finalUrl}`);
+      if (!finalUrl.includes('business.facebook.com')) {
+        console.warn(`[SessionManager] ⚠️  Warning: Expected business.facebook.com, got: ${finalUrl}`);
+      }
+
+      // Wait a bit for page to fully load
+      await page.waitForTimeout(2000);
+      
+      // Log page title to verify it loaded correctly
+      const pageTitle = await page.title();
+      console.log(`[SessionManager] Page title: ${pageTitle}`);
+
+      // Fail fast if redirected to login/checkpoint
+      const authCheck = await detectLoginOrCheckpoint(page);
+      if (authCheck.blocked) {
+        throw new InvalidInputError(`Session not authenticated: ${authCheck.reason}`);
+      }
+      
+      // Verify proxy is working by checking IP address
+      let ipAddress = null;
+      if (proxyConfig && proxyConfig.server) {
         try {
-          const playwrightCookies = toPlaywrightCookies(cookies, domain);
-          await context.addCookies(playwrightCookies);
+          console.log(`[SessionManager] Verifying proxy connection...`);
+          const ipCheckPage = await context.newPage();
+          await ipCheckPage.goto('https://api.ipify.org?format=json', {
+            waitUntil: 'networkidle',
+            timeout: 10000,
+          });
+          const ipResponse = await ipCheckPage.textContent('body');
+          const ipData = JSON.parse(ipResponse);
+          ipAddress = ipData.ip;
+          console.log(`[SessionManager] ✓ Proxy working! Browser IP: ${ipAddress}`);
+          await ipCheckPage.close();
         } catch (error) {
-          // Some cookies might fail for certain domains, continue
-          console.warn(`[SessionManager] Failed to set cookies for ${domain}:`, error.message);
+          console.warn(`[SessionManager] ⚠️  Could not verify proxy IP (this may be normal): ${error.message}`);
+        }
+      } else {
+        // Check IP even without proxy to show server IP
+        try {
+          const ipCheckPage = await context.newPage();
+          await ipCheckPage.goto('https://api.ipify.org?format=json', {
+            waitUntil: 'networkidle',
+            timeout: 10000,
+          });
+          const ipResponse = await ipCheckPage.textContent('body');
+          const ipData = JSON.parse(ipResponse);
+          ipAddress = ipData.ip;
+          console.log(`[SessionManager] Browser IP (no proxy): ${ipAddress}`);
+          await ipCheckPage.close();
+        } catch (error) {
+          // Ignore IP check errors
         }
       }
-    } else {
-      const playwrightCookies = toPlaywrightCookiesFromJson(normalized.raw);
-      if (playwrightCookies.length === 0) {
-        throw new InvalidInputError('No valid cookies found in the input array');
+
+      // Start activity simulation
+      activityTimer = startActivitySimulation(page, sessionId);
+
+      // Store session
+      const sessionData = {
+        browser,
+        context,
+        page,
+        activityTimer,
+        idleTimer: null,
+        createdAt: Date.now(),
+        lastActivity: Date.now(),
+        fingerprint: browserInstance.fingerprint, // Save the fingerprint
+        ipAddress: ipAddress, // Save the IP address
+        cookieString: normalized.format === 'string' ? normalized.raw : null,
+        cookieJson: normalized.format === 'json' ? normalized.raw : null,
+        cookieFormat: normalized.format,
+        proxy: proxyConfig, // Save proxy for recreation
+        status: 'active',
+        suspendedAt: null,
+        cUser: finalCUser,
+      };
+      sessions.set(sessionId, sessionData);
+      setIdleTimer(sessionId);
+
+      sessionStore.saveSession({
+        sessionId,
+        cUser: finalCUser,
+        cookieFormat: normalized.format,
+        cookies: normalized.raw,
+        fingerprint: browserInstance.fingerprint,
+        proxy: proxyConfig,
+        status: 'active',
+        lastActivity: sessionData.lastActivity,
+      });
+
+      // Save session metadata to disk (for dev mode persistence)
+      // Only save if session was successfully created (we're past the error handling)
+      if (config.devMode) {
+        await saveSessionMetadata(sessionId, sessionData, normalized, proxyConfig);
       }
-      await context.addCookies(playwrightCookies);
-    }
 
-    // Navigate to inbox
-    console.log(`[SessionManager] Navigating to ${INBOX_URL}...`);
-    await withRetry(
-      () => page.goto(INBOX_URL, { waitUntil: 'networkidle', timeout: 30000 }),
-      { retries: 2, delayMs: 1000 }
-    );
+      console.log(`[SessionManager] ✓ Session created successfully: ${sessionId}`);
+      console.log(`[SessionManager] Active sessions: ${sessions.size}`);
+      
+      return {
+        sessionId,
+        ipAddress,
+        fingerprint: browserInstance.fingerprint,
+        cUser: finalCUser,
+      };
+    } catch (error) {
+      // Cleanup on error
+      if (activityTimer) clearInterval(activityTimer);
+      if (page) await page.close().catch(() => {});
+      if (context) await context.close().catch(() => {});
+      if (browser) await browser.close().catch(() => {});
 
-    // Verify we're on the right page
-    const finalUrl = page.url();
-    console.log(`[SessionManager] Page loaded. Final URL: ${finalUrl}`);
-    if (!finalUrl.includes('business.facebook.com')) {
-      console.warn(`[SessionManager] ⚠️  Warning: Expected business.facebook.com, got: ${finalUrl}`);
-    }
-
-    // Wait a bit for page to fully load
-    await page.waitForTimeout(2000);
-    
-    // Log page title to verify it loaded correctly
-    const pageTitle = await page.title();
-    console.log(`[SessionManager] Page title: ${pageTitle}`);
-
-    // Fail fast if redirected to login/checkpoint
-    const authCheck = await detectLoginOrCheckpoint(page);
-    if (authCheck.blocked) {
-      throw new InvalidInputError(`Session not authenticated: ${authCheck.reason}`);
-    }
-    
-    // Verify proxy is working by checking IP address
-    let ipAddress = null;
-    if (proxyConfig && proxyConfig.server) {
-      try {
-        console.log(`[SessionManager] Verifying proxy connection...`);
-        const ipCheckPage = await context.newPage();
-        await ipCheckPage.goto('https://api.ipify.org?format=json', {
-          waitUntil: 'networkidle',
-          timeout: 10000,
-        });
-        const ipResponse = await ipCheckPage.textContent('body');
-        const ipData = JSON.parse(ipResponse);
-        ipAddress = ipData.ip;
-        console.log(`[SessionManager] ✓ Proxy working! Browser IP: ${ipAddress}`);
-        await ipCheckPage.close();
-      } catch (error) {
-        console.warn(`[SessionManager] ⚠️  Could not verify proxy IP (this may be normal): ${error.message}`);
+      if (error instanceof InvalidInputError) {
+        throw error;
       }
-    } else {
-      // Check IP even without proxy to show server IP
-      try {
-        const ipCheckPage = await context.newPage();
-        await ipCheckPage.goto('https://api.ipify.org?format=json', {
-          waitUntil: 'networkidle',
-          timeout: 10000,
-        });
-        const ipResponse = await ipCheckPage.textContent('body');
-        const ipData = JSON.parse(ipResponse);
-        ipAddress = ipData.ip;
-        console.log(`[SessionManager] Browser IP (no proxy): ${ipAddress}`);
-        await ipCheckPage.close();
-      } catch (error) {
-        // Ignore IP check errors
-      }
+      throw new BrowserCrashError(`Failed to create session: ${error.message}`);
     }
-
-    // Start activity simulation
-    activityTimer = startActivitySimulation(page, sessionId);
-
-    // Store session
-    const sessionData = {
-      browser,
-      context,
-      page,
-      activityTimer,
-      idleTimer: null,
-      createdAt: Date.now(),
-      lastActivity: Date.now(),
-      fingerprint: browserInstance.fingerprint, // Save the fingerprint
-      ipAddress: ipAddress, // Save the IP address
-      cookieString: normalized.format === 'string' ? normalized.raw : null,
-      cookieJson: normalized.format === 'json' ? normalized.raw : null,
-      cookieFormat: normalized.format,
-      proxy: proxyConfig, // Save proxy for recreation
-      status: 'active',
-      suspendedAt: null,
-      cUser: finalCUser,
-    };
-    sessions.set(sessionId, sessionData);
-    setIdleTimer(sessionId);
-
-    sessionStore.saveSession({
-      sessionId,
-      cUser: finalCUser,
-      cookieFormat: normalized.format,
-      cookies: normalized.raw,
-      fingerprint: browserInstance.fingerprint,
-      proxy: proxyConfig,
-      status: 'active',
-      lastActivity: sessionData.lastActivity,
-    });
-
-    // Save session metadata to disk (for dev mode persistence)
-    // Only save if session was successfully created (we're past the error handling)
-    if (config.devMode) {
-      await saveSessionMetadata(sessionId, sessionData, normalized, proxyConfig);
-    }
-
-    console.log(`[SessionManager] ✓ Session created successfully: ${sessionId}`);
-    console.log(`[SessionManager] Active sessions: ${sessions.size}`);
-    
-    return {
-      sessionId,
-      ipAddress,
-      fingerprint: browserInstance.fingerprint,
-      cUser: finalCUser,
-    };
-  } catch (error) {
-    // Cleanup on error
-    if (activityTimer) clearInterval(activityTimer);
-    if (page) await page.close().catch(() => {});
-    if (context) await context.close().catch(() => {});
-    if (browser) await browser.close().catch(() => {});
-
-    if (error instanceof InvalidInputError) {
-      throw error;
-    }
-    throw new BrowserCrashError(`Failed to create session: ${error.message}`);
-  }
+  });
 }
 
 /**
