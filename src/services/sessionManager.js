@@ -37,6 +37,25 @@ function extractCUser(normalized) {
   return match?.value?.toString().trim() || '';
 }
 
+async function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withRetry(fn, { retries = 2, delayMs = 1000 } = {}) {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await fn();
+    } catch (error) {
+      attempt += 1;
+      if (attempt > retries) {
+        throw error;
+      }
+      await sleep(delayMs);
+    }
+  }
+}
+
 function withTimeout(promise, ms, label) {
   if (!ms || ms <= 0) return promise;
   let timer;
@@ -370,7 +389,9 @@ export async function createSession(
   }
 
   // Use existing sessionId if provided (for recreation), otherwise generate new one
-    const sessionId = existingSessionId || uuidv4();
+  const sessionId = existingSessionId || uuidv4();
+  const stored = sessionStore.getByCUser(finalCUser);
+  const fingerprintToUse = existingFingerprint || (stored ? stored.fingerprint : null);
   let browser = null;
   let context = null;
   let page = null;
@@ -381,7 +402,7 @@ export async function createSession(
     const proxyConfig = proxy || config.proxy || null;
     
     // Create browser instance with existing fingerprint and proxy if provided (for recreation)
-    const browserInstance = await createBrowser(sessionId, existingFingerprint, proxyConfig);
+    const browserInstance = await createBrowser(sessionId, fingerprintToUse, proxyConfig);
     browser = browserInstance.browser;
     context = browserInstance.context;
     page = browserInstance.page;
@@ -414,10 +435,10 @@ export async function createSession(
 
     // Navigate to inbox
     console.log(`[SessionManager] Navigating to ${INBOX_URL}...`);
-    await page.goto(INBOX_URL, {
-      waitUntil: 'networkidle',
-      timeout: 30000,
-    });
+    await withRetry(
+      () => page.goto(INBOX_URL, { waitUntil: 'networkidle', timeout: 30000 }),
+      { retries: 2, delayMs: 1000 }
+    );
 
     // Verify we're on the right page
     const finalUrl = page.url();
@@ -523,6 +544,8 @@ export async function createSession(
     return {
       sessionId,
       ipAddress,
+      fingerprint: browserInstance.fingerprint,
+      cUser: finalCUser,
     };
   } catch (error) {
     // Cleanup on error
@@ -591,7 +614,10 @@ export async function validateCookies(cookieInput, proxy = null) {
       await context.addCookies(playwrightCookies);
     }
 
-    await page.goto(INBOX_URL, { waitUntil: 'networkidle', timeout: 30000 });
+    await withRetry(
+      () => page.goto(INBOX_URL, { waitUntil: 'networkidle', timeout: 30000 }),
+      { retries: 2, delayMs: 1000 }
+    );
     await page.waitForTimeout(1500);
 
     const authCheck = await detectLoginOrCheckpoint(page);
@@ -629,7 +655,24 @@ export async function updateSessionCookies(sessionId, cookieInput) {
     throw new InvalidInputError('Cookies are required');
   }
 
-  const session = getSession(sessionId);
+  let session = sessions.get(sessionId);
+  if (!session) {
+    const stored = sessionStore.getBySessionId(sessionId);
+    if (!stored) {
+      throw new SessionNotFoundError(sessionId);
+    }
+    await createSession(
+      stored.cookies,
+      sessionId,
+      stored.fingerprint,
+      stored.proxy || null,
+      { skipCUserCheck: true, cUserOverride: stored.cUser }
+    );
+    session = sessions.get(sessionId);
+  }
+  if (!session) {
+    throw new SessionNotFoundError(sessionId);
+  }
   const cUser = extractCUser(normalized);
   if (!cUser) {
     throw new InvalidInputError('c_user cookie is required');
@@ -665,7 +708,10 @@ export async function updateSessionCookies(sessionId, cookieInput) {
   // Refresh page to ensure cookies are applied
   if (session.page) {
     try {
-      await session.page.reload({ waitUntil: 'networkidle', timeout: 30000 });
+      await withRetry(
+        () => session.page.reload({ waitUntil: 'networkidle', timeout: 30000 }),
+        { retries: 2, delayMs: 1000 }
+      );
     } catch (error) {
       console.warn(`[SessionManager] Cookie update reload failed: ${error.message}`);
     }

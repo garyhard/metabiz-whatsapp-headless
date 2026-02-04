@@ -115,6 +115,8 @@ router.post('/', async (req, res, next) => {
       sessionId: result.sessionId,
       ipAddress: result.ipAddress,
       status: 'active',
+      cUser: result.cUser || null,
+      fingerprint: result.fingerprint || null,
     });
   } catch (error) {
     if (error instanceof InvalidInputError) {

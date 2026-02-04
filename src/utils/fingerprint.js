@@ -7,7 +7,6 @@ const COMMON_RESOLUTIONS = [
   { width: 1920, height: 1080 },
   { width: 1366, height: 768 },
   { width: 1536, height: 864 },
-  { width: 2560, height: 1440 },
   { width: 1440, height: 900 },
   { width: 1280, height: 720 },
 ];
@@ -19,13 +18,12 @@ const CHROME_VERSIONS = [
   '121.0.6167.85',
 ];
 
-const HARDWARE_CONCURRENCY_OPTIONS = [2, 4, 8, 16];
-const DEVICE_MEMORY_OPTIONS = [4, 8, 16];
+const HARDWARE_CONCURRENCY_OPTIONS = [4, 8];
+const DEVICE_MEMORY_OPTIONS = [4, 8];
 
 const PLATFORMS = [
   'Win32',
   'MacIntel',
-  'Linux x86_64',
 ];
 
 /**
@@ -69,4 +67,3 @@ export function generateFingerprint() {
     deviceMemory,
   };
 }
-
