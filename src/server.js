@@ -8,7 +8,7 @@ import { apiKeyAuth } from './middleware/auth.js';
 import sessionsRouter from './routes/sessions.js';
 import messagesRouter from './routes/messages.js';
 import cookiesRouter from './routes/cookies.js';
-import { destroyAllSessions, restoreSessions } from './services/sessionManager.js';
+import { destroyAllSessions, restoreSessions, getProgressByCUser } from './services/sessionManager.js';
 import {
   SessionNotFoundError,
   InvalidInputError,
@@ -33,6 +33,15 @@ app.use('/api/sessions', apiKeyAuth, sessionsRouter);
 app.use('/api/sessions', apiKeyAuth, messagesRouter);
 // Cookies validation
 app.use('/api/cookies', apiKeyAuth, cookiesRouter);
+// Progress polling (by c_user)
+app.get('/api/progress', apiKeyAuth, (req, res) => {
+  const cUser = req.query.c_user || req.query.cUser;
+  const progress = getProgressByCUser(cUser);
+  if (!progress) {
+    return res.status(404).json({ ok: false, error: 'Progress not found' });
+  }
+  res.json({ ok: true, progress });
+});
 
 // Error handling middleware
 app.use((err, req, res, next) => {

@@ -20,6 +20,7 @@ const INBOX_URL = 'https://business.facebook.com/latest/inbox';
 const PROXY_IP_CHECK_URL = 'https://api.ipify.org?format=json';
 const PROXY_IP_CHECK_TIMEOUT = 15000;
 const PROXY_META_CHECK_TIMEOUT = 60000;
+const progressByCUser = new Map();
 const SESSIONS_FILE = path.join(__dirname, '../../profiles/sessions.json');
 const PROFILE_ROOT = path.join(__dirname, '../../profiles');
 
@@ -64,6 +65,21 @@ async function withRetry(fn, { retries = 2, delayMs = 1000 } = {}) {
 function logStep(label, details = {}) {
   const payload = Object.keys(details).length ? ` ${JSON.stringify(details)}` : '';
   console.log(`[SessionManager] ${label}${payload}`);
+}
+
+function setProgress(cUser, step, extra = {}) {
+  if (!cUser) return;
+  progressByCUser.set(String(cUser), {
+    cUser: String(cUser),
+    step,
+    updatedAt: Date.now(),
+    ...extra,
+  });
+}
+
+export function getProgressByCUser(cUser) {
+  if (!cUser) return null;
+  return progressByCUser.get(String(cUser)) || null;
 }
 
 async function verifyProxyConnection(context, proxyConfig, cUser = null) {
@@ -442,6 +458,7 @@ export async function createSession(
 
   return withCUserLock(finalCUser, async () => {
     logStep('createSession:start', { cUser: finalCUser });
+    setProgress(finalCUser, 'create:start');
     if (normalized.format === 'string') {
       if (!normalized.raw || !String(normalized.raw).trim()) {
         throw new InvalidInputError('Cookies are required');
@@ -473,6 +490,7 @@ export async function createSession(
 
     try {
       logStep('createSession:browser:init', { sessionId, cUser: finalCUser });
+      setProgress(finalCUser, 'create:browser:init', { sessionId });
       // Use provided proxy, or fall back to config proxy, or null
       const proxyConfig = proxy || config.proxy || null;
       
@@ -482,9 +500,11 @@ export async function createSession(
       context = browserInstance.context;
       page = browserInstance.page;
       logStep('createSession:browser:ready', { sessionId, cUser: finalCUser });
+      setProgress(finalCUser, 'create:browser:ready', { sessionId });
 
       if (proxyConfig && proxyConfig.server) {
         ipAddress = await verifyProxyConnection(context, proxyConfig, finalCUser);
+        setProgress(finalCUser, 'create:proxy:ok', { sessionId, ipAddress });
       }
 
       // Parse and set cookies (string header or JSON array)
@@ -513,6 +533,7 @@ export async function createSession(
       await context.addCookies(playwrightCookies);
     }
       logStep('createSession:cookies:applied', { sessionId, cUser: finalCUser, format: normalized.format });
+      setProgress(finalCUser, 'create:cookies:applied', { sessionId, format: normalized.format });
 
       // Navigate to inbox
       console.log(`[SessionManager] Navigating to ${INBOX_URL}...`);
@@ -521,6 +542,7 @@ export async function createSession(
         { retries: 2, delayMs: 1000 }
       );
       logStep('createSession:navigate:done', { sessionId, cUser: finalCUser });
+      setProgress(finalCUser, 'create:navigate:done', { sessionId });
 
       // Verify we're on the right page
       const finalUrl = page.url();
@@ -540,9 +562,11 @@ export async function createSession(
       const authCheck = await detectLoginOrCheckpoint(page);
       if (authCheck.blocked) {
         logStep('createSession:auth:blocked', { sessionId, cUser: finalCUser, reason: authCheck.reason });
+        setProgress(finalCUser, 'create:auth:blocked', { sessionId, reason: authCheck.reason });
         throw new InvalidInputError(`Session not authenticated: ${authCheck.reason}`);
       }
       logStep('createSession:auth:ok', { sessionId, cUser: finalCUser });
+      setProgress(finalCUser, 'create:auth:ok', { sessionId });
       
       // Verify proxy is working by checking IP address
       if (!ipAddress && proxyConfig && proxyConfig.server) {
@@ -624,6 +648,7 @@ export async function createSession(
       console.log(`[SessionManager] ✓ Session created successfully: ${sessionId}`);
       console.log(`[SessionManager] Active sessions: ${sessions.size}`);
       logStep('createSession:done', { sessionId, cUser: finalCUser });
+      setProgress(finalCUser, 'create:done', { sessionId });
       
       return {
         sessionId,
@@ -633,6 +658,7 @@ export async function createSession(
       };
     } catch (error) {
       logStep('createSession:error', { sessionId, cUser: finalCUser, error: error?.message || error?.toString() });
+      setProgress(finalCUser, 'create:error', { sessionId, error: error?.message || error?.toString() });
       // Cleanup on error
       if (activityTimer) clearInterval(activityTimer);
       if (page) await page.close().catch(() => {});
@@ -675,6 +701,7 @@ export async function validateCookies(cookieInput, proxy = null) {
 
   try {
     logStep('validateCookies:start', { cUser });
+    setProgress(cUser, 'validate:start');
     const browserInstance = await createBrowser(tempSessionId, null, proxy);
     browser = browserInstance.browser;
     context = browserInstance.context;
@@ -682,6 +709,7 @@ export async function validateCookies(cookieInput, proxy = null) {
 
     if (proxy && proxy.server) {
       await verifyProxyConnection(context, proxy, cUser);
+      setProgress(cUser, 'validate:proxy:ok');
     }
 
     if (normalized.format === 'string') {
@@ -715,13 +743,16 @@ export async function validateCookies(cookieInput, proxy = null) {
     const authCheck = await detectLoginOrCheckpoint(page);
     if (authCheck.blocked) {
       logStep('validateCookies:blocked', { cUser, reason: authCheck.reason });
+      setProgress(cUser, 'validate:blocked', { reason: authCheck.reason });
       throw new InvalidInputError(`Session not authenticated: ${authCheck.reason}`);
     }
 
     logStep('validateCookies:ok', { cUser });
+    setProgress(cUser, 'validate:ok');
     return { ok: true, cUser };
   } catch (error) {
     logStep('validateCookies:error', { cUser, error: error?.message || error?.toString() });
+    setProgress(cUser, 'validate:error', { error: error?.message || error?.toString() });
     if (error instanceof InvalidInputError) {
       throw error;
     }
@@ -840,7 +871,7 @@ export async function updateSessionCookies(sessionId, cookieInput) {
   if (session.page) {
     try {
       await withRetry(
-        () => session.page.reload({ waitUntil: 'networkidle', timeout: 30000 }),
+        () => session.page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }),
         { retries: 2, delayMs: 1000 }
       );
     } catch (error) {

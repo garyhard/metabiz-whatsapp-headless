@@ -908,7 +908,7 @@ export async function sendMessage(page, { extension, phoneNumber, message, sessi
   
   // Refresh page to ensure clean state (especially if previous automation failed)
   console.log('[Automation] Refreshing page to ensure clean state...');
-  await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
+  await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
   await sleep(2000); // Wait for page to fully load
   await ensureOnInbox(page, 'Send');
   console.log('[Automation] ✓ Page refreshed');
@@ -987,7 +987,7 @@ export async function checkSessionFlow(page, { sessionId = null } = {}) {
   console.log(`[Automation] Current URL: ${page.url()}`);
 
   // Refresh for clean state
-  await page.reload({ waitUntil: 'networkidle', timeout: 30000 });
+  await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
   await sleep(1500);
   await ensureOnInbox(page, 'Check');
 
