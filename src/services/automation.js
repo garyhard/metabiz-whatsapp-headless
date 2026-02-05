@@ -3,7 +3,6 @@
  */
 
 import { AutomationError } from '../errors.js';
-import { config } from '../config.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
@@ -242,32 +241,6 @@ async function findByText(page, { text, root = null, selector = '*' }) {
   return null;
 }
 
-async function findByAnyText(page, { texts, root = null, selector = '*' }) {
-  const wants = normalizeList(texts);
-  if (wants.length === 0) return null;
-
-  if (root && root.$$) {
-    const elements = await root.$$(selector);
-    for (const el of elements) {
-      const isElVisible = await isVisible(page, el);
-      if (!isElVisible) continue;
-      if (await elementTextMatches(page, el, wants)) {
-        return el;
-      }
-    }
-  } else {
-    const elements = await page.$$(selector);
-    for (const el of elements) {
-      const isElVisible = await isVisible(page, el);
-      if (!isElVisible) continue;
-      if (await elementTextMatches(page, el, wants)) {
-        return el;
-      }
-    }
-  }
-  return null;
-}
-
 /**
  * Set native value on input element
  */
@@ -363,19 +336,11 @@ async function openWhatsappModal(page) {
     'div[role="button"][data-surface*="whatsapp_biz_init_thread_header_button"]'
   );
 
-  // Fallback to text search
+  // Fallback to exact text search
   if (!btn) {
-    console.log('[Automation] Step 1: Button not found by data-surface, trying text search...');
-    btn = await findByAnyText(page, {
-      texts: config.texts.openWhatsappModal,
-      selector: '[role="button"],button,div[role],a',
-    });
-  }
-
-  if (!btn) {
-    console.log('[Automation] Step 1: Button not found by text list, trying brand keyword...');
-    btn = await findByAnyText(page, {
-      texts: ['whatsapp'],
+    console.log('[Automation] Step 1: Button not found by data-surface, trying exact text...');
+    btn = await findByText(page, {
+      text: 'Send a Message on WhatsApp',
       selector: '[role="button"],button,div[role],a',
     });
   }
@@ -444,49 +409,13 @@ async function clickNewWhatsappNumber(page) {
     console.log('[Automation] Step 2: Found button by data-surface attribute');
   }
 
-  // Strategy 2: Try partial text match (case insensitive)
+  // Strategy 2: Find by exact text match
   if (!target) {
-    console.log('[Automation] Step 2: Button not found by data-surface, trying text search...');
-    const allButtons = await page.$$('[role="button"], button, div[role="button"]');
-    for (const btn of allButtons) {
-      if (await isVisible(page, btn)) {
-        const text = await page.evaluate((el) => {
-          return (el.textContent || el.innerText || '').toLowerCase();
-        }, btn);
-        if (text.includes('new whatsapp') || text.includes('new number')) {
-          target = btn;
-          console.log('[Automation] Step 2: Found button by text content:', text.substring(0, 50));
-          break;
-        }
-      }
-    }
-  }
-
-  // Strategy 3: Find by exact text match
-  if (!target) {
-    console.log('[Automation] Step 2: Trying text list...');
-    target = await findByAnyText(page, {
-      texts: config.texts.newWhatsappNumber,
+    console.log('[Automation] Step 2: Trying exact text...');
+    target = await findByText(page, {
+      text: 'New WhatsApp number',
       selector: '[role="button"],button,div[role="button"]',
     });
-  }
-
-  // Strategy 4: Search for any button containing "WhatsApp" and "new"
-  if (!target) {
-    console.log('[Automation] Step 2: Trying broader search...');
-    const allButtons = await page.$$('[role="button"], button');
-    for (const btn of allButtons) {
-      if (await isVisible(page, btn)) {
-        const text = await page.evaluate((el) => {
-          return (el.textContent || el.innerText || '').toLowerCase();
-        }, btn);
-        if ((text.includes('whatsapp') || text.includes('wa')) && text.includes('new')) {
-          target = btn;
-          console.log('[Automation] Step 2: Found button by broader search:', text.substring(0, 50));
-          break;
-        }
-      }
-    }
   }
 
   // Debug: Log what buttons we can see
@@ -842,21 +771,12 @@ async function clickSendMessage(page) {
     throw new AutomationError('Step 6: Dialog not found');
   }
 
-  // Find button with text list (locale-safe)
-  let btn = await findByAnyText(page, {
+  // Find button with exact text
+  const btn = await findByText(page, {
     root: dialog,
-    texts: config.texts.sendMessage,
+    text: 'Send Message',
     selector: '[role="button"],button,div[role="button"]',
   });
-
-  if (!btn) {
-    console.log('[Automation] Step 6: Button not found by text list, trying brand keyword...');
-    btn = await findByAnyText(page, {
-      root: dialog,
-      texts: ['send', 'kirim', 'enviar', 'envoyer', 'senden', 'invia', 'whatsapp'],
-      selector: '[role="button"],button,div[role="button"]',
-    });
-  }
 
   // If we matched the inner label div, climb to its button container
   if (btn) {
