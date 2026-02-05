@@ -11,6 +11,7 @@ import {
   checkSessionForSession,
   updateSessionCookies,
   cleanupSessions,
+  clearAllSessions,
 } from '../services/sessionManager.js';
 import { InvalidInputError, SessionNotFoundError, SessionAlreadyExistsError } from '../errors.js';
 
@@ -272,6 +273,22 @@ router.post('/cleanup', async (req, res, next) => {
   try {
     const keep = Array.isArray(req.body?.keep) ? req.body.keep : [];
     const result = await cleanupSessions(keep);
+    res.json({
+      ok: true,
+      ...result,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/sessions/clear-all
+ * Destroy all sessions and clear persistent store
+ */
+router.post('/clear-all', async (req, res, next) => {
+  try {
+    const result = await clearAllSessions();
     res.json({
       ok: true,
       ...result,

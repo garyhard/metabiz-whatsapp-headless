@@ -188,6 +188,25 @@ else
 fi
 echo ""
 
+# Optional: clear all sessions
+echo -e "${YELLOW}1b. Clear all sessions (danger)...${NC}"
+read -p "Destroy all sessions now? (y/n) [n]: " do_clear_all
+do_clear_all=${do_clear_all:-n}
+if [ "$do_clear_all" = "y" ]; then
+    response=$(curl ${CURL_OPTS} -s -w "\n%{http_code}" -H "Content-Type: application/json" -H "x-api-key: ${API_KEY}" \
+        -X POST "${BASE_URL}/api/sessions/clear-all")
+    http_code=$(echo "$response" | tail -n1)
+    body=$(echo "$response" | sed '$d')
+    if [ "$http_code" -eq 200 ]; then
+        echo -e "${GREEN}✓ Cleared${NC}"
+        echo "Response: $body"
+    else
+        echo -e "${RED}✗ Clear failed (HTTP $http_code)${NC}"
+        echo "Response: $body"
+    fi
+fi
+echo ""
+
 # Test 2: Create or Reuse Session
 echo -e "${YELLOW}2. Session Management...${NC}"
 echo -e "${API_KEY}"

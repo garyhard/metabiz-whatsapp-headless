@@ -1238,3 +1238,10 @@ export async function destroyAllSessions() {
     }
   }
 }
+
+export async function clearAllSessions() {
+  await destroyAllSessions();
+  sessionStore.clearAll();
+  progressByCUser.clear();
+  return { ok: true };
+}

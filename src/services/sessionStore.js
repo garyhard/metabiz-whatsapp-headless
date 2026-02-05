@@ -196,4 +196,8 @@ export const sessionStore = {
   deleteSession(sessionId) {
     runStatement('DELETE FROM sessions WHERE session_id = :session_id', { ':session_id': sessionId });
   },
+
+  clearAll() {
+    runStatement('DELETE FROM sessions', {});
+  },
 };
