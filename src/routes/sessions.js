@@ -228,8 +228,8 @@ router.post('/:sessionId/check', async (req, res, next) => {
  * Update cookies for an existing session
  */
 router.put('/:sessionId/cookies', async (req, res, next) => {
+  const { sessionId } = req.params;
   try {
-    const { sessionId } = req.params;
     const { cookies } = req.body || {};
     const cookiesIsString = typeof cookies === 'string';
     const cookiesIsArray = Array.isArray(cookies);

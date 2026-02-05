@@ -481,7 +481,8 @@ export async function createSession(
     // Use existing sessionId if provided (for recreation), otherwise generate new one
     const sessionId = existingSessionId || uuidv4();
     const stored = sessionStore.getByCUser(finalCUser);
-    const fingerprintToUse = existingFingerprint || (stored ? stored.fingerprint : null);
+    const storedFingerprint = stored ? stored.fingerprint : sessionStore.getFingerprint(finalCUser);
+    const fingerprintToUse = existingFingerprint || storedFingerprint || null;
     let browser = null;
     let context = null;
     let page = null;
@@ -679,9 +680,10 @@ export async function createSession(
  * @param {string|Array<Object>} cookieInput
  * @param {Object} [proxy]
  */
-export async function validateCookies(cookieInput, proxy = null) {
+export async function validateCookies(cookieInput, proxy = null, options = {}) {
   const normalized = normalizeCookiesInput(cookieInput);
   const cUser = extractCUser(normalized);
+  const persist = options?.persist === true;
   if (normalized.format === 'string') {
     if (!normalized.raw || !String(normalized.raw).trim()) {
       throw new InvalidInputError('Cookies are required');
@@ -694,21 +696,31 @@ export async function validateCookies(cookieInput, proxy = null) {
     throw new InvalidInputError('c_user cookie is required');
   }
 
-  const tempSessionId = `validate-${uuidv4()}`;
+  const tempSessionId = persist ? uuidv4() : `validate-${uuidv4()}`;
   let browser = null;
   let context = null;
   let page = null;
+  let activityTimer = null;
 
   try {
     logStep('validateCookies:start', { cUser });
     setProgress(cUser, 'validate:start');
-    const browserInstance = await createBrowser(tempSessionId, null, proxy);
+    if (persist) {
+      const existing = sessionStore.getByCUser(cUser);
+      if (existing && existing.sessionId) {
+        setProgress(cUser, 'validate:exists', { sessionId: existing.sessionId });
+        return { ok: true, cUser, sessionId: existing.sessionId, reused: true };
+      }
+    }
+    const storedFingerprint = sessionStore.getFingerprint(cUser);
+    const browserInstance = await createBrowser(tempSessionId, storedFingerprint, proxy);
     browser = browserInstance.browser;
     context = browserInstance.context;
     page = browserInstance.page;
 
+    let ipAddress = null;
     if (proxy && proxy.server) {
-      await verifyProxyConnection(context, proxy, cUser);
+      ipAddress = await verifyProxyConnection(context, proxy, cUser);
       setProgress(cUser, 'validate:proxy:ok');
     }
 
@@ -748,7 +760,46 @@ export async function validateCookies(cookieInput, proxy = null) {
     }
 
     logStep('validateCookies:ok', { cUser });
+    if (browserInstance && browserInstance.fingerprint) {
+      sessionStore.saveFingerprint(cUser, browserInstance.fingerprint);
+    }
     setProgress(cUser, 'validate:ok');
+    if (persist) {
+      activityTimer = startActivitySimulation(page, tempSessionId);
+      const sessionData = {
+        browser,
+        context,
+        page,
+        activityTimer,
+        idleTimer: null,
+        createdAt: Date.now(),
+        lastActivity: Date.now(),
+        fingerprint: browserInstance.fingerprint,
+        ipAddress: ipAddress,
+        cookieString: normalized.format === 'string' ? normalized.raw : null,
+        cookieJson: normalized.format === 'json' ? normalized.raw : null,
+        cookieFormat: normalized.format,
+        proxy: proxy || null,
+        status: 'active',
+        suspendedAt: null,
+        cUser,
+      };
+      sessions.set(tempSessionId, sessionData);
+      setIdleTimer(tempSessionId);
+      sessionStore.saveSession({
+        sessionId: tempSessionId,
+        cUser,
+        cookieFormat: normalized.format,
+        cookies: normalized.raw,
+        fingerprint: browserInstance.fingerprint,
+        proxy: proxy || null,
+        status: 'active',
+        lastActivity: sessionData.lastActivity,
+      });
+      logStep('validateCookies:persisted', { cUser, sessionId: tempSessionId });
+      setProgress(cUser, 'validate:done', { sessionId: tempSessionId });
+      return { ok: true, cUser, sessionId: tempSessionId, reused: false };
+    }
     return { ok: true, cUser };
   } catch (error) {
     logStep('validateCookies:error', { cUser, error: error?.message || error?.toString() });
@@ -758,10 +809,12 @@ export async function validateCookies(cookieInput, proxy = null) {
     }
     throw new BrowserCrashError(`Validate cookies failed: ${error.message}`);
   } finally {
-    if (page) await page.close().catch(() => {});
-    if (context) await context.close().catch(() => {});
-    if (browser) await browser.close().catch(() => {});
-    await cleanupProfile(tempSessionId);
+    if (!persist) {
+      if (page) await page.close().catch(() => {});
+      if (context) await context.close().catch(() => {});
+      if (browser) await browser.close().catch(() => {});
+      await cleanupProfile(tempSessionId);
+    }
   }
 }
 

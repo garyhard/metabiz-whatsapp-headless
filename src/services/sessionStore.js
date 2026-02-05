@@ -46,6 +46,11 @@ db.exec(`
     updated_at INTEGER
   );
   CREATE INDEX IF NOT EXISTS idx_sessions_last_activity ON sessions(last_activity);
+  CREATE TABLE IF NOT EXISTS fingerprints (
+    c_user TEXT PRIMARY KEY,
+    fingerprint TEXT NOT NULL,
+    updated_at INTEGER
+  );
 `);
 
 function persistDb() {
@@ -127,6 +132,27 @@ export const sessionStore = {
     return normalizeRow(row);
   },
 
+  getFingerprint(cUser) {
+    const row = getRow('SELECT * FROM fingerprints WHERE c_user = :c_user', { ':c_user': cUser });
+    if (!row || !row.fingerprint) return null;
+    return deserialize(row.fingerprint) || null;
+  },
+
+  saveFingerprint(cUser, fingerprint) {
+    const now = Date.now();
+    runStatement(`
+      INSERT INTO fingerprints (c_user, fingerprint, updated_at)
+      VALUES (:c_user, :fingerprint, :updated_at)
+      ON CONFLICT(c_user) DO UPDATE SET
+        fingerprint = excluded.fingerprint,
+        updated_at = excluded.updated_at
+    `, {
+      ':c_user': cUser,
+      ':fingerprint': serialize(fingerprint || {}),
+      ':updated_at': now,
+    });
+  },
+
   saveSession({
     sessionId,
     cUser,
@@ -199,5 +225,6 @@ export const sessionStore = {
 
   clearAll() {
     runStatement('DELETE FROM sessions', {});
+    runStatement('DELETE FROM fingerprints', {});
   },
 };

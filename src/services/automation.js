@@ -120,7 +120,7 @@ async function ensureOnInbox(page, label = 'Automation') {
   const isMessages = url.includes('messages');
   if (!isBusiness || (!isInbox && !isMessages)) {
     try {
-      await page.goto(INBOX_URL, { waitUntil: 'networkidle', timeout: 30000 });
+      await page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
     } catch (error) {
       throw new AutomationError(`${label}: Unexpected URL after reload: ${url}`, { url });
     }
@@ -136,6 +136,35 @@ async function ensureOnInbox(page, label = 'Automation') {
     }
   }
   await detectAccountRestricted(page, label);
+}
+
+async function waitForMainSpinner(page, { timeoutMs = 30000 } = {}) {
+  try {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const visible = await page.evaluate(() => {
+        const spinner = document.querySelector('[role="progressbar"], [data-testid*="spinner"], [aria-label*="Loading"]');
+        if (!spinner) return false;
+        const style = window.getComputedStyle(spinner);
+        return style && style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+      });
+      if (!visible) {
+        return true;
+      }
+      await sleep(500);
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureInboxReady(page, label = 'Automation') {
+  await ensureOnInbox(page, label);
+  const spinnerOk = await waitForMainSpinner(page, { timeoutMs: 20000 });
+  if (!spinnerOk) {
+    throw new AutomationError(`${label}: Inbox still loading (spinner timeout)`);
+  }
 }
 
 /**
@@ -828,10 +857,18 @@ export async function sendMessage(page, { extension, phoneNumber, message, sessi
   
   // Refresh page to ensure clean state (especially if previous automation failed)
   console.log('[Automation] Refreshing page to ensure clean state...');
-  await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
-  await sleep(2000); // Wait for page to fully load
-  await ensureOnInbox(page, 'Send');
-  console.log('[Automation] ✓ Page refreshed');
+  try {
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+    await sleep(2000); // Wait for page to fully load
+    await ensureInboxReady(page, 'Send');
+    console.log('[Automation] ✓ Page refreshed');
+  } catch (error) {
+    console.warn(`[Automation] Refresh failed: ${error.message}. Retrying...`);
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+    await sleep(2000);
+    await ensureInboxReady(page, 'Send');
+    console.log('[Automation] ✓ Page refreshed (retry)');
+  }
   console.log('[Automation] ========================================');
 
   try {
@@ -909,7 +946,7 @@ export async function checkSessionFlow(page, { sessionId = null } = {}) {
   // Refresh for clean state
   await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
   await sleep(1500);
-  await ensureOnInbox(page, 'Check');
+  await ensureInboxReady(page, 'Check');
 
   try {
     // Step 1: Open WhatsApp modal

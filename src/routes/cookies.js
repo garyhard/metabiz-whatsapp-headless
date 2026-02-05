@@ -14,7 +14,7 @@ const router = express.Router();
  */
 router.post('/validate', async (req, res, next) => {
   try {
-    const { cookies, proxy } = req.body || {};
+    const { cookies, proxy, persist } = req.body || {};
 
     const cookiesIsString = typeof cookies === 'string';
     const cookiesIsArray = Array.isArray(cookies);
@@ -46,12 +46,14 @@ router.post('/validate', async (req, res, next) => {
       );
     }
 
-    const result = await validateCookies(cookies, proxyConfig);
+    const result = await validateCookies(cookies, proxyConfig, { persist: persist === true });
 
     res.json({
       ok: true,
       cUser: result.cUser,
       status: 'valid',
+      sessionId: result.sessionId,
+      reused: result.reused || false,
     });
   } catch (error) {
     if (error instanceof InvalidInputError) {

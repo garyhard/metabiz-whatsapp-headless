@@ -9,6 +9,9 @@ import sessionsRouter from './routes/sessions.js';
 import messagesRouter from './routes/messages.js';
 import cookiesRouter from './routes/cookies.js';
 import { destroyAllSessions, restoreSessions, getProgressByCUser } from './services/sessionManager.js';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import fs from 'fs/promises';
 import {
   SessionNotFoundError,
   InvalidInputError,
@@ -17,6 +20,9 @@ import {
 } from './errors.js';
 
 const app = express();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const DEBUG_DIR = path.join(__dirname, '../profiles/debug');
 
 // Middleware
 app.use(express.json());
@@ -33,6 +39,21 @@ app.use('/api/sessions', apiKeyAuth, sessionsRouter);
 app.use('/api/sessions', apiKeyAuth, messagesRouter);
 // Cookies validation
 app.use('/api/cookies', apiKeyAuth, cookiesRouter);
+// Debug screenshot download
+app.get('/api/debug/screenshot', apiKeyAuth, async (req, res) => {
+  try {
+    const filename = String(req.query.filename || '').trim();
+    if (!filename) {
+      return res.status(400).json({ ok: false, error: 'filename is required' });
+    }
+    const safeName = path.basename(filename);
+    const filePath = path.join(DEBUG_DIR, safeName);
+    await fs.access(filePath);
+    res.sendFile(filePath);
+  } catch {
+    res.status(404).json({ ok: false, error: 'Screenshot not found' });
+  }
+});
 // Progress polling (by c_user)
 app.get('/api/progress', apiKeyAuth, (req, res) => {
   const cUser = req.query.c_user || req.query.cUser;
