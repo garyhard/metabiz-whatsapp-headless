@@ -855,23 +855,29 @@ export async function sendMessage(page, { extension, phoneNumber, message, sessi
     console.warn('[Automation] ⚠️  Warning: Not on expected inbox page!');
   }
   
-  // Refresh page to ensure clean state (especially if previous automation failed)
-  console.log('[Automation] Refreshing page to ensure clean state...');
-  try {
-    await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
-    await sleep(2000); // Wait for page to fully load
-    await ensureInboxReady(page, 'Send');
-    console.log('[Automation] ✓ Page refreshed');
-  } catch (error) {
-    console.warn(`[Automation] Refresh failed: ${error.message}. Retrying...`);
-    await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
-    await sleep(2000);
-    await ensureInboxReady(page, 'Send');
-    console.log('[Automation] ✓ Page refreshed (retry)');
-  }
-  console.log('[Automation] ========================================');
+  const maxAttempts = 3;
+  const backoffMs = [2000, 5000, 10000];
+  const retryableMessage = 'Step 1: Could not find "Send a Message on WhatsApp" button';
+  const shouldRetry = (error) =>
+    error instanceof AutomationError && typeof error.message === 'string' && error.message.includes(retryableMessage);
 
-  try {
+  const refreshForSend = async (label) => {
+    console.log(`[Automation] Refreshing page to ensure clean state${label ? ` (${label})` : ''}...`);
+    try {
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+      await sleep(2000); // Wait for page to fully load
+      await ensureInboxReady(page, 'Send');
+      console.log('[Automation] ✓ Page refreshed');
+    } catch (error) {
+      console.warn(`[Automation] Refresh failed: ${error.message}. Retrying...`);
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+      await sleep(2000);
+      await ensureInboxReady(page, 'Send');
+      console.log('[Automation] ✓ Page refreshed (retry)');
+    }
+  };
+
+  const runFlow = async () => {
     // Step 1: Open WhatsApp modal
     await openWhatsappModal(page);
 
@@ -892,13 +898,40 @@ export async function sendMessage(page, { extension, phoneNumber, message, sessi
 
     // Give the UI a short moment for send to process
     await sleep(800);
-    console.log('[Automation] ========================================');
-    console.log('[Automation] ✓ Automation completed successfully');
-    console.log('[Automation] ========================================');
-  } catch (error) {
+  };
+
+  console.log('[Automation] ========================================');
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      if (attempt === 1) {
+        await refreshForSend('initial');
+      } else if (attempt === 3) {
+        await refreshForSend('reload retry');
+      }
+      await runFlow();
+      console.log('[Automation] ========================================');
+      console.log('[Automation] ✓ Automation completed successfully');
+      console.log('[Automation] ========================================');
+      return;
+    } catch (error) {
+      lastError = error;
+      if (shouldRetry(error) && attempt < maxAttempts) {
+        const delay = backoffMs[Math.min(attempt - 1, backoffMs.length - 1)];
+        console.warn(
+          `[Automation] Retryable error detected (${error.message}). Retrying in ${delay}ms (attempt ${attempt + 1}/${maxAttempts})...`
+        );
+        await sleep(delay);
+        continue;
+      }
+      break;
+    }
+  }
+
+  if (lastError) {
     console.error('[Automation] ========================================');
     console.error('[Automation] ✗ Automation failed');
-    console.error(`[Automation] Error: ${error.message}`);
+    console.error(`[Automation] Error: ${lastError.message}`);
     
     // Log page state on failure
     try {
@@ -920,16 +953,16 @@ export async function sendMessage(page, { extension, phoneNumber, message, sessi
     
     console.error('[Automation] ========================================');
     const debug = await captureDebugScreenshot(page, 'send', sessionId || 'unknown');
-    if (error instanceof AutomationError) {
-      if (!error.details) {
-        error.details = { url: debug.url, screenshotPath: debug.path };
+    if (lastError instanceof AutomationError) {
+      if (!lastError.details) {
+        lastError.details = { url: debug.url, screenshotPath: debug.path };
       }
-      throw error;
+      throw lastError;
     }
-    throw new AutomationError(`Automation failed: ${error.message}`, {
+    throw new AutomationError(`Automation failed: ${lastError.message}`, {
       url: debug.url,
       screenshotPath: debug.path,
-      cause: error,
+      cause: lastError,
     });
   }
 }
