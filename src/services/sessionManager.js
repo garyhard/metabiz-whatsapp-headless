@@ -24,6 +24,27 @@ const progressByCUser = new Map();
 const SESSIONS_FILE = path.join(__dirname, '../../profiles/sessions.json');
 const PROFILE_ROOT = path.join(__dirname, '../../profiles');
 
+async function applyResolutionCookies(context, viewport) {
+  const width = Number(viewport?.width) || 1600;
+  const height = Number(viewport?.height) || 900;
+  const value = `${width}x${height}`;
+  const cookieBase = {
+    name: 'wd',
+    value,
+    path: '/',
+    secure: true,
+  };
+  const cookies = [
+    { ...cookieBase, domain: '.facebook.com' },
+    { ...cookieBase, domain: 'business.facebook.com' },
+  ];
+  try {
+    await context.addCookies(cookies);
+  } catch (error) {
+    console.warn(`[SessionManager] Failed to set resolution cookies: ${error.message}`);
+  }
+}
+
 // In-memory session registry
 const sessions = new Map();
 // Simple per-session mutex to serialize UI automation
@@ -533,6 +554,7 @@ export async function createSession(
       }
       await context.addCookies(playwrightCookies);
     }
+      await applyResolutionCookies(context, browserInstance.fingerprint?.viewport);
       logStep('createSession:cookies:applied', { sessionId, cUser: finalCUser, format: normalized.format });
       setProgress(finalCUser, 'create:cookies:applied', { sessionId, format: normalized.format });
 
@@ -746,6 +768,8 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
       await context.addCookies(playwrightCookies);
     }
 
+    await applyResolutionCookies(context, browserInstance.fingerprint?.viewport);
+
     await withRetry(
       () => page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }),
       { retries: 2, delayMs: 1000 }
@@ -919,6 +943,9 @@ export async function updateSessionCookies(sessionId, cookieInput) {
     }
     await session.context.addCookies(playwrightCookies);
   }
+
+  const viewport = session.page ? session.page.viewportSize() : null;
+  await applyResolutionCookies(session.context, viewport);
 
   // Refresh page to ensure cookies are applied
   if (session.page) {
