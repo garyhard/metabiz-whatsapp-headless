@@ -13,8 +13,8 @@ const router = express.Router();
  * Send a WhatsApp message
  */
 router.post('/:sessionId/send-message', async (req, res, next) => {
+  const { sessionId } = req.params;
   try {
-    const { sessionId } = req.params;
     const { extension, phoneNumber, message } = req.body;
 
     // Validate input
