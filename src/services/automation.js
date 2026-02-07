@@ -11,6 +11,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const INBOX_URL = 'https://business.facebook.com/latest/inbox';
 const DEBUG_DIR = path.join(__dirname, '../../profiles/debug');
+const REQUEST_LOG_DIR = path.join(DEBUG_DIR, 'requests');
+const RELOAD_TIMEOUT_MS = 75000;
+const SPINNER_TIMEOUT_MS = 30000;
 
 async function captureDebugScreenshot(page, label, sessionId = 'unknown') {
   try {
@@ -52,6 +55,16 @@ async function captureDebugScreenshot(page, label, sessionId = 'unknown') {
   }
 }
 
+async function writeRequestLog(requestId, payload) {
+  try {
+    await fs.mkdir(REQUEST_LOG_DIR, { recursive: true });
+    const filePath = path.join(REQUEST_LOG_DIR, `request-${requestId}.json`);
+    await fs.writeFile(filePath, JSON.stringify(payload, null, 2));
+  } catch (error) {
+    console.warn(`[Automation] Failed to write request log: ${error?.message || String(error)}`);
+  }
+}
+
 /**
  * Sleep utility
  */
@@ -80,6 +93,17 @@ function isBadAuthUrl(url) {
     value.includes('checkpoint') ||
     value.includes('recover') ||
     value.includes('twofactor')
+  );
+}
+
+function isAuthRelatedError(error) {
+  const message = String(error?.message || '').toLowerCase();
+  return (
+    message.includes('redirected to auth') ||
+    message.includes('checkpoint') ||
+    message.includes('login') ||
+    message.includes('twofactor') ||
+    message.includes('account restricted')
   );
 }
 
@@ -120,7 +144,7 @@ async function ensureOnInbox(page, label = 'Automation') {
   const isMessages = url.includes('messages');
   if (!isBusiness || (!isInbox && !isMessages)) {
     try {
-      await page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
     } catch (error) {
       throw new AutomationError(`${label}: Unexpected URL after reload: ${url}`, { url });
     }
@@ -161,7 +185,7 @@ async function waitForMainSpinner(page, { timeoutMs = 30000 } = {}) {
 
 async function ensureInboxReady(page, label = 'Automation') {
   await ensureOnInbox(page, label);
-  const spinnerOk = await waitForMainSpinner(page, { timeoutMs: 20000 });
+  const spinnerOk = await waitForMainSpinner(page, { timeoutMs: SPINNER_TIMEOUT_MS });
   if (!spinnerOk) {
     throw new AutomationError(`${label}: Inbox still loading (spinner timeout)`);
   }
@@ -837,16 +861,23 @@ async function clickSendMessage(page) {
  * @param {Page} page - Playwright page instance
  * @param {Object} options - {extension, phoneNumber, message}
  */
-export async function sendMessage(page, { extension, phoneNumber, message, sessionId = null }) {
+export async function sendMessage(page, { extension, phoneNumber, message, sessionId = null, forceInitialRefresh = false }) {
   if (!extension || !phoneNumber || !message) {
     throw new AutomationError('Missing required fields: extension, phoneNumber, message');
   }
+
+  const requestId = `${sessionId || 'unknown'}-${Date.now()}`;
+  const steps = [];
+  const logStep = (label, extra = {}) => {
+    steps.push({ at: new Date().toISOString(), label, ...extra });
+  };
 
   console.log('[Automation] ========================================');
   console.log('[Automation] Starting WhatsApp message automation');
   console.log(`[Automation] Extension: ${extension}`);
   console.log(`[Automation] Phone: ${phoneNumber}`);
   console.log(`[Automation] Message: ${message}`);
+  logStep('send:start', { sessionId, extension, phoneNumber });
   
   // Verify we're on the right page
   const currentUrl = page.url();
@@ -854,47 +885,56 @@ export async function sendMessage(page, { extension, phoneNumber, message, sessi
   if (!currentUrl.includes('business.facebook.com') || !currentUrl.includes('inbox')) {
     console.warn('[Automation] ⚠️  Warning: Not on expected inbox page!');
   }
+  logStep('send:current_url', { url: currentUrl });
   
   const maxAttempts = 3;
   const backoffMs = [2000, 5000, 10000];
   const retryableMessage = 'Step 1: Could not find "Send a Message on WhatsApp" button';
   const shouldRetry = (error) =>
-    error instanceof AutomationError && typeof error.message === 'string' && error.message.includes(retryableMessage);
+    error instanceof AutomationError && !isAuthRelatedError(error);
 
   const refreshForSend = async (label) => {
     console.log(`[Automation] Refreshing page to ensure clean state${label ? ` (${label})` : ''}...`);
     try {
-      await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
       await sleep(2000); // Wait for page to fully load
       await ensureInboxReady(page, 'Send');
       console.log('[Automation] ✓ Page refreshed');
+      logStep('send:refresh_ok', { label });
     } catch (error) {
       console.warn(`[Automation] Refresh failed: ${error.message}. Retrying...`);
-      await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
       await sleep(2000);
       await ensureInboxReady(page, 'Send');
       console.log('[Automation] ✓ Page refreshed (retry)');
+      logStep('send:refresh_retry_ok', { label });
     }
   };
 
   const runFlow = async () => {
     // Step 1: Open WhatsApp modal
     await openWhatsappModal(page);
+    logStep('send:open_modal');
 
     // Step 2: Click "New WhatsApp number"
     await clickNewWhatsappNumber(page);
+    logStep('send:new_number');
 
     // Step 3: Select extension
     await selectExtension(page, extension);
+    logStep('send:select_extension');
 
     // Step 4: Fill phone number
     await fillPhoneNumber(page, phoneNumber);
+    logStep('send:fill_phone');
 
     // Step 5: Fill message
     await fillMessage(page, message);
+    logStep('send:fill_message');
 
     // Step 6: Click Send message (screenshot will be taken, but click is disabled inside function)
     await clickSendMessage(page);
+    logStep('send:click_send');
 
     // Give the UI a short moment for send to process
     await sleep(800);
@@ -905,7 +945,12 @@ export async function sendMessage(page, { extension, phoneNumber, message, sessi
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       if (attempt === 1) {
-        await refreshForSend('initial');
+        if (forceInitialRefresh) {
+          await refreshForSend('idle');
+        } else {
+          await ensureInboxReady(page, 'Send');
+          logStep('send:ensure_ready');
+        }
       } else if (attempt === 3) {
         await refreshForSend('reload retry');
       }
@@ -913,9 +958,12 @@ export async function sendMessage(page, { extension, phoneNumber, message, sessi
       console.log('[Automation] ========================================');
       console.log('[Automation] ✓ Automation completed successfully');
       console.log('[Automation] ========================================');
+      logStep('send:ok', { attempt });
+      await writeRequestLog(requestId, { requestId, type: 'send', steps });
       return;
     } catch (error) {
       lastError = error;
+      logStep('send:error', { attempt, error: error?.message || String(error) });
       if (shouldRetry(error) && attempt < maxAttempts) {
         const delay = backoffMs[Math.min(attempt - 1, backoffMs.length - 1)];
         console.warn(
@@ -953,6 +1001,14 @@ export async function sendMessage(page, { extension, phoneNumber, message, sessi
     
     console.error('[Automation] ========================================');
     const debug = await captureDebugScreenshot(page, 'send', sessionId || 'unknown');
+    await writeRequestLog(requestId, {
+      requestId,
+      type: 'send',
+      steps,
+      error: lastError.message,
+      screenshotPath: debug.path,
+      url: debug.url,
+    });
     if (lastError instanceof AutomationError) {
       if (!lastError.details) {
         lastError.details = { url: debug.url, screenshotPath: debug.path };
@@ -976,17 +1032,44 @@ export async function checkSessionFlow(page, { sessionId = null } = {}) {
   console.log('[Automation] Starting WhatsApp session check');
   console.log(`[Automation] Current URL: ${page.url()}`);
 
-  // Refresh for clean state
-  await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
-  await sleep(1500);
-  await ensureInboxReady(page, 'Check');
+  const requestId = `${sessionId || 'unknown'}-${Date.now()}`;
+  const steps = [];
+  const logStep = (label, extra = {}) => {
+    steps.push({ at: new Date().toISOString(), label, ...extra });
+  };
+  logStep('check:start', { sessionId });
 
-  try {
+  const maxAttempts = 3;
+  const backoffMs = [2000, 5000, 10000];
+  const shouldRetry = (error) =>
+    error instanceof AutomationError && !isAuthRelatedError(error);
+
+  const refreshForCheck = async (label) => {
+    console.log(`[Automation] Refreshing page for check${label ? ` (${label})` : ''}...`);
+    try {
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
+      await sleep(1500);
+      await ensureInboxReady(page, 'Check');
+      console.log('[Automation] ✓ Page refreshed');
+      logStep('check:refresh_ok', { label });
+    } catch (error) {
+      console.warn(`[Automation] Refresh failed: ${error.message}. Retrying...`);
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
+      await sleep(1500);
+      await ensureInboxReady(page, 'Check');
+      console.log('[Automation] ✓ Page refreshed (retry)');
+      logStep('check:refresh_retry_ok', { label });
+    }
+  };
+
+  const runCheck = async () => {
     // Step 1: Open WhatsApp modal
     await openWhatsappModal(page);
+    logStep('check:open_modal');
 
     // Step 2: Click "New WhatsApp number"
     await clickNewWhatsappNumber(page);
+    logStep('check:new_number');
 
     // Step 3: Ensure extension combobox exists
     const dialog = await waitFor(
@@ -997,17 +1080,20 @@ export async function checkSessionFlow(page, { sessionId = null } = {}) {
     if (!dialog) {
       throw new AutomationError('Check: Dialog not found');
     }
+    logStep('check:dialog_ok');
 
     const combo = await findFirstVisible(page, '[role="dialog"] [role="combobox"][aria-haspopup="listbox"]');
     if (!combo) {
       throw new AutomationError('Check: Extension dropdown not found');
     }
+    logStep('check:combo_ok');
 
     // Step 4: Ensure phone input exists
     const phoneInput = await findFirstVisible(page, 'input[type="tel"],input[inputmode="tel"]');
     if (!phoneInput) {
       throw new AutomationError('Check: Phone input not found');
     }
+    logStep('check:phone_ok');
 
     // Step 5: Ensure message input exists
     const textarea = await findFirstVisible(page, 'textarea');
@@ -1015,6 +1101,7 @@ export async function checkSessionFlow(page, { sessionId = null } = {}) {
     if (!textarea && !editable) {
       throw new AutomationError('Check: Message input not found');
     }
+    logStep('check:message_ok');
 
     // Close dialog
     try {
@@ -1023,25 +1110,60 @@ export async function checkSessionFlow(page, { sessionId = null } = {}) {
     } catch {
       // Ignore close failures
     }
+  };
 
-    console.log('[Automation] ✓ Session check completed successfully');
-    console.log('[Automation] ========================================');
-    return true;
-  } catch (error) {
-    console.error('[Automation] ========================================');
-    console.error('[Automation] ✗ Session check failed');
-    console.error(`[Automation] Error: ${error.message}`);
-    console.error('[Automation] ========================================');
-    const debug = await captureDebugScreenshot(page, 'check', sessionId || 'unknown');
-    if (error instanceof AutomationError) {
-      if (!error.details) {
-        error.details = { url: debug.url, screenshotPath: debug.path };
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      if (attempt === 1) {
+        await refreshForCheck('initial');
+      } else if (attempt === 3) {
+        await refreshForCheck('reload retry');
+      } else {
+        await refreshForCheck();
       }
-      throw error;
+      await runCheck();
+      console.log('[Automation] ✓ Session check completed successfully');
+      console.log('[Automation] ========================================');
+      logStep('check:ok', { attempt });
+      await writeRequestLog(requestId, { requestId, type: 'check', steps });
+      return true;
+    } catch (error) {
+      lastError = error;
+      logStep('check:error', { attempt, error: error?.message || String(error) });
+      if (shouldRetry(error) && attempt < maxAttempts) {
+        const delay = backoffMs[Math.min(attempt - 1, backoffMs.length - 1)];
+        console.warn(
+          `[Automation] Retryable check error (${error.message}). Retrying in ${delay}ms (attempt ${attempt + 1}/${maxAttempts})...`
+        );
+        await sleep(delay);
+        continue;
+      }
+      break;
     }
-    throw new AutomationError(
-      `Session check failed: ${error.message}`,
-      { url: debug.url, screenshotPath: debug.path, cause: error }
-    );
   }
+
+  console.error('[Automation] ========================================');
+  console.error('[Automation] ✗ Session check failed');
+  console.error(`[Automation] Error: ${lastError?.message || 'unknown error'}`);
+  console.error('[Automation] ========================================');
+  const debug = await captureDebugScreenshot(page, 'check', sessionId || 'unknown');
+  await writeRequestLog(requestId, {
+    requestId,
+    type: 'check',
+    steps,
+    error: lastError?.message || 'unknown error',
+    screenshotPath: debug.path,
+    url: debug.url,
+  });
+  if (lastError instanceof AutomationError) {
+    if (!lastError.details) {
+      lastError.details = { url: debug.url, screenshotPath: debug.path };
+    }
+    throw lastError;
+  }
+  throw new AutomationError(
+    `Session check failed: ${lastError?.message || 'unknown error'}`,
+    { url: debug.url, screenshotPath: debug.path, cause: lastError }
+  );
 }

@@ -226,6 +226,10 @@ function isBrowserClosedError(error) {
   );
 }
 
+function isRecoverableCrash(error) {
+  return error instanceof BrowserCrashError || isBrowserClosedError(error);
+}
+
 function setIdleTimer(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) return;
@@ -1059,6 +1063,12 @@ export async function sendMessageForSession(sessionId, { extension, phoneNumber,
   return withGlobalSendLock(() =>
     withSessionLock(sessionId, async () => {
       const session = await ensureSessionActive(sessionId);
+      const now = Date.now();
+      const lastActivity = session.lastActivity || 0;
+      const forceInitialRefresh =
+        config.sendReloadIdleMs > 0 &&
+        lastActivity > 0 &&
+        now - lastActivity > config.sendReloadIdleMs;
 
       try {
         // Update last activity
@@ -1066,19 +1076,19 @@ export async function sendMessageForSession(sessionId, { extension, phoneNumber,
 
         // Run automation
         await withTimeout(
-          sendMessage(session.page, { extension, phoneNumber, message, sessionId }),
+          sendMessage(session.page, { extension, phoneNumber, message, sessionId, forceInitialRefresh }),
           config.flowTimeoutMs,
           'Send flow'
         );
         return { ok: true };
       } catch (error) {
-        if (isBrowserClosedError(error)) {
+        if (isRecoverableCrash(error)) {
           try {
             await recreateSessionFromMemory(sessionId);
             const recreated = getSession(sessionId);
             recreated.lastActivity = Date.now();
             await withTimeout(
-              sendMessage(recreated.page, { extension, phoneNumber, message, sessionId }),
+              sendMessage(recreated.page, { extension, phoneNumber, message, sessionId, forceInitialRefresh: true }),
               config.flowTimeoutMs,
               'Send flow (retry)'
             );
@@ -1107,7 +1117,7 @@ export async function checkSessionForSession(sessionId) {
         );
         return { ok: true };
       } catch (error) {
-        if (isBrowserClosedError(error)) {
+        if (isRecoverableCrash(error)) {
           try {
             await recreateSessionFromMemory(sessionId);
             const recreated = getSession(sessionId);

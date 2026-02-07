@@ -12,6 +12,7 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 const DEV_MODE = process.env.DEV_MODE === 'true' || process.env.NODE_ENV === 'development';
 const FLOW_TIMEOUT_MS = parseInt(process.env.FLOW_TIMEOUT_MS || '60000', 10);
 const IDLE_TIMEOUT_MINUTES = parseInt(process.env.IDLE_TIMEOUT_MINUTES || '0', 10);
+const SEND_RELOAD_IDLE_MINUTES = parseInt(process.env.SEND_RELOAD_IDLE_MINUTES || '10', 10);
 
 function parseEnvList(value, fallback = []) {
   if (!value) return fallback;
@@ -42,6 +43,9 @@ export const config = {
   flowTimeoutMs: Number.isFinite(FLOW_TIMEOUT_MS) && FLOW_TIMEOUT_MS > 0 ? FLOW_TIMEOUT_MS : 60000,
   idleTimeoutMs: Number.isFinite(IDLE_TIMEOUT_MINUTES) && IDLE_TIMEOUT_MINUTES > 0
     ? IDLE_TIMEOUT_MINUTES * 60 * 1000
+    : 0,
+  sendReloadIdleMs: Number.isFinite(SEND_RELOAD_IDLE_MINUTES) && SEND_RELOAD_IDLE_MINUTES > 0
+    ? SEND_RELOAD_IDLE_MINUTES * 60 * 1000
     : 0,
   proxy: defaultProxy,
   texts: {
