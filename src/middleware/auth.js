@@ -11,6 +11,9 @@ export function apiKeyAuth(req, res, next) {
   const apiKey = req.headers['x-api-key'];
 
   if (!apiKey || apiKey !== config.apiKey) {
+    console.warn(
+      `[Auth] Unauthorized ${req.method} ${req.originalUrl} apiKey=${apiKey ? 'present' : 'missing'}`
+    );
     return res.status(401).json({
       ok: false,
       error: 'Invalid or missing API key',
@@ -19,4 +22,3 @@ export function apiKeyAuth(req, res, next) {
 
   next();
 }
-

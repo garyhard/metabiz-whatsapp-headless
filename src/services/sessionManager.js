@@ -585,9 +585,22 @@ export async function createSession(
       const pageTitle = await page.title();
       console.log(`[SessionManager] Page title: ${pageTitle}`);
 
-      // Fail fast if redirected to login/checkpoint
-      const authCheck = await detectLoginOrCheckpoint(page);
-      if (authCheck.blocked) {
+      // Retry auth check a few times before declaring cookies expired
+      let authCheck = null;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        authCheck = await detectLoginOrCheckpoint(page);
+        if (!authCheck.blocked) break;
+        logStep('createSession:auth:retry', { sessionId, cUser: finalCUser, attempt, reason: authCheck.reason });
+        if (attempt < 3) {
+          try {
+            await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
+            await page.waitForTimeout(1500);
+          } catch (error) {
+            console.warn(`[SessionManager] Auth retry reload failed: ${error.message}`);
+          }
+        }
+      }
+      if (authCheck && authCheck.blocked) {
         logStep('createSession:auth:blocked', { sessionId, cUser: finalCUser, reason: authCheck.reason });
         setProgress(finalCUser, 'create:auth:blocked', { sessionId, reason: authCheck.reason });
         throw new InvalidInputError(`Session not authenticated: ${authCheck.reason}`);
@@ -1010,11 +1023,12 @@ export function getSession(sessionId) {
  * Destroy a session
  * @param {string} sessionId - Session ID
  */
-export async function destroySession(sessionId) {
+export async function destroySession(sessionId, options = {}) {
   const session = sessions.get(sessionId);
   if (!session) {
     throw new SessionNotFoundError(sessionId);
   }
+  const preserveStore = options?.preserveStore === true;
 
   try {
     // Clear activity timer
@@ -1042,10 +1056,12 @@ export async function destroySession(sessionId) {
     sessions.delete(sessionId);
 
     // Remove from session store
-    sessionStore.deleteSession(sessionId);
+    if (!preserveStore) {
+      sessionStore.deleteSession(sessionId);
+    }
     
     // Remove from metadata file
-    if (config.devMode) {
+    if (config.devMode && !preserveStore) {
       await removeSessionMetadata(sessionId);
     }
     
@@ -1175,6 +1191,20 @@ export function getSessionInfo(sessionId) {
     lastActivity: session.lastActivity,
     status: session.page && session.context && session.browser ? 'active' : 'suspended',
   };
+}
+
+export async function restoreSessionFromStore(sessionId) {
+  const stored = sessionStore.getBySessionId(sessionId);
+  if (!stored) {
+    throw new SessionNotFoundError(sessionId);
+  }
+  return createSession(
+    stored.cookies,
+    sessionId,
+    stored.fingerprint,
+    stored.proxy || null,
+    { skipCUserCheck: true, cUserOverride: stored.cUser }
+  );
 }
 
 /**
@@ -1330,12 +1360,12 @@ export async function restoreSessions() {
 /**
  * Destroy all sessions (for graceful shutdown)
  */
-export async function destroyAllSessions() {
+export async function destroyAllSessions(options = {}) {
   const sessionIds = Array.from(sessions.keys());
-  await Promise.all(sessionIds.map((id) => destroySession(id).catch(() => {})));
+  await Promise.all(sessionIds.map((id) => destroySession(id, options).catch(() => {})));
   
   // Clear metadata file in dev mode
-  if (config.devMode) {
+  if (config.devMode && !options?.preserveStore) {
     try {
       await fs.unlink(SESSIONS_FILE).catch(() => {});
     } catch {

@@ -145,8 +145,8 @@ async function gracefulShutdown(signal) {
     console.log('[Server] Sessions will remain active. Use DELETE /api/sessions/:id to manually destroy them.');
   } else {
     try {
-      console.log('[Server] Closing all browser sessions...');
-      await destroyAllSessions();
+      console.log('[Server] Closing all browser sessions (preserving session store)...');
+      await destroyAllSessions({ preserveStore: true });
       console.log('[Server] All sessions closed');
     } catch (error) {
       console.error('[Server] Error closing sessions:', error);
