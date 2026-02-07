@@ -167,7 +167,8 @@ server = app.listen(config.port, async () => {
   console.log(`[Server] Health check: http://localhost:${config.port}/health`);
   if (config.devMode) {
     console.log(`[Server] 🛠️  Dev mode: Sessions will be preserved across restarts`);
-    // Restore sessions from disk
-    await restoreSessions();
+  } else {
+    console.log('[Server] Restoring sessions from session store...');
   }
+  await restoreSessions();
 });

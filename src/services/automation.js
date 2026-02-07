@@ -86,6 +86,10 @@ function normalizeList(list) {
   return Array.isArray(list) ? list.map(normalizeText).filter(Boolean) : [];
 }
 
+function normalizeDigits(value) {
+  return String(value || '').replace(/[^\d]/g, '');
+}
+
 function isBadAuthUrl(url) {
   const value = String(url || '').toLowerCase();
   return (
@@ -312,6 +316,135 @@ async function setNativeValue(page, elementHandle, value) {
     },
     value
   );
+}
+
+async function findSearchInput(page) {
+  return (
+    (await findFirstVisible(
+      page,
+      'div[data-pagelet="GenericBizInboxThreadListViewHeader"] input[role="combobox"][placeholder="Search"]'
+    )) ||
+    (await findFirstVisible(page, 'input[role="combobox"][placeholder="Search"]'))
+  );
+}
+
+async function ensureSearchEmpty(page) {
+  const input = await findSearchInput(page);
+  if (!input) {
+    throw new AutomationError('Search input not found');
+  }
+  await input.focus();
+  await sleep(50);
+  await setNativeValue(page, input, '');
+  await sleep(100);
+}
+
+async function findThreadRowByNumber(page, digits) {
+  const rows = await page.$$('span[data-surface="/bizweb:all/thread_row"]');
+  for (const row of rows) {
+    const text = await page.evaluate((el) => el.textContent || '', row);
+    if (normalizeDigits(text).includes(digits)) {
+      return row;
+    }
+  }
+  return null;
+}
+
+async function findPeopleResultByNumber(page, digits) {
+  const items = await page.$$('li._7znk');
+  for (const item of items) {
+    const text = await page.evaluate((el) => el.textContent || '', item);
+    if (normalizeDigits(text).includes(digits)) {
+      return item;
+    }
+  }
+  return null;
+}
+
+async function fillReplyMessage(page, message) {
+  const replyBox = await waitFor(
+    page,
+    async () =>
+      findFirstVisible(
+        page,
+        'div[contenteditable="true"][role="textbox"][aria-placeholder*="Reply on WhatsApp"]'
+      ),
+    { timeoutMs: 15000 }
+  );
+
+  if (!replyBox) {
+    throw new AutomationError('Reply input not found');
+  }
+
+  await replyBox.focus();
+  await sleep(100);
+  await page.evaluate(
+    (el, msg) => {
+      el.textContent = msg;
+      el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    },
+    replyBox,
+    message
+  );
+  await sleep(200);
+}
+
+async function clickReplySend(page) {
+  const button = await waitFor(
+    page,
+    async () => findFirstVisible(page, 'div[role="button"][aria-label="Submit"]'),
+    { timeoutMs: 15000 }
+  );
+  if (!button) {
+    throw new AutomationError('Reply submit button not found');
+  }
+  await clickElement(page, button, 'Reply: Submit');
+}
+
+async function tryReplyFlow(page, { phoneDigits, message }) {
+  try {
+    await ensureInboxReady(page, 'Reply');
+    await ensureSearchEmpty(page);
+
+    const row = await findThreadRowByNumber(page, phoneDigits);
+    if (row) {
+      await clickElement(page, row, 'Reply: Open thread row');
+      await fillReplyMessage(page, message);
+      await clickReplySend(page);
+      return true;
+    }
+
+    const searchInput = await findSearchInput(page);
+    if (!searchInput) {
+      return false;
+    }
+
+    await setNativeValue(page, searchInput, phoneDigits);
+    await sleep(400);
+
+    const peopleItem = await waitFor(
+      page,
+      async () => findPeopleResultByNumber(page, phoneDigits),
+      { timeoutMs: 3000 }
+    ).catch(() => null);
+
+    if (peopleItem) {
+      await clickElement(page, peopleItem, 'Reply: Open people result');
+      await fillReplyMessage(page, message);
+      await clickReplySend(page);
+      return true;
+    }
+
+    await ensureSearchEmpty(page);
+    return false;
+  } catch (error) {
+    if (isAuthRelatedError(error)) {
+      throw error;
+    }
+    console.warn(`[Automation] Reply flow failed, falling back: ${error?.message || error}`);
+    return false;
+  }
 }
 
 /**
@@ -912,6 +1045,13 @@ export async function sendMessage(page, { extension, phoneNumber, message, sessi
   };
 
   const runFlow = async () => {
+    const phoneDigits = normalizeDigits(`${extension}${phoneNumber}`);
+    const replied = await tryReplyFlow(page, { phoneDigits, message });
+    if (replied) {
+      logStep('send:reply_flow', { phoneDigits });
+      return;
+    }
+
     // Step 1: Open WhatsApp modal
     await openWhatsappModal(page);
     logStep('send:open_modal');
