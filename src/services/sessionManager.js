@@ -578,8 +578,8 @@ export async function createSession(
         console.warn(`[SessionManager] ⚠️  Warning: Expected business.facebook.com, got: ${finalUrl}`);
       }
 
-      // Wait a bit for page to fully load
-      await page.waitForTimeout(2000);
+      // Short settle time after DOMContentLoaded
+      await page.waitForTimeout(500);
       
       // Log page title to verify it loaded correctly
       const pageTitle = await page.title();
@@ -1075,7 +1075,7 @@ export async function destroySession(sessionId, options = {}) {
  * @param {string} sessionId - Session ID
  * @param {Object} options - {extension, phoneNumber, message}
  */
-export async function sendMessageForSession(sessionId, { extension, phoneNumber, message }) {
+export async function sendMessageForSession(sessionId, { extension, phoneNumber, message, useReplyFlow = true }) {
   return withGlobalSendLock(() =>
     withSessionLock(sessionId, async () => {
       const session = await ensureSessionActive(sessionId);
@@ -1092,7 +1092,14 @@ export async function sendMessageForSession(sessionId, { extension, phoneNumber,
 
         // Run automation
         await withTimeout(
-          sendMessage(session.page, { extension, phoneNumber, message, sessionId, forceInitialRefresh }),
+          sendMessage(session.page, {
+            extension,
+            phoneNumber,
+            message,
+            sessionId,
+            forceInitialRefresh,
+            useReplyFlow,
+          }),
           config.flowTimeoutMs,
           'Send flow'
         );
@@ -1104,7 +1111,14 @@ export async function sendMessageForSession(sessionId, { extension, phoneNumber,
             const recreated = getSession(sessionId);
             recreated.lastActivity = Date.now();
             await withTimeout(
-              sendMessage(recreated.page, { extension, phoneNumber, message, sessionId, forceInitialRefresh: true }),
+              sendMessage(recreated.page, {
+                extension,
+                phoneNumber,
+                message,
+                sessionId,
+                forceInitialRefresh: true,
+                useReplyFlow,
+              }),
               config.flowTimeoutMs,
               'Send flow (retry)'
             );

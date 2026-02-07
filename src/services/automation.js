@@ -12,8 +12,8 @@ const __dirname = path.dirname(__filename);
 const INBOX_URL = 'https://business.facebook.com/latest/inbox';
 const DEBUG_DIR = path.join(__dirname, '../../profiles/debug');
 const REQUEST_LOG_DIR = path.join(DEBUG_DIR, 'requests');
-const RELOAD_TIMEOUT_MS = 75000;
-const SPINNER_TIMEOUT_MS = 30000;
+const RELOAD_TIMEOUT_MS = 60000;
+const SPINNER_TIMEOUT_MS = 15000;
 
 async function captureDebugScreenshot(page, label, sessionId = 'unknown') {
   try {
@@ -333,6 +333,10 @@ async function ensureSearchEmpty(page) {
   if (!input) {
     throw new AutomationError('Search input not found');
   }
+  const currentValue = await input.evaluate((el) => el.value || '');
+  if (currentValue.trim() === '') {
+    return;
+  }
   await input.focus();
   await sleep(50);
   await setNativeValue(page, input, '');
@@ -350,11 +354,29 @@ async function findThreadRowByNumber(page, digits) {
   return null;
 }
 
+async function isPeopleSectionItem(page, itemHandle) {
+  try {
+    return await itemHandle.evaluate((el) => {
+      let node = el.parentElement;
+      for (let i = 0; i < 6 && node; i += 1) {
+        const heading = node.querySelector('div._ohe');
+        if (heading && heading.textContent.trim().toUpperCase() === 'PEOPLE') {
+          return true;
+        }
+        node = node.parentElement;
+      }
+      return false;
+    });
+  } catch {
+    return false;
+  }
+}
+
 async function findPeopleResultByNumber(page, digits) {
   const items = await page.$$('li._7znk');
   for (const item of items) {
     const text = await page.evaluate((el) => el.textContent || '', item);
-    if (normalizeDigits(text).includes(digits)) {
+    if (normalizeDigits(text).includes(digits) && (await isPeopleSectionItem(page, item))) {
       return item;
     }
   }
@@ -362,6 +384,7 @@ async function findPeopleResultByNumber(page, digits) {
 }
 
 async function fillReplyMessage(page, message) {
+  console.log('[Automation] Reply flow: waiting for reply box');
   const replyBox = await waitFor(
     page,
     async () =>
@@ -369,54 +392,92 @@ async function fillReplyMessage(page, message) {
         page,
         'div[contenteditable="true"][role="textbox"][aria-placeholder*="Reply on WhatsApp"]'
       ),
-    { timeoutMs: 15000 }
+    { timeoutMs: 8000 }
   );
 
   if (!replyBox) {
     throw new AutomationError('Reply input not found');
   }
+  console.log('[Automation] Reply flow: reply box found');
 
   await replyBox.focus();
   await sleep(100);
-  await page.evaluate(
-    (el, msg) => {
-      el.textContent = msg;
-      el.dispatchEvent(new InputEvent('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    },
-    replyBox,
-    message
-  );
+  await replyBox.evaluate((el) => {
+    el.textContent = '';
+    el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+  });
+  await page.keyboard.type(message, { delay: 1 });
+  await sleep(50);
+  await replyBox.evaluate((el) => {
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  const currentText = await replyBox.evaluate((el) => el.textContent || '');
+  console.log(`[Automation] Reply flow: reply text length=${currentText.length}`);
   await sleep(200);
+  return replyBox;
 }
 
-async function clickReplySend(page) {
+async function findScopedReplyButton(page, replyBox) {
+  if (!replyBox) return null;
+  const handle = await replyBox.evaluateHandle((el) => {
+    let node = el.parentElement;
+    for (let i = 0; i < 6 && node; i += 1) {
+      const btn =
+        node.querySelector('div[role="button"][aria-label="Send"]') ||
+        node.querySelector('div[role="button"][aria-label="Submit"]') ||
+        node.querySelector('div[role="button"][aria-label*="Send"]');
+      if (btn) return btn;
+      node = node.parentElement;
+    }
+    return null;
+  });
+  return handle.asElement();
+}
+
+async function clickReplySend(page, replyBox) {
+  console.log('[Automation] Reply flow: waiting for submit button');
   const button = await waitFor(
     page,
-    async () => findFirstVisible(page, 'div[role="button"][aria-label="Submit"]'),
+    async () => findScopedReplyButton(page, replyBox),
     { timeoutMs: 15000 }
-  );
+  ).catch(() => null);
   if (!button) {
     throw new AutomationError('Reply submit button not found');
   }
+  console.log('[Automation] Reply flow: submit button found');
   await clickElement(page, button, 'Reply: Submit');
 }
 
 async function tryReplyFlow(page, { phoneDigits, message }) {
   try {
+    console.log(`[Automation] Reply flow: start for ${phoneDigits}`);
+    console.log(`[Automation] Reply flow: url=${page.url()}`);
     await ensureInboxReady(page, 'Reply');
     await ensureSearchEmpty(page);
 
+    await waitFor(
+      page,
+      async () => {
+        const rows = await page.$$('span[data-surface="/bizweb:all/thread_row"]');
+        return rows.length > 0;
+      },
+      { timeoutMs: 2000 }
+    ).catch(() => null);
+
     const row = await findThreadRowByNumber(page, phoneDigits);
     if (row) {
+      console.log('[Automation] Reply flow: found thread row');
       await clickElement(page, row, 'Reply: Open thread row');
-      await fillReplyMessage(page, message);
-      await clickReplySend(page);
+      await sleep(400);
+      const replyBox = await fillReplyMessage(page, message);
+      await clickReplySend(page, replyBox);
+      console.log('[Automation] Reply flow: sent via thread row');
       return true;
     }
 
     const searchInput = await findSearchInput(page);
     if (!searchInput) {
+      console.warn('[Automation] Reply flow: search input not found');
       return false;
     }
 
@@ -430,12 +491,16 @@ async function tryReplyFlow(page, { phoneDigits, message }) {
     ).catch(() => null);
 
     if (peopleItem) {
+      console.log('[Automation] Reply flow: found people result');
       await clickElement(page, peopleItem, 'Reply: Open people result');
-      await fillReplyMessage(page, message);
-      await clickReplySend(page);
+      await sleep(400);
+      const replyBox = await fillReplyMessage(page, message);
+      await clickReplySend(page, replyBox);
+      console.log('[Automation] Reply flow: sent via people result');
       return true;
     }
 
+    console.warn('[Automation] Reply flow: no matching thread/people result');
     await ensureSearchEmpty(page);
     return false;
   } catch (error) {
@@ -571,7 +636,7 @@ async function clickNewWhatsappNumber(page) {
   console.log('[Automation] Step 2: Dialog found, waiting for content to load...');
   
   // Wait longer for dialog content to fully render
-  await sleep(1000);
+  await sleep(300);
 
   // Wait for any buttons to appear in the dialog
   await waitFor(
@@ -994,7 +1059,17 @@ async function clickSendMessage(page) {
  * @param {Page} page - Playwright page instance
  * @param {Object} options - {extension, phoneNumber, message}
  */
-export async function sendMessage(page, { extension, phoneNumber, message, sessionId = null, forceInitialRefresh = false }) {
+export async function sendMessage(
+  page,
+  {
+    extension,
+    phoneNumber,
+    message,
+    sessionId = null,
+    forceInitialRefresh = false,
+    useReplyFlow = true,
+  }
+) {
   if (!extension || !phoneNumber || !message) {
     throw new AutomationError('Missing required fields: extension, phoneNumber, message');
   }
@@ -1045,11 +1120,13 @@ export async function sendMessage(page, { extension, phoneNumber, message, sessi
   };
 
   const runFlow = async () => {
-    const phoneDigits = normalizeDigits(`${extension}${phoneNumber}`);
-    const replied = await tryReplyFlow(page, { phoneDigits, message });
-    if (replied) {
-      logStep('send:reply_flow', { phoneDigits });
-      return;
+    if (useReplyFlow) {
+      const phoneDigits = normalizeDigits(`${extension}${phoneNumber}`);
+      const replied = await tryReplyFlow(page, { phoneDigits, message });
+      if (replied) {
+        logStep('send:reply_flow', { phoneDigits });
+        return;
+      }
     }
 
     // Step 1: Open WhatsApp modal
@@ -1077,7 +1154,7 @@ export async function sendMessage(page, { extension, phoneNumber, message, sessi
     logStep('send:click_send');
 
     // Give the UI a short moment for send to process
-    await sleep(800);
+    await sleep(200);
   };
 
   console.log('[Automation] ========================================');
