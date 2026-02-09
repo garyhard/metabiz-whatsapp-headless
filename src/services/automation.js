@@ -14,8 +14,45 @@ const DEBUG_DIR = path.join(__dirname, '../../profiles/debug');
 const REQUEST_LOG_DIR = path.join(DEBUG_DIR, 'requests');
 const RELOAD_TIMEOUT_MS = 60000;
 const SPINNER_TIMEOUT_MS = 15000;
+const SAVE_LOGIN_INFO_HINTS = normalizeList([
+  'save login info',
+  'save your login info',
+  'simpan info login',
+  'simpan info masuk',
+]);
+const NOT_NOW_LABELS = normalizeList(['not now', 'nanti', 'tidak sekarang', 'jangan sekarang', 'skip', 'lewati']);
 
-async function captureDebugScreenshot(page, label, sessionId = 'unknown') {
+async function dismissSaveLoginInfo(page, label = 'Automation') {
+  try {
+    const dialog = await findFirstVisible(page, '[role="dialog"], [aria-modal="true"]');
+    const root = dialog || page;
+    let dialogText = '';
+    if (dialog) {
+      dialogText = normalizeText(
+        await page.evaluate((el) => el.textContent || el.innerText || '', dialog)
+      );
+    }
+    if (dialog && !SAVE_LOGIN_INFO_HINTS.some((hint) => dialogText.includes(hint))) {
+      return false;
+    }
+
+    const buttons = await root.$$('[role="button"], button');
+    for (const btn of buttons) {
+      if (!(await isVisible(page, btn))) continue;
+      const matches = await elementTextMatches(page, btn, NOT_NOW_LABELS);
+      if (!matches) continue;
+      await btn.click({ timeout: 2000 }).catch(() => {});
+      await page.waitForTimeout(500);
+      console.log(`[${label}] Dismissed "Save login info" prompt`);
+      return true;
+    }
+  } catch {
+    // ignore dismissal errors
+  }
+  return false;
+}
+
+export async function captureDebugScreenshot(page, label, cUser = 'unknown') {
   try {
     await fs.mkdir(DEBUG_DIR, { recursive: true });
     try {
@@ -46,7 +83,7 @@ async function captureDebugScreenshot(page, label, sessionId = 'unknown') {
     }
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
     const safeLabel = String(label || 'error').replace(/[^a-zA-Z0-9_-]/g, '_');
-    const filename = `session-${sessionId}-${safeLabel}-${ts}.png`;
+    const filename = `cuser-${cUser}-${safeLabel}-${ts}.png`;
     const filePath = path.join(DEBUG_DIR, filename);
     await page.screenshot({ path: filePath, fullPage: true });
     return { path: filePath, url: page.url() };
@@ -163,6 +200,7 @@ async function ensureOnInbox(page, label = 'Automation') {
       throw new AutomationError(`${label}: Unexpected URL after reload: ${nextUrl}`, { url: nextUrl });
     }
   }
+  await dismissSaveLoginInfo(page, label);
   await detectAccountRestricted(page, label);
 }
 
@@ -1066,6 +1104,7 @@ export async function sendMessage(
     phoneNumber,
     message,
     sessionId = null,
+    cUser = null,
     forceInitialRefresh = false,
     useReplyFlow = true,
   }
@@ -1217,7 +1256,7 @@ export async function sendMessage(
     }
     
     console.error('[Automation] ========================================');
-    const debug = await captureDebugScreenshot(page, 'send', sessionId || 'unknown');
+  const debug = await captureDebugScreenshot(page, 'send', cUser || 'unknown');
     await writeRequestLog(requestId, {
       requestId,
       type: 'send',
@@ -1244,7 +1283,7 @@ export async function sendMessage(
  * Lightweight UI check to validate session can open WhatsApp flow
  * @param {Page} page - Playwright page instance
  */
-export async function checkSessionFlow(page, { sessionId = null } = {}) {
+export async function checkSessionFlow(page, { sessionId = null, cUser = null } = {}) {
   console.log('[Automation] ========================================');
   console.log('[Automation] Starting WhatsApp session check');
   console.log(`[Automation] Current URL: ${page.url()}`);
@@ -1364,7 +1403,7 @@ export async function checkSessionFlow(page, { sessionId = null } = {}) {
   console.error('[Automation] ✗ Session check failed');
   console.error(`[Automation] Error: ${lastError?.message || 'unknown error'}`);
   console.error('[Automation] ========================================');
-  const debug = await captureDebugScreenshot(page, 'check', sessionId || 'unknown');
+  const debug = await captureDebugScreenshot(page, 'check', cUser || 'unknown');
   await writeRequestLog(requestId, {
     requestId,
     type: 'check',

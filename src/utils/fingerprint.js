@@ -1,6 +1,6 @@
 /**
  * Generate unique but realistic browser fingerprints
- * Language and timezone are fixed to English/US to ensure consistent button text matching
+ * Language and timezone are fixed to English/Singapore to ensure consistent button text matching
  */
 
 const COMMON_RESOLUTIONS = [
@@ -60,8 +60,8 @@ export function generateFingerprint() {
       height: resolution.height,
     },
     userAgent,
-    locale: 'en-US', // Fixed to English
-    timezoneId: 'America/New_York', // Fixed to US timezone
+    locale: 'en-SG', // Fixed to English (Singapore)
+    timezoneId: 'Asia/Singapore', // Fixed to Singapore timezone
     platform,
     hardwareConcurrency,
     deviceMemory,
