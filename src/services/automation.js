@@ -723,10 +723,10 @@ async function clickNewWhatsappNumber(page) {
     const dialogExists = await page.evaluate(() => !!document.querySelector('[role="dialog"]'));
     console.error('[Automation] Step 2: Dialog exists:', dialogExists);
     
+    let visibleButtons = [];
     if (dialogExists) {
       console.error('[Automation] Step 2: Listing all visible buttons in dialog...');
       const allButtons = await page.$$('[role="dialog"] [role="button"], [role="dialog"] button, [role="dialog"] div[role="button"], [role="dialog"] a');
-      const visibleButtons = [];
       for (const btn of allButtons) {
         if (await isVisible(page, btn)) {
           const btnInfo = await page.evaluate((el) => {
