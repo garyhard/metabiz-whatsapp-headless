@@ -25,12 +25,14 @@ export async function createBrowser(sessionId, existingFingerprint = null, proxy
   // Build context options
   const contextOptions = {
     viewport: fingerprint.viewport,
-    locale: fingerprint.locale, // Fixed to en-US
-    timezoneId: fingerprint.timezoneId, // Fixed to America/New_York
+    locale: fingerprint.locale, // Fixed to en-SG
+    timezoneId: fingerprint.timezoneId, // Fixed to Asia/Singapore
+    geolocation: { latitude: 1.3521, longitude: 103.8198 },
+    permissions: ['geolocation'],
     userAgent: fingerprint.userAgent,
     // Override navigator properties via CDP
     extraHTTPHeaders: {
-      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept-Language': 'en-SG,en;q=0.9',
     },
   };
 
@@ -90,7 +92,7 @@ export async function createBrowser(sessionId, existingFingerprint = null, proxy
 
     // Override languages
     Object.defineProperty(navigator, 'languages', {
-      get: () => ['en-US', 'en'],
+      get: () => ['en-SG', 'en'],
       configurable: true,
     });
 

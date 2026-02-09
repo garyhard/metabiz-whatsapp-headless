@@ -5,7 +5,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { createBrowser } from './browserFactory.js';
 import { normalizeCookiesInput, parseCookieString, toPlaywrightCookies, toPlaywrightCookiesFromJson } from '../utils/cookies.js';
-import { sendMessage, checkSessionFlow } from './automation.js';
+import { sendMessage, checkSessionFlow, captureDebugScreenshot } from './automation.js';
 import { SessionNotFoundError, InvalidInputError, BrowserCrashError, SessionAlreadyExistsError } from '../errors.js';
 import { config } from '../config.js';
 import { sessionStore } from './sessionStore.js';
@@ -66,6 +66,56 @@ function extractCUser(normalized) {
 
 async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeText(text) {
+  return String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+async function dismissSaveLoginInfo(page) {
+  try {
+    const dialog = await page.$('[role="dialog"], [aria-modal="true"]');
+    if (!dialog) return false;
+    const dialogText = normalizeText(
+      await page.evaluate((el) => el.textContent || el.innerText || '', dialog)
+    );
+    const hints = ['save login info', 'save your login info', 'simpan info login', 'simpan info masuk'];
+    if (!hints.some((hint) => dialogText.includes(hint))) {
+      return false;
+    }
+    const buttons = await dialog.$$('[role="button"], button');
+    const notNowLabels = ['not now', 'nanti', 'tidak sekarang', 'jangan sekarang', 'skip', 'lewati'];
+    for (const btn of buttons) {
+      const visible = await btn
+        .evaluate((el) => {
+          const box = el.getBoundingClientRect();
+          if (!box || box.width === 0 || box.height === 0) return false;
+          const style = window.getComputedStyle(el);
+          return (
+            style.display !== 'none' &&
+            style.visibility !== 'hidden' &&
+            style.opacity !== '0'
+          );
+        })
+        .catch(() => false);
+      if (!visible) continue;
+      const label = normalizeText(
+        await btn.evaluate((el) => el.textContent || el.innerText || el.getAttribute('aria-label') || '')
+      );
+      if (notNowLabels.some((value) => label.includes(value))) {
+        await btn.click({ timeout: 2000 }).catch(() => {});
+        await page.waitForTimeout(500);
+        logStep('login_info:dismissed');
+        return true;
+      }
+    }
+  } catch {
+    // ignore dismissal errors
+  }
+  return false;
 }
 
 async function withRetry(fn, { retries = 2, delayMs = 1000 } = {}) {
@@ -382,22 +432,22 @@ async function detectLoginOrCheckpoint(page) {
 
   try {
     const indicators = await page.evaluate(() => {
-      const text = (document.body?.innerText || '').toLowerCase();
+      const inboxIndicators =
+        !!document.querySelector('span[data-surface="/bizweb:all/thread_row"]') ||
+        !!document.querySelector('[data-pagelet="GenericBizInboxThreadListViewHeader"]') ||
+        !!document.querySelector('[aria-label="Inbox"]') ||
+        !!document.querySelector('[data-pagelet*="BizInbox"]');
       const hasLoginForm =
         !!document.querySelector('input[name="email"], input#email, input[name="pass"], #pass') ||
         !!document.querySelector('[data-testid="royal_login_form"], form[action*="login"]');
-      const keywordHit =
-        text.includes('log in') ||
-        text.includes('login') ||
-        text.includes('masuk') ||
-        text.includes('kata sandi') ||
-        text.includes('password') ||
-        text.includes('checkpoint') ||
-        text.includes('two-factor');
-      return { hasLoginForm, keywordHit };
+      return { inboxIndicators, hasLoginForm };
     });
 
-    if (indicators.hasLoginForm || indicators.keywordHit) {
+    if (indicators.inboxIndicators) {
+      return { blocked: false, reason: null };
+    }
+
+    if (indicators.hasLoginForm) {
       return { blocked: true, reason: 'Login/checkpoint indicators detected' };
     }
   } catch {
@@ -588,6 +638,7 @@ export async function createSession(
       // Retry auth check a few times before declaring cookies expired
       let authCheck = null;
       for (let attempt = 1; attempt <= 3; attempt += 1) {
+        await dismissSaveLoginInfo(page);
         authCheck = await detectLoginOrCheckpoint(page);
         if (!authCheck.blocked) break;
         logStep('createSession:auth:retry', { sessionId, cUser: finalCUser, attempt, reason: authCheck.reason });
@@ -595,6 +646,7 @@ export async function createSession(
           try {
             await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
             await page.waitForTimeout(1500);
+            await dismissSaveLoginInfo(page);
           } catch (error) {
             console.warn(`[SessionManager] Auth retry reload failed: ${error.message}`);
           }
@@ -792,6 +844,7 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
       { retries: 2, delayMs: 1000 }
     );
     await page.waitForTimeout(1500);
+    await dismissSaveLoginInfo(page);
 
     const authCheck = await detectLoginOrCheckpoint(page);
     if (authCheck.blocked) {
@@ -845,6 +898,9 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
   } catch (error) {
     logStep('validateCookies:error', { cUser, error: error?.message || error?.toString() });
     setProgress(cUser, 'validate:error', { error: error?.message || error?.toString() });
+    if (page) {
+      await captureDebugScreenshot(page, 'validate', cUser || 'unknown').catch(() => {});
+    }
     if (error instanceof InvalidInputError) {
       throw error;
     }
@@ -982,7 +1038,7 @@ export async function updateSessionCookies(sessionId, cookieInput) {
       throw new InvalidInputError(`Session not authenticated: ${authCheck.reason}`);
     }
     try {
-      await checkSessionFlow(session.page, { sessionId });
+      await checkSessionFlow(session.page, { sessionId, cUser: session.cUser || null });
     } catch (error) {
       if (error instanceof InvalidInputError) {
         throw error;
@@ -1097,6 +1153,7 @@ export async function sendMessageForSession(sessionId, { extension, phoneNumber,
             phoneNumber,
             message,
             sessionId,
+            cUser: session.cUser || null,
             forceInitialRefresh,
             useReplyFlow,
           }),
@@ -1116,6 +1173,7 @@ export async function sendMessageForSession(sessionId, { extension, phoneNumber,
                 phoneNumber,
                 message,
                 sessionId,
+                cUser: recreated.cUser || null,
                 forceInitialRefresh: true,
                 useReplyFlow,
               }),
@@ -1141,7 +1199,7 @@ export async function checkSessionForSession(sessionId) {
       try {
         touchSession(sessionId);
         await withTimeout(
-          checkSessionFlow(session.page, { sessionId }),
+          checkSessionFlow(session.page, { sessionId, cUser: session.cUser || null }),
           config.flowTimeoutMs,
           'Check flow'
         );
@@ -1153,7 +1211,7 @@ export async function checkSessionForSession(sessionId) {
             const recreated = getSession(sessionId);
             recreated.lastActivity = Date.now();
             await withTimeout(
-              checkSessionFlow(recreated.page, { sessionId }),
+              checkSessionFlow(recreated.page, { sessionId, cUser: recreated.cUser || null }),
               config.flowTimeoutMs,
               'Check flow (retry)'
             );
