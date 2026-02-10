@@ -1063,6 +1063,96 @@ export async function updateSessionCookies(sessionId, cookieInput) {
 }
 
 /**
+ * Update proxy for an existing session.
+ * The service will recreate browser context with the new proxy while preserving sessionId.
+ * @param {string} sessionId - Session ID
+ * @param {Object} proxyInput - Proxy configuration {server, username?, password?}
+ */
+export async function updateSessionProxy(sessionId, proxyInput) {
+  if (!proxyInput || typeof proxyInput !== 'object' || !proxyInput.server) {
+    throw new InvalidInputError('Invalid proxy format. Expected {server: string, username?: string, password?: string}.');
+  }
+
+  const proxy = {
+    server: String(proxyInput.server),
+    username: proxyInput.username || undefined,
+    password: proxyInput.password || undefined,
+  };
+
+  return withSessionLock(sessionId, async () => {
+    const active = sessions.get(sessionId);
+    const stored = sessionStore.getBySessionId(sessionId);
+    if (!active && !stored) {
+      throw new SessionNotFoundError(sessionId);
+    }
+
+    const cookieFormat = active?.cookieFormat || stored?.cookieFormat || 'string';
+    const cookies = cookieFormat === 'json'
+      ? (active?.cookieJson || stored?.cookies || [])
+      : (active?.cookieString || stored?.cookies || '');
+    const fingerprint = active?.fingerprint || stored?.fingerprint || null;
+    const cUser = active?.cUser || stored?.cUser || null;
+    if ((cookieFormat === 'json' && (!Array.isArray(cookies) || cookies.length === 0)) ||
+        (cookieFormat === 'string' && !String(cookies || '').trim())) {
+      throw new InvalidInputError('Cookies are required to update proxy');
+    }
+
+    logStep('updateSessionProxy:start', { sessionId, cUser, server: proxy.server });
+
+    if (active) {
+      await destroySession(sessionId, { preserveStore: true });
+    }
+    const createWithProxy = async (targetProxy, maxAttempts = 3) => {
+      let lastError = null;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+          return await createSession(
+            cookies,
+            sessionId,
+            fingerprint,
+            targetProxy,
+            { skipCUserCheck: true, cUserOverride: cUser || null }
+          );
+        } catch (error) {
+          lastError = error;
+          logStep('updateSessionProxy:attempt:failed', {
+            sessionId,
+            cUser,
+            attempt,
+            maxAttempts,
+            server: targetProxy?.server || null,
+            error: error?.message || String(error),
+          });
+          if (error instanceof InvalidInputError || attempt >= maxAttempts) {
+            break;
+          }
+          await sleep(1200);
+        }
+      }
+      throw lastError;
+    };
+
+    let result = null;
+    try {
+      result = await createWithProxy(proxy, 3);
+    } catch (updateError) {
+      // Do not rollback to previous proxy: keep session stopped and require explicit proxy fix.
+      sessionStore.updateStatus(sessionId, 'suspended', Date.now());
+      logStep('updateSessionProxy:failed:session_stopped', {
+        sessionId,
+        cUser,
+        server: proxy.server,
+        error: updateError?.message || String(updateError),
+      });
+      throw updateError;
+    }
+
+    logStep('updateSessionProxy:done', { sessionId, cUser, server: proxy.server });
+    return { ok: true, ...result };
+  });
+}
+
+/**
  * Get a session by ID
  * @param {string} sessionId - Session ID
  * @returns {Object} Session object

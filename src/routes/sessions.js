@@ -10,6 +10,7 @@ import {
   getSession,
   checkSessionForSession,
   updateSessionCookies,
+  updateSessionProxy,
   cleanupSessions,
   clearAllSessions,
 } from '../services/sessionManager.js';
@@ -244,6 +245,56 @@ router.put('/:sessionId/cookies', async (req, res, next) => {
     res.json({
       ok: true,
       message: 'Cookies updated',
+    });
+  } catch (error) {
+    if (error instanceof SessionNotFoundError) {
+      return res.status(404).json({
+        ok: false,
+        error: error.message,
+        errorCode: 'session_not_found',
+        sessionId,
+      });
+    }
+    if (error instanceof InvalidInputError) {
+      return res.status(400).json({
+        ok: false,
+        error: error.message,
+        errorCode: 'invalid_input',
+      });
+    }
+    next(error);
+  }
+});
+
+/**
+ * PUT /api/sessions/:sessionId/proxy
+ * Update proxy for an existing session (managed internally by headless)
+ */
+router.put('/:sessionId/proxy', async (req, res, next) => {
+  const { sessionId } = req.params;
+  try {
+    const { proxy } = req.body || {};
+    if (!proxy || typeof proxy !== 'object' || !proxy.server) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Invalid proxy format. Expected {server: string, username?: string, password?: string}.',
+      });
+    }
+
+    const proxyConfig = {
+      server: proxy.server,
+      username: proxy.username || undefined,
+      password: proxy.password || undefined,
+    };
+
+    const result = await updateSessionProxy(sessionId, proxyConfig);
+    res.json({
+      ok: true,
+      message: 'Proxy updated',
+      sessionId: result.sessionId,
+      ipAddress: result.ipAddress || null,
+      cUser: result.cUser || null,
+      fingerprint: result.fingerprint || null,
     });
   } catch (error) {
     if (error instanceof SessionNotFoundError) {
