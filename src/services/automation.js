@@ -22,6 +22,8 @@ const SAVE_LOGIN_INFO_HINTS = normalizeList([
   'simpan info masuk',
 ]);
 const NOT_NOW_LABELS = normalizeList(['not now', 'nanti', 'tidak sekarang', 'jangan sekarang', 'skip', 'lewati']);
+const INBOX_DISMISS_LABELS = normalizeList(['dismiss', 'tutup', 'close']);
+const CONNECT_INSTAGRAM_HINTS = normalizeList(['connect to instagram']);
 const TWO_FACTOR_TEXT_HINTS = normalizeList([
   'try another way',
   'check your notifications on another device',
@@ -72,6 +74,58 @@ async function dismissSaveLoginInfo(page, label = 'Automation') {
     // ignore dismissal errors
   }
   return false;
+}
+
+async function dismissInboxBlockingPrompts(page, label = 'Automation') {
+  let dismissed = false;
+  try {
+    const bodyText = normalizeText(await page.evaluate(() => document.body?.innerText || ''));
+
+    // "Connect to Instagram" card in inbox left pane.
+    if (CONNECT_INSTAGRAM_HINTS.some((hint) => bodyText.includes(hint))) {
+      const notNowBtn = await findByText(page, {
+        text: 'Not now',
+        selector: '[role="button"],button,a,[role="link"]',
+      });
+      if (notNowBtn) {
+        await clickElement(page, notNowBtn, `${label}: dismiss connect instagram`);
+        await sleep(350);
+        dismissed = true;
+      }
+    }
+
+    // Security notice at top of list that has a "Dismiss" link.
+    const dismissLink = await findByText(page, {
+      text: 'Dismiss',
+      selector: 'a,[role="link"],[role="button"],button',
+    });
+    if (dismissLink) {
+      await clickElement(page, dismissLink, `${label}: dismiss notice`);
+      await sleep(250);
+      dismissed = true;
+    }
+
+    // Generic fallback for localized dismiss labels.
+    if (!dismissed) {
+      const clickable = await page.$$('[role="button"],button,a,[role="link"]');
+      for (const el of clickable) {
+        if (!(await isVisible(page, el))) continue;
+        const matches = await elementTextMatches(page, el, INBOX_DISMISS_LABELS);
+        if (!matches) continue;
+        await clickElement(page, el, `${label}: dismiss generic`);
+        await sleep(250);
+        dismissed = true;
+        break;
+      }
+    }
+
+    if (dismissed) {
+      console.log(`[${label}] Dismissed inbox blocking prompt`);
+    }
+  } catch {
+    // Ignore prompt dismissal failures
+  }
+  return dismissed;
 }
 
 export async function captureDebugScreenshot(page, label, cUser = 'unknown') {
@@ -423,6 +477,7 @@ async function ensureOnInbox(page, label = 'Automation', { twofaSecret = null } 
     }
   }
   await dismissSaveLoginInfo(page, label);
+  await dismissInboxBlockingPrompts(page, label);
   await detectAccountRestricted(page, label);
 }
 
@@ -713,6 +768,7 @@ async function tryReplyFlow(page, { phoneDigits, message, twofaSecret = null }) 
     console.log(`[Automation] Reply flow: start for ${phoneDigits}`);
     console.log(`[Automation] Reply flow: url=${page.url()}`);
     await ensureInboxReady(page, 'Reply', { twofaSecret });
+    await dismissInboxBlockingPrompts(page, 'Reply');
     await ensureSearchEmpty(page);
 
     await waitFor(
