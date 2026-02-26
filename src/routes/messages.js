@@ -3,6 +3,7 @@
  */
 
 import express from 'express';
+import fs from 'fs/promises';
 import { sendMessageForSession, restoreSessionFromStore } from '../services/sessionManager.js';
 import {
   InvalidInputError,
@@ -11,6 +12,19 @@ import {
 } from '../errors.js';
 
 const router = express.Router();
+
+async function buildScreenshotDataUrl(screenshot) {
+  try {
+    const filePath = screenshot?.path ? String(screenshot.path) : '';
+    if (!filePath) return null;
+    const buffer = await fs.readFile(filePath);
+    if (!buffer || buffer.length === 0) return null;
+    const ext = filePath.toLowerCase().endsWith('.png') ? 'png' : 'png';
+    return `data:image/${ext};base64,${buffer.toString('base64')}`;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * POST /api/sessions/:sessionId/send-message
@@ -44,12 +58,14 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
       useReplyFlow: true,
       includeSuccessScreenshot: includeSuccessScreenshot === true,
     });
+    const screenshotDataUrl = await buildScreenshotDataUrl(result?.screenshot || null);
 
     res.json({
       ok: true,
       message: 'Message sent successfully',
       screenshot: result?.screenshot || null,
       screenshotFilename: result?.screenshot?.filename || null,
+      screenshotDataUrl,
     });
   } catch (error) {
     if (error instanceof SessionNotFoundError) {
@@ -61,11 +77,13 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
           message,
           includeSuccessScreenshot: includeSuccessScreenshot === true,
         });
+        const screenshotDataUrl = await buildScreenshotDataUrl(result?.screenshot || null);
         return res.json({
           ok: true,
           message: 'Message sent successfully',
           screenshot: result?.screenshot || null,
           screenshotFilename: result?.screenshot?.filename || null,
+          screenshotDataUrl,
         });
       } catch (restoreError) {
         if (restoreError instanceof InvalidInputError) {
@@ -146,12 +164,14 @@ router.post('/:sessionId/send-message-blast', async (req, res, next) => {
       useReplyFlow: false,
       includeSuccessScreenshot: includeSuccessScreenshot === true,
     });
+    const screenshotDataUrl = await buildScreenshotDataUrl(result?.screenshot || null);
 
     res.json({
       ok: true,
       message: 'Message sent successfully',
       screenshot: result?.screenshot || null,
       screenshotFilename: result?.screenshot?.filename || null,
+      screenshotDataUrl,
     });
   } catch (error) {
     if (error instanceof SessionNotFoundError) {
@@ -164,11 +184,13 @@ router.post('/:sessionId/send-message-blast', async (req, res, next) => {
           useReplyFlow: false,
           includeSuccessScreenshot: includeSuccessScreenshot === true,
         });
+        const screenshotDataUrl = await buildScreenshotDataUrl(result?.screenshot || null);
         return res.json({
           ok: true,
           message: 'Message sent successfully',
           screenshot: result?.screenshot || null,
           screenshotFilename: result?.screenshot?.filename || null,
+          screenshotDataUrl,
         });
       } catch (restoreError) {
         if (restoreError instanceof InvalidInputError) {
