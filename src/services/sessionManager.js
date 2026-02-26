@@ -1288,7 +1288,10 @@ export async function destroySession(sessionId, options = {}) {
  * @param {string} sessionId - Session ID
  * @param {Object} options - {extension, phoneNumber, message}
  */
-export async function sendMessageForSession(sessionId, { extension, phoneNumber, message, useReplyFlow = true }) {
+export async function sendMessageForSession(
+  sessionId,
+  { extension, phoneNumber, message, useReplyFlow = true, includeSuccessScreenshot = false }
+) {
   return withGlobalSendLock(() =>
     withSessionLock(sessionId, async () => {
       const session = await ensureSessionActive(sessionId);
@@ -1304,7 +1307,7 @@ export async function sendMessageForSession(sessionId, { extension, phoneNumber,
         touchSession(sessionId);
 
         // Run automation
-        await withTimeout(
+        const result = await withTimeout(
           sendMessage(session.page, {
             extension,
             phoneNumber,
@@ -1314,18 +1317,19 @@ export async function sendMessageForSession(sessionId, { extension, phoneNumber,
             twofaSecret: session.twofaSecret || null,
             forceInitialRefresh,
             useReplyFlow,
+            includeSuccessScreenshot,
           }),
           config.flowTimeoutMs,
           'Send flow'
         );
-        return { ok: true };
+        return { ok: true, ...(result || {}) };
       } catch (error) {
         if (isRecoverableCrash(error)) {
           try {
             await recreateSessionFromMemory(sessionId);
             const recreated = getSession(sessionId);
             recreated.lastActivity = Date.now();
-            await withTimeout(
+            const result = await withTimeout(
               sendMessage(recreated.page, {
                 extension,
                 phoneNumber,
@@ -1335,11 +1339,12 @@ export async function sendMessageForSession(sessionId, { extension, phoneNumber,
                 twofaSecret: recreated.twofaSecret || null,
                 forceInitialRefresh: true,
                 useReplyFlow,
+                includeSuccessScreenshot,
               }),
               config.flowTimeoutMs,
               'Send flow (retry)'
             );
-            return { ok: true, retried: true };
+            return { ok: true, retried: true, ...(result || {}) };
           } catch (retryError) {
             sessions.delete(sessionId);
             throw new BrowserCrashError(`Browser crashed for session ${sessionId}: ${retryError.message}`);

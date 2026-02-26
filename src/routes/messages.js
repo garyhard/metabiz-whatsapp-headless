@@ -18,9 +18,9 @@ const router = express.Router();
  */
 router.post('/:sessionId/send-message', async (req, res, next) => {
   const { sessionId } = req.params;
+  const { extension, phoneNumber, message, includeSuccessScreenshot } = req.body || {};
   try {
     console.log(`[Routes] send-message request session=${sessionId}`);
-    const { extension, phoneNumber, message } = req.body;
 
     // Validate input
     if (!extension || !phoneNumber || !message) {
@@ -37,20 +37,35 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
       });
     }
 
-    await sendMessageForSession(sessionId, { extension, phoneNumber, message, useReplyFlow: true });
+    const result = await sendMessageForSession(sessionId, {
+      extension,
+      phoneNumber,
+      message,
+      useReplyFlow: true,
+      includeSuccessScreenshot: includeSuccessScreenshot === true,
+    });
 
     res.json({
       ok: true,
       message: 'Message sent successfully',
+      screenshot: result?.screenshot || null,
+      screenshotFilename: result?.screenshot?.filename || null,
     });
   } catch (error) {
     if (error instanceof SessionNotFoundError) {
       try {
         await restoreSessionFromStore(sessionId);
-        await sendMessageForSession(sessionId, { extension, phoneNumber, message });
+        const result = await sendMessageForSession(sessionId, {
+          extension,
+          phoneNumber,
+          message,
+          includeSuccessScreenshot: includeSuccessScreenshot === true,
+        });
         return res.json({
           ok: true,
           message: 'Message sent successfully',
+          screenshot: result?.screenshot || null,
+          screenshotFilename: result?.screenshot?.filename || null,
         });
       } catch (restoreError) {
         if (restoreError instanceof InvalidInputError) {
@@ -106,9 +121,9 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
  */
 router.post('/:sessionId/send-message-blast', async (req, res, next) => {
   const { sessionId } = req.params;
+  const { extension, phoneNumber, message, includeSuccessScreenshot } = req.body || {};
   try {
     console.log(`[Routes] send-message-blast request session=${sessionId}`);
-    const { extension, phoneNumber, message } = req.body;
 
     if (!extension || !phoneNumber || !message) {
       return res.status(400).json({
@@ -124,20 +139,36 @@ router.post('/:sessionId/send-message-blast', async (req, res, next) => {
       });
     }
 
-    await sendMessageForSession(sessionId, { extension, phoneNumber, message, useReplyFlow: false });
+    const result = await sendMessageForSession(sessionId, {
+      extension,
+      phoneNumber,
+      message,
+      useReplyFlow: false,
+      includeSuccessScreenshot: includeSuccessScreenshot === true,
+    });
 
     res.json({
       ok: true,
       message: 'Message sent successfully',
+      screenshot: result?.screenshot || null,
+      screenshotFilename: result?.screenshot?.filename || null,
     });
   } catch (error) {
     if (error instanceof SessionNotFoundError) {
       try {
         await restoreSessionFromStore(sessionId);
-        await sendMessageForSession(sessionId, { extension, phoneNumber, message, useReplyFlow: false });
+        const result = await sendMessageForSession(sessionId, {
+          extension,
+          phoneNumber,
+          message,
+          useReplyFlow: false,
+          includeSuccessScreenshot: includeSuccessScreenshot === true,
+        });
         return res.json({
           ok: true,
           message: 'Message sent successfully',
+          screenshot: result?.screenshot || null,
+          screenshotFilename: result?.screenshot?.filename || null,
         });
       } catch (restoreError) {
         if (restoreError instanceof InvalidInputError) {

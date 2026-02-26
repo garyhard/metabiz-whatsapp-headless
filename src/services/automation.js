@@ -1330,6 +1330,7 @@ export async function sendMessage(
     twofaSecret = null,
     forceInitialRefresh = false,
     useReplyFlow = true,
+    includeSuccessScreenshot = false,
   }
 ) {
   if (!extension || !phoneNumber || !message) {
@@ -1437,9 +1438,27 @@ export async function sendMessage(
       console.log('[Automation] ========================================');
       console.log('[Automation] ✓ Automation completed successfully');
       console.log('[Automation] ========================================');
+      let successScreenshot = null;
+      if (includeSuccessScreenshot) {
+        const debug = await captureDebugScreenshot(page, 'send-success', cUser || 'unknown');
+        successScreenshot = {
+          path: debug.path || null,
+          url: debug.url || null,
+          filename: debug.path ? path.basename(debug.path) : null,
+        };
+      }
       logStep('send:ok', { attempt });
-      await writeRequestLog(requestId, { requestId, type: 'send', steps });
-      return;
+      await writeRequestLog(requestId, {
+        requestId,
+        type: 'send',
+        steps,
+        screenshotPath: successScreenshot?.path || null,
+        url: successScreenshot?.url || null,
+      });
+      return {
+        ok: true,
+        screenshot: successScreenshot,
+      };
     } catch (error) {
       lastError = error;
       logStep('send:error', { attempt, error: error?.message || String(error) });
