@@ -14,7 +14,7 @@ import {
   cleanupSessions,
   clearAllSessions,
 } from '../services/sessionManager.js';
-import { InvalidInputError, SessionNotFoundError, SessionAlreadyExistsError } from '../errors.js';
+import { InvalidInputError, SessionNotFoundError, SessionAlreadyExistsError, AutomationError } from '../errors.js';
 
 const router = express.Router();
 
@@ -97,7 +97,7 @@ router.get('/:sessionId', async (req, res, next) => {
  */
 router.post('/', async (req, res, next) => {
   try {
-    const { cookies, proxy } = req.body;
+    const { cookies, proxy, twofaSecret } = req.body || {};
 
     const cookiesIsString = typeof cookies === 'string';
     const cookiesIsArray = Array.isArray(cookies);
@@ -127,7 +127,7 @@ router.post('/', async (req, res, next) => {
       );
     }
 
-    const result = await createSession(cookies, null, null, proxyConfig);
+    const result = await createSession(cookies, null, null, proxyConfig, { twofaSecret });
 
     res.status(201).json({
       sessionId: result.sessionId,
@@ -231,7 +231,7 @@ router.post('/:sessionId/check', async (req, res, next) => {
 router.put('/:sessionId/cookies', async (req, res, next) => {
   const { sessionId } = req.params;
   try {
-    const { cookies } = req.body || {};
+    const { cookies, twofaSecret } = req.body || {};
     const cookiesIsString = typeof cookies === 'string';
     const cookiesIsArray = Array.isArray(cookies);
     if (!cookies || (!cookiesIsString && !cookiesIsArray)) {
@@ -241,7 +241,7 @@ router.put('/:sessionId/cookies', async (req, res, next) => {
       });
     }
 
-    await updateSessionCookies(sessionId, cookies);
+    await updateSessionCookies(sessionId, cookies, { twofaSecret });
     res.json({
       ok: true,
       message: 'Cookies updated',

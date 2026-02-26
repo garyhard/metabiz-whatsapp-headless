@@ -3,6 +3,7 @@
  */
 
 import { AutomationError } from '../errors.js';
+import { generateTotpCode } from '../utils/totp.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
@@ -21,6 +22,27 @@ const SAVE_LOGIN_INFO_HINTS = normalizeList([
   'simpan info masuk',
 ]);
 const NOT_NOW_LABELS = normalizeList(['not now', 'nanti', 'tidak sekarang', 'jangan sekarang', 'skip', 'lewati']);
+const TWO_FACTOR_TEXT_HINTS = normalizeList([
+  'try another way',
+  'check your notifications on another device',
+  'waiting for approval',
+  'two-factor',
+  'two factor',
+]);
+const TRY_ANOTHER_WAY_LABELS = normalizeList([
+  'try another way',
+  'coba cara lain',
+]);
+const CONTINUE_LABELS = normalizeList(['continue', 'submit', 'next', 'lanjut', 'lanjutkan']);
+const TRUST_DEVICE_LABELS = normalizeList(['trust this device']);
+const ALWAYS_CONFIRM_LABELS = normalizeList(["always confirm it's me", 'always confirm it’s me']);
+const CODE_HINTS = normalizeList(['code', 'kode']);
+const AUTH_APP_LABELS = normalizeList(['authentication app', 'aplikasi autentikasi']);
+const CHOOSE_METHOD_HINTS = normalizeList([
+  "choose a way to confirm it's you",
+  'choose a way to confirm it’s you',
+  'available confirmation methods',
+]);
 
 async function dismissSaveLoginInfo(page, label = 'Automation') {
   try {
@@ -137,6 +159,11 @@ function isBadAuthUrl(url) {
   );
 }
 
+function isTwoFactorUrl(url) {
+  const value = String(url || '').toLowerCase();
+  return value.includes('twofactor') || value.includes('checkpoint');
+}
+
 function isAuthRelatedError(error) {
   const message = String(error?.message || '').toLowerCase();
   return (
@@ -146,6 +173,193 @@ function isAuthRelatedError(error) {
     message.includes('twofactor') ||
     message.includes('account restricted')
   );
+}
+
+async function clickFirstMatchingText(page, labels, { root = null, selector = '[role="button"],button,div[role],a' } = {}) {
+  for (const label of labels) {
+    const target = await findByText(page, { root: root || null, text: label, selector });
+    if (!target) continue;
+    await clickElement(page, target, `Auth: click "${label}"`);
+    return true;
+  }
+  return false;
+}
+
+async function hasTwoFactorChallenge(page) {
+  const url = page.url();
+  if (isTwoFactorUrl(url)) return true;
+  try {
+    const text = normalizeText(await page.evaluate(() => document.body?.innerText || ''));
+    return TWO_FACTOR_TEXT_HINTS.some((hint) => text.includes(hint));
+  } catch {
+    return false;
+  }
+}
+
+async function findTwoFactorCodeInput(page) {
+  const directSelectors = [
+    'input[autocomplete="one-time-code"]',
+    'input[name*="code" i]',
+    'input[id*="code" i]',
+    'input[aria-label*="code" i]',
+    'input[placeholder*="code" i]',
+  ];
+
+  for (const selector of directSelectors) {
+    const input = await findFirstVisible(page, selector);
+    if (input) return input;
+  }
+
+  const allInputs = await page.$$('input');
+  for (const input of allInputs) {
+    if (!(await isVisible(page, input))) continue;
+    const score = await input.evaluate((el) => {
+      const id = String(el.id || '');
+      const name = String(el.getAttribute('name') || '');
+      const aria = String(el.getAttribute('aria-label') || '');
+      const placeholder = String(el.getAttribute('placeholder') || '');
+      const type = String(el.getAttribute('type') || '').toLowerCase();
+      let labelText = '';
+      if (id) {
+        const label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+        labelText = String(label?.textContent || '');
+      }
+      return { id, name, aria, placeholder, labelText, type };
+    });
+    const bag = normalizeText(
+      `${score.id} ${score.name} ${score.aria} ${score.placeholder} ${score.labelText}`
+    );
+    const textHasCode = CODE_HINTS.some((hint) => bag.includes(hint));
+    const typeLooksCode =
+      score.type === 'text' ||
+      score.type === 'tel' ||
+      score.type === 'number' ||
+      score.type === '';
+    if (textHasCode && typeLooksCode) {
+      return input;
+    }
+  }
+  return null;
+}
+
+async function selectAuthenticationAppMethod(page) {
+  const looksLikeMethodChooser = await page.evaluate((hints) => {
+    const text = (document.body?.innerText || '').toLowerCase();
+    return hints.some((hint) => text.includes(hint));
+  }, CHOOSE_METHOD_HINTS);
+  if (!looksLikeMethodChooser) {
+    return false;
+  }
+
+  // Click the "Authentication app" option (label/container/radio) if present.
+  for (const label of AUTH_APP_LABELS) {
+    const option = await findByText(page, {
+      text: label,
+      selector: 'label,[role="radio"],[role="button"],div',
+    });
+    if (option) {
+      await clickElement(page, option, `Auth: select "${label}"`);
+      await sleep(300);
+      break;
+    }
+  }
+
+  const clickedContinue = await clickFirstMatchingText(page, CONTINUE_LABELS);
+  if (!clickedContinue) {
+    return false;
+  }
+  await sleep(900);
+  return true;
+}
+
+async function resolveTwoFactorChallenge(page, { twofaSecret = null, label = 'Automation' } = {}) {
+  const challengeDetected = await hasTwoFactorChallenge(page);
+  if (!challengeDetected) return false;
+
+  const normalizedSecret = String(twofaSecret || '').trim();
+  if (!normalizedSecret) {
+    throw new AutomationError(`${label}: Two-factor challenge detected but twofaSecret is missing`);
+  }
+
+  console.log(`[${label}] Two-factor challenge detected, resolving via TOTP...`);
+
+  try {
+    await clickFirstMatchingText(page, TRY_ANOTHER_WAY_LABELS);
+    await sleep(600);
+  } catch {
+    // Ignore if button not present in this challenge variant
+  }
+
+  // Some flows open a method-picker modal first: choose Authentication app then Continue.
+  await selectAuthenticationAppMethod(page).catch(() => false);
+
+  const input = await waitFor(
+    page,
+    async () => findTwoFactorCodeInput(page),
+    { timeoutMs: 12000, intervalMs: 200 }
+  ).catch(() => null);
+
+  if (!input) {
+    throw new AutomationError(`${label}: Two-factor code input not found`);
+  }
+
+  let otp = generateTotpCode(normalizedSecret);
+  if (otp.secondsRemaining <= 3) {
+    await sleep((otp.secondsRemaining + 1) * 1000);
+    otp = generateTotpCode(normalizedSecret);
+  }
+
+  await input.focus();
+  await sleep(100);
+  await setNativeValue(page, input, '');
+  await sleep(100);
+  await setNativeValue(page, input, otp.code);
+  await sleep(300);
+
+  const clickedContinue = await clickFirstMatchingText(page, CONTINUE_LABELS);
+  if (!clickedContinue) {
+    await page.keyboard.press('Enter').catch(() => {});
+  }
+  await sleep(1200);
+
+  await clickFirstMatchingText(page, TRUST_DEVICE_LABELS).catch(() => false);
+  await clickFirstMatchingText(page, ALWAYS_CONFIRM_LABELS).catch(() => false);
+  await sleep(1200);
+
+  await waitFor(
+    page,
+    async () => {
+      const url = page.url();
+      if (isTwoFactorUrl(url)) return false;
+      if (url.includes('business.facebook.com') && (url.includes('inbox') || url.includes('messages'))) {
+        return true;
+      }
+      return await page.evaluate(() => {
+        return (
+          !!document.querySelector('span[data-surface="/bizweb:all/thread_row"]') ||
+          !!document.querySelector('[data-pagelet*="BizInbox"]') ||
+          !!document.querySelector('[aria-label="Inbox"]')
+        );
+      });
+    },
+    { timeoutMs: 25000, intervalMs: 500 }
+  ).catch(() => null);
+
+  if (isTwoFactorUrl(page.url())) {
+    throw new AutomationError(`${label}: Two-factor challenge not resolved`);
+  }
+
+  if (!page.url().includes('business.facebook.com') || (!page.url().includes('inbox') && !page.url().includes('messages'))) {
+    await page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
+    await sleep(800);
+  }
+
+  console.log(`[${label}] ✓ Two-factor challenge resolved`);
+  return true;
+}
+
+export async function resolveTwoFactorIfNeeded(page, options = {}) {
+  return resolveTwoFactorChallenge(page, options);
 }
 
 async function detectAccountRestricted(page, label = 'Automation') {
@@ -172,13 +386,17 @@ async function detectAccountRestricted(page, label = 'Automation') {
   }
 }
 
-async function ensureOnInbox(page, label = 'Automation') {
-  const url = page.url();
+async function ensureOnInbox(page, label = 'Automation', { twofaSecret = null } = {}) {
+  let url = page.url();
   if (isBadAuthUrl(url)) {
-    throw new AutomationError(
-      `${label}: Redirected to auth/checkpoint URL: ${url}`,
-      { url }
-    );
+    const resolved = await resolveTwoFactorChallenge(page, { twofaSecret, label });
+    if (!resolved) {
+      throw new AutomationError(
+        `${label}: Redirected to auth/checkpoint URL: ${url}`,
+        { url }
+      );
+    }
+    url = page.url();
   }
   const isBusiness = url.includes('business.facebook.com');
   const isInbox = url.includes('inbox');
@@ -189,12 +407,16 @@ async function ensureOnInbox(page, label = 'Automation') {
     } catch (error) {
       throw new AutomationError(`${label}: Unexpected URL after reload: ${url}`, { url });
     }
-    const nextUrl = page.url();
+    let nextUrl = page.url();
     if (isBadAuthUrl(nextUrl)) {
-      throw new AutomationError(
-        `${label}: Redirected to auth/checkpoint URL: ${nextUrl}`,
-        { url: nextUrl }
-      );
+      const resolved = await resolveTwoFactorChallenge(page, { twofaSecret, label });
+      if (!resolved) {
+        throw new AutomationError(
+          `${label}: Redirected to auth/checkpoint URL: ${nextUrl}`,
+          { url: nextUrl }
+        );
+      }
+      nextUrl = page.url();
     }
     if (!nextUrl.includes('business.facebook.com') || (!nextUrl.includes('inbox') && !nextUrl.includes('messages'))) {
       throw new AutomationError(`${label}: Unexpected URL after reload: ${nextUrl}`, { url: nextUrl });
@@ -225,8 +447,8 @@ async function waitForMainSpinner(page, { timeoutMs = 30000 } = {}) {
   }
 }
 
-async function ensureInboxReady(page, label = 'Automation') {
-  await ensureOnInbox(page, label);
+async function ensureInboxReady(page, label = 'Automation', options = {}) {
+  await ensureOnInbox(page, label, options);
   const spinnerOk = await waitForMainSpinner(page, { timeoutMs: SPINNER_TIMEOUT_MS });
   if (!spinnerOk) {
     throw new AutomationError(`${label}: Inbox still loading (spinner timeout)`);
@@ -486,11 +708,11 @@ async function clickReplySend(page, replyBox) {
   await clickElement(page, button, 'Reply: Submit');
 }
 
-async function tryReplyFlow(page, { phoneDigits, message }) {
+async function tryReplyFlow(page, { phoneDigits, message, twofaSecret = null }) {
   try {
     console.log(`[Automation] Reply flow: start for ${phoneDigits}`);
     console.log(`[Automation] Reply flow: url=${page.url()}`);
-    await ensureInboxReady(page, 'Reply');
+    await ensureInboxReady(page, 'Reply', { twofaSecret });
     await ensureSearchEmpty(page);
 
     await waitFor(
@@ -1105,6 +1327,7 @@ export async function sendMessage(
     message,
     sessionId = null,
     cUser = null,
+    twofaSecret = null,
     forceInitialRefresh = false,
     useReplyFlow = true,
   }
@@ -1145,14 +1368,14 @@ export async function sendMessage(
     try {
       await page.reload({ waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
       await sleep(2000); // Wait for page to fully load
-      await ensureInboxReady(page, 'Send');
+      await ensureInboxReady(page, 'Send', { twofaSecret });
       console.log('[Automation] ✓ Page refreshed');
       logStep('send:refresh_ok', { label });
     } catch (error) {
       console.warn(`[Automation] Refresh failed: ${error.message}. Retrying...`);
       await page.reload({ waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
       await sleep(2000);
-      await ensureInboxReady(page, 'Send');
+      await ensureInboxReady(page, 'Send', { twofaSecret });
       console.log('[Automation] ✓ Page refreshed (retry)');
       logStep('send:refresh_retry_ok', { label });
     }
@@ -1161,7 +1384,7 @@ export async function sendMessage(
   const runFlow = async () => {
     if (useReplyFlow) {
       const phoneDigits = normalizeDigits(`${extension}${phoneNumber}`);
-      const replied = await tryReplyFlow(page, { phoneDigits, message });
+      const replied = await tryReplyFlow(page, { phoneDigits, message, twofaSecret });
       if (replied) {
         logStep('send:reply_flow', { phoneDigits });
         return;
@@ -1204,7 +1427,7 @@ export async function sendMessage(
         if (forceInitialRefresh) {
           await refreshForSend('idle');
         } else {
-          await ensureInboxReady(page, 'Send');
+          await ensureInboxReady(page, 'Send', { twofaSecret });
           logStep('send:ensure_ready');
         }
       } else if (attempt === 3) {
@@ -1283,7 +1506,7 @@ export async function sendMessage(
  * Lightweight UI check to validate session can open WhatsApp flow
  * @param {Page} page - Playwright page instance
  */
-export async function checkSessionFlow(page, { sessionId = null, cUser = null } = {}) {
+export async function checkSessionFlow(page, { sessionId = null, cUser = null, twofaSecret = null } = {}) {
   console.log('[Automation] ========================================');
   console.log('[Automation] Starting WhatsApp session check');
   console.log(`[Automation] Current URL: ${page.url()}`);
@@ -1305,14 +1528,14 @@ export async function checkSessionFlow(page, { sessionId = null, cUser = null } 
     try {
       await page.reload({ waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
       await sleep(1500);
-      await ensureInboxReady(page, 'Check');
+      await ensureInboxReady(page, 'Check', { twofaSecret });
       console.log('[Automation] ✓ Page refreshed');
       logStep('check:refresh_ok', { label });
     } catch (error) {
       console.warn(`[Automation] Refresh failed: ${error.message}. Retrying...`);
       await page.reload({ waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
       await sleep(1500);
-      await ensureInboxReady(page, 'Check');
+      await ensureInboxReady(page, 'Check', { twofaSecret });
       console.log('[Automation] ✓ Page refreshed (retry)');
       logStep('check:refresh_retry_ok', { label });
     }

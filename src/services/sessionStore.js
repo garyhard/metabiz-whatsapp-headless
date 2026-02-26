@@ -40,6 +40,7 @@ db.exec(`
     cookies TEXT NOT NULL,
     fingerprint TEXT NOT NULL,
     proxy TEXT,
+    twofa_secret TEXT,
     status TEXT,
     last_activity INTEGER,
     created_at INTEGER,
@@ -52,6 +53,12 @@ db.exec(`
     updated_at INTEGER
   );
 `);
+
+try {
+  db.exec('ALTER TABLE sessions ADD COLUMN twofa_secret TEXT');
+} catch {
+  // Column already exists.
+}
 
 function persistDb() {
   const data = db.export();
@@ -114,6 +121,7 @@ function normalizeRow(row) {
     cookies: deserializeCookies(row.cookie_format, row.cookies),
     fingerprint: deserialize(row.fingerprint) || {},
     proxy: deserialize(row.proxy),
+    twofaSecret: row.twofa_secret || null,
     status: row.status,
     lastActivity: row.last_activity,
     createdAt: row.created_at,
@@ -160,15 +168,16 @@ export const sessionStore = {
     cookies,
     fingerprint,
     proxy,
+    twofaSecret,
     status,
     lastActivity,
   }) {
     const now = Date.now();
     runStatement(`
       INSERT INTO sessions (
-        session_id, c_user, cookie_format, cookies, fingerprint, proxy, status, last_activity, created_at, updated_at
+        session_id, c_user, cookie_format, cookies, fingerprint, proxy, twofa_secret, status, last_activity, created_at, updated_at
       ) VALUES (
-        :session_id, :c_user, :cookie_format, :cookies, :fingerprint, :proxy, :status, :last_activity, :created_at, :updated_at
+        :session_id, :c_user, :cookie_format, :cookies, :fingerprint, :proxy, :twofa_secret, :status, :last_activity, :created_at, :updated_at
       )
       ON CONFLICT(session_id) DO UPDATE SET
         c_user = excluded.c_user,
@@ -176,6 +185,7 @@ export const sessionStore = {
         cookies = excluded.cookies,
         fingerprint = excluded.fingerprint,
         proxy = excluded.proxy,
+        twofa_secret = excluded.twofa_secret,
         status = excluded.status,
         last_activity = excluded.last_activity,
         updated_at = excluded.updated_at
@@ -186,6 +196,7 @@ export const sessionStore = {
       ':cookies': serializeCookies(cookieFormat, cookies),
       ':fingerprint': serialize(fingerprint || {}),
       ':proxy': serialize(proxy || null),
+      ':twofa_secret': twofaSecret ? String(twofaSecret) : null,
       ':status': status || 'active',
       ':last_activity': lastActivity || now,
       ':created_at': now,
@@ -206,8 +217,23 @@ export const sessionStore = {
     });
   },
 
-  updateCookies(sessionId, cookieFormat, cookies) {
+  updateCookies(sessionId, cookieFormat, cookies, twofaSecret = undefined) {
     const now = Date.now();
+    if (twofaSecret !== undefined) {
+      runStatement(`
+        UPDATE sessions
+        SET cookie_format = :cookie_format, cookies = :cookies, twofa_secret = :twofa_secret, updated_at = :updated_at
+        WHERE session_id = :session_id
+      `, {
+        ':session_id': sessionId,
+        ':cookie_format': cookieFormat,
+        ':cookies': serializeCookies(cookieFormat, cookies),
+        ':twofa_secret': twofaSecret ? String(twofaSecret) : null,
+        ':updated_at': now,
+      });
+      return;
+    }
+
     runStatement(`
       UPDATE sessions SET cookie_format = :cookie_format, cookies = :cookies, updated_at = :updated_at
       WHERE session_id = :session_id

@@ -5,7 +5,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { createBrowser } from './browserFactory.js';
 import { normalizeCookiesInput, parseCookieString, toPlaywrightCookies, toPlaywrightCookiesFromJson } from '../utils/cookies.js';
-import { sendMessage, checkSessionFlow, captureDebugScreenshot } from './automation.js';
+import { sendMessage, checkSessionFlow, captureDebugScreenshot, resolveTwoFactorIfNeeded } from './automation.js';
 import { SessionNotFoundError, InvalidInputError, BrowserCrashError, SessionAlreadyExistsError } from '../errors.js';
 import { config } from '../config.js';
 import { sessionStore } from './sessionStore.js';
@@ -357,7 +357,11 @@ async function ensureSessionActive(sessionId) {
       sessionId,
       stored.fingerprint,
       stored.proxy || null,
-      { skipCUserCheck: true, cUserOverride: stored.cUser }
+      {
+        skipCUserCheck: true,
+        cUserOverride: stored.cUser,
+        twofaSecret: stored.twofaSecret || null,
+      }
     );
     session = sessions.get(sessionId);
   }
@@ -375,7 +379,11 @@ async function ensureSessionActive(sessionId) {
     sessionId,
     session.fingerprint,
     session.proxy || null,
-    { skipCUserCheck: true, cUserOverride: session.cUser }
+    {
+      skipCUserCheck: true,
+      cUserOverride: session.cUser,
+      twofaSecret: session.twofaSecret || null,
+    }
   );
   const refreshed = sessions.get(sessionId);
   if (refreshed) {
@@ -414,7 +422,11 @@ async function recreateSessionFromMemory(sessionId) {
     sessionId,
     session.fingerprint,
     session.proxy || null,
-    { skipCUserCheck: true, cUserOverride: session.cUser }
+    {
+      skipCUserCheck: true,
+      cUserOverride: session.cUser,
+      twofaSecret: session.twofaSecret || null,
+    }
   );
 }
 
@@ -528,7 +540,8 @@ export async function createSession(
 ) {
   const normalized = normalizeCookiesInput(cookieInput);
   const cUser = extractCUser(normalized);
-  const { skipCUserCheck = false, cUserOverride = null } = options || {};
+  const { skipCUserCheck = false, cUserOverride = null, twofaSecret = null } = options || {};
+  const normalizedTwofaSecret = String(twofaSecret || '').trim() || null;
   const finalCUser = cUserOverride || cUser;
 
   return withCUserLock(finalCUser, async () => {
@@ -639,6 +652,14 @@ export async function createSession(
       let authCheck = null;
       for (let attempt = 1; attempt <= 3; attempt += 1) {
         await dismissSaveLoginInfo(page);
+        try {
+          await resolveTwoFactorIfNeeded(page, {
+            twofaSecret: normalizedTwofaSecret,
+            label: 'CreateSession',
+          });
+        } catch (error) {
+          throw new InvalidInputError(error.message);
+        }
         authCheck = await detectLoginOrCheckpoint(page);
         if (!authCheck.blocked) break;
         logStep('createSession:auth:retry', { sessionId, cUser: finalCUser, attempt, reason: authCheck.reason });
@@ -716,6 +737,7 @@ export async function createSession(
         status: 'active',
         suspendedAt: null,
         cUser: finalCUser,
+        twofaSecret: normalizedTwofaSecret,
       };
       sessions.set(sessionId, sessionData);
       setIdleTimer(sessionId);
@@ -727,6 +749,7 @@ export async function createSession(
         cookies: normalized.raw,
         fingerprint: browserInstance.fingerprint,
         proxy: proxyConfig,
+        twofaSecret: normalizedTwofaSecret,
         status: 'active',
         lastActivity: sessionData.lastActivity,
       });
@@ -734,7 +757,7 @@ export async function createSession(
       // Save session metadata to disk (for dev mode persistence)
       // Only save if session was successfully created (we're past the error handling)
       if (config.devMode) {
-        await saveSessionMetadata(sessionId, sessionData, normalized, proxyConfig);
+        await saveSessionMetadata(sessionId, sessionData, normalized, proxyConfig, normalizedTwofaSecret);
       }
 
       console.log(`[SessionManager] ✓ Session created successfully: ${sessionId}`);
@@ -775,6 +798,7 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
   const normalized = normalizeCookiesInput(cookieInput);
   const cUser = extractCUser(normalized);
   const persist = options?.persist === true;
+  const normalizedTwofaSecret = String(options?.twofaSecret || '').trim() || null;
   if (normalized.format === 'string') {
     if (!normalized.raw || !String(normalized.raw).trim()) {
       throw new InvalidInputError('Cookies are required');
@@ -845,6 +869,14 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
     );
     await page.waitForTimeout(1500);
     await dismissSaveLoginInfo(page);
+    try {
+      await resolveTwoFactorIfNeeded(page, {
+        twofaSecret: normalizedTwofaSecret,
+        label: 'ValidateCookies',
+      });
+    } catch (error) {
+      throw new InvalidInputError(error.message);
+    }
 
     const authCheck = await detectLoginOrCheckpoint(page);
     if (authCheck.blocked) {
@@ -877,6 +909,7 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
         status: 'active',
         suspendedAt: null,
         cUser,
+        twofaSecret: normalizedTwofaSecret,
       };
       sessions.set(tempSessionId, sessionData);
       setIdleTimer(tempSessionId);
@@ -887,6 +920,7 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
         cookies: normalized.raw,
         fingerprint: browserInstance.fingerprint,
         proxy: proxy || null,
+        twofaSecret: normalizedTwofaSecret,
         status: 'active',
         lastActivity: sessionData.lastActivity,
       });
@@ -955,8 +989,9 @@ export async function validateProxy(proxy = null) {
  * @param {string} sessionId - Session ID
  * @param {string|Array<Object>} cookieInput - Cookie string or JSON array
  */
-export async function updateSessionCookies(sessionId, cookieInput) {
+export async function updateSessionCookies(sessionId, cookieInput, options = {}) {
   const normalized = normalizeCookiesInput(cookieInput);
+  const incomingTwofa = String(options?.twofaSecret || '').trim();
   if (normalized.format === 'string') {
     if (!normalized.raw || !String(normalized.raw).trim()) {
       throw new InvalidInputError('Cookies are required');
@@ -978,7 +1013,11 @@ export async function updateSessionCookies(sessionId, cookieInput) {
       sessionId,
       stored.fingerprint,
       stored.proxy || null,
-      { skipCUserCheck: true, cUserOverride: stored.cUser }
+      {
+        skipCUserCheck: true,
+        cUserOverride: stored.cUser,
+        twofaSecret: stored.twofaSecret || null,
+      }
     );
     session = sessions.get(sessionId);
   }
@@ -1033,12 +1072,25 @@ export async function updateSessionCookies(sessionId, cookieInput) {
   }
 
   if (session.page) {
+    const twofaSecret = incomingTwofa || session.twofaSecret || stored?.twofaSecret || null;
+    try {
+      await resolveTwoFactorIfNeeded(session.page, {
+        twofaSecret,
+        label: 'UpdateSessionCookies',
+      });
+    } catch (error) {
+      throw new InvalidInputError(error.message);
+    }
     const authCheck = await detectLoginOrCheckpoint(session.page);
     if (authCheck.blocked) {
       throw new InvalidInputError(`Session not authenticated: ${authCheck.reason}`);
     }
     try {
-      await checkSessionFlow(session.page, { sessionId, cUser: session.cUser || null });
+      await checkSessionFlow(session.page, {
+        sessionId,
+        cUser: session.cUser || null,
+        twofaSecret,
+      });
     } catch (error) {
       if (error instanceof InvalidInputError) {
         throw error;
@@ -1052,12 +1104,22 @@ export async function updateSessionCookies(sessionId, cookieInput) {
   session.cookieJson = normalized.format === 'json' ? normalized.raw : null;
   session.cookieFormat = normalized.format;
   session.cUser = expectedCUser || cUser;
+  if (incomingTwofa) {
+    session.twofaSecret = incomingTwofa;
+  } else if (session.twofaSecret === undefined && stored?.twofaSecret) {
+    session.twofaSecret = stored.twofaSecret;
+  }
   touchSession(sessionId);
 
-  sessionStore.updateCookies(sessionId, normalized.format, normalized.raw);
+  const twofaToStore = incomingTwofa || session.twofaSecret || stored?.twofaSecret;
+  if (twofaToStore) {
+    sessionStore.updateCookies(sessionId, normalized.format, normalized.raw, twofaToStore);
+  } else {
+    sessionStore.updateCookies(sessionId, normalized.format, normalized.raw);
+  }
 
   if (config.devMode) {
-    await saveSessionMetadata(sessionId, session, normalized, session.proxy || null);
+    await saveSessionMetadata(sessionId, session, normalized, session.proxy || null, twofaToStore || null);
   }
   return { ok: true };
 }
@@ -1092,6 +1154,7 @@ export async function updateSessionProxy(sessionId, proxyInput) {
       : (active?.cookieString || stored?.cookies || '');
     const fingerprint = active?.fingerprint || stored?.fingerprint || null;
     const cUser = active?.cUser || stored?.cUser || null;
+    const twofaSecret = active?.twofaSecret || stored?.twofaSecret || null;
     if ((cookieFormat === 'json' && (!Array.isArray(cookies) || cookies.length === 0)) ||
         (cookieFormat === 'string' && !String(cookies || '').trim())) {
       throw new InvalidInputError('Cookies are required to update proxy');
@@ -1111,7 +1174,11 @@ export async function updateSessionProxy(sessionId, proxyInput) {
             sessionId,
             fingerprint,
             targetProxy,
-            { skipCUserCheck: true, cUserOverride: cUser || null }
+            {
+              skipCUserCheck: true,
+              cUserOverride: cUser || null,
+              twofaSecret,
+            }
           );
         } catch (error) {
           lastError = error;
@@ -1244,6 +1311,7 @@ export async function sendMessageForSession(sessionId, { extension, phoneNumber,
             message,
             sessionId,
             cUser: session.cUser || null,
+            twofaSecret: session.twofaSecret || null,
             forceInitialRefresh,
             useReplyFlow,
           }),
@@ -1264,6 +1332,7 @@ export async function sendMessageForSession(sessionId, { extension, phoneNumber,
                 message,
                 sessionId,
                 cUser: recreated.cUser || null,
+                twofaSecret: recreated.twofaSecret || null,
                 forceInitialRefresh: true,
                 useReplyFlow,
               }),
@@ -1289,7 +1358,11 @@ export async function checkSessionForSession(sessionId) {
       try {
         touchSession(sessionId);
         await withTimeout(
-          checkSessionFlow(session.page, { sessionId, cUser: session.cUser || null }),
+          checkSessionFlow(session.page, {
+            sessionId,
+            cUser: session.cUser || null,
+            twofaSecret: session.twofaSecret || null,
+          }),
           config.flowTimeoutMs,
           'Check flow'
         );
@@ -1301,7 +1374,11 @@ export async function checkSessionForSession(sessionId) {
             const recreated = getSession(sessionId);
             recreated.lastActivity = Date.now();
             await withTimeout(
-              checkSessionFlow(recreated.page, { sessionId, cUser: recreated.cUser || null }),
+              checkSessionFlow(recreated.page, {
+                sessionId,
+                cUser: recreated.cUser || null,
+                twofaSecret: recreated.twofaSecret || null,
+              }),
               config.flowTimeoutMs,
               'Check flow (retry)'
             );
@@ -1365,14 +1442,18 @@ export async function restoreSessionFromStore(sessionId) {
     sessionId,
     stored.fingerprint,
     stored.proxy || null,
-    { skipCUserCheck: true, cUserOverride: stored.cUser }
+    {
+      skipCUserCheck: true,
+      cUserOverride: stored.cUser,
+      twofaSecret: stored.twofaSecret || null,
+    }
   );
 }
 
 /**
  * Save session metadata to disk
  */
-async function saveSessionMetadata(sessionId, sessionData, cookieString, proxy = null) {
+async function saveSessionMetadata(sessionId, sessionData, cookieString, proxy = null, twofaSecret = null) {
   try {
     let metadata = {};
     try {
@@ -1395,6 +1476,7 @@ async function saveSessionMetadata(sessionId, sessionData, cookieString, proxy =
       cookieJson: cookieFormat === 'json' ? cookieRaw : null,
       fingerprint: sessionData.fingerprint, // Save the fingerprint for recreation
       proxy: proxy || null, // Save proxy config if provided
+      twofaSecret: twofaSecret || sessionData.twofaSecret || null,
     };
 
     await fs.writeFile(SESSIONS_FILE, JSON.stringify(metadata, null, 2));
@@ -1465,7 +1547,8 @@ async function recreateSession(metadata) {
       cookiePayload,
       metadata.sessionId,
       metadata.fingerprint,
-      proxyConfig
+      proxyConfig,
+      { twofaSecret: metadata.twofaSecret || null }
     );
     
     console.log(`[SessionManager] ✓ Successfully recreated session ${result.sessionId}`);
