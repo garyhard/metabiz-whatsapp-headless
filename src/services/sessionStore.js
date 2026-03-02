@@ -35,7 +35,7 @@ if (fs.existsSync(DB_PATH)) {
 db.exec(`
   CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
-    c_user TEXT NOT NULL UNIQUE,
+    c_user TEXT NOT NULL,
     cookie_format TEXT NOT NULL,
     cookies TEXT NOT NULL,
     fingerprint TEXT NOT NULL,
@@ -60,10 +60,68 @@ try {
   // Column already exists.
 }
 
+function getSessionsTableSql() {
+  const stmt = db.prepare(`
+    SELECT sql
+    FROM sqlite_master
+    WHERE type = 'table' AND name = 'sessions'
+  `);
+  try {
+    if (!stmt.step()) return '';
+    const row = stmt.getAsObject();
+    return String(row?.sql || '');
+  } finally {
+    stmt.free();
+  }
+}
+
+function migrateSessionsTableDropCUserUnique() {
+  const tableSql = getSessionsTableSql();
+  const hasUniqueCUser = /\bc_user\b[\s\S]*\bUNIQUE\b/i.test(tableSql);
+  if (!hasUniqueCUser) {
+    return;
+  }
+
+  db.exec('BEGIN TRANSACTION');
+  try {
+    db.exec(`
+      CREATE TABLE sessions_new (
+        session_id TEXT PRIMARY KEY,
+        c_user TEXT NOT NULL,
+        cookie_format TEXT NOT NULL,
+        cookies TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        proxy TEXT,
+        twofa_secret TEXT,
+        status TEXT,
+        last_activity INTEGER,
+        created_at INTEGER,
+        updated_at INTEGER
+      );
+      INSERT INTO sessions_new (
+        session_id, c_user, cookie_format, cookies, fingerprint, proxy, twofa_secret, status, last_activity, created_at, updated_at
+      )
+      SELECT
+        session_id, c_user, cookie_format, cookies, fingerprint, proxy, twofa_secret, status, last_activity, created_at, updated_at
+      FROM sessions;
+      DROP TABLE sessions;
+      ALTER TABLE sessions_new RENAME TO sessions;
+      CREATE INDEX IF NOT EXISTS idx_sessions_last_activity ON sessions(last_activity);
+    `);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
 function persistDb() {
   const data = db.export();
   fs.writeFileSync(DB_PATH, Buffer.from(data));
 }
+
+migrateSessionsTableDropCUserUnique();
+persistDb();
 
 function serialize(value) {
   if (value === null || value === undefined) return null;
@@ -136,7 +194,13 @@ export const sessionStore = {
   },
 
   getByCUser(cUser) {
-    const row = getRow('SELECT * FROM sessions WHERE c_user = :c_user', { ':c_user': cUser });
+    const row = getRow(`
+      SELECT *
+      FROM sessions
+      WHERE c_user = :c_user
+      ORDER BY updated_at DESC, created_at DESC
+      LIMIT 1
+    `, { ':c_user': cUser });
     return normalizeRow(row);
   },
 

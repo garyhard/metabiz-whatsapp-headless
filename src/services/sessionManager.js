@@ -6,7 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { createBrowser } from './browserFactory.js';
 import { normalizeCookiesInput, parseCookieString, toPlaywrightCookies, toPlaywrightCookiesFromJson } from '../utils/cookies.js';
 import { sendMessage, checkSessionFlow, captureDebugScreenshot, resolveTwoFactorIfNeeded } from './automation.js';
-import { SessionNotFoundError, InvalidInputError, BrowserCrashError, SessionAlreadyExistsError } from '../errors.js';
+import { SessionNotFoundError, InvalidInputError, BrowserCrashError } from '../errors.js';
 import { config } from '../config.js';
 import { sessionStore } from './sessionStore.js';
 import fs from 'fs/promises';
@@ -49,7 +49,7 @@ async function applyResolutionCookies(context, viewport) {
 const sessions = new Map();
 // Simple per-session mutex to serialize UI automation
 const sessionLocks = new Map();
-// Simple per-c_user mutex to prevent duplicate sessions
+// Simple per-c_user mutex to serialize creation/check flow for the same account
 const cUserLocks = new Map();
 // Global mutex to avoid noisy concurrent UI automation across sessions
 let globalSendLock = Promise.resolve();
@@ -540,7 +540,7 @@ export async function createSession(
 ) {
   const normalized = normalizeCookiesInput(cookieInput);
   const cUser = extractCUser(normalized);
-  const { skipCUserCheck = false, cUserOverride = null, twofaSecret = null } = options || {};
+  const { cUserOverride = null, twofaSecret = null } = options || {};
   const normalizedTwofaSecret = String(twofaSecret || '').trim() || null;
   const finalCUser = cUserOverride || cUser;
 
@@ -558,14 +558,6 @@ export async function createSession(
     if (!finalCUser) {
       throw new InvalidInputError('c_user cookie is required');
     }
-    if (!skipCUserCheck) {
-      const existing = sessionStore.getByCUser(finalCUser);
-      if (existing && existing.sessionId !== existingSessionId) {
-        logStep('createSession:exists', { cUser: finalCUser, existingSessionId: existing.sessionId });
-        throw new SessionAlreadyExistsError(finalCUser, existing.sessionId);
-      }
-    }
-
     // Use existing sessionId if provided (for recreation), otherwise generate new one
     const sessionId = existingSessionId || uuidv4();
     const stored = sessionStore.getByCUser(finalCUser);
@@ -820,13 +812,6 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
   try {
     logStep('validateCookies:start', { cUser });
     setProgress(cUser, 'validate:start');
-    if (persist) {
-      const existing = sessionStore.getByCUser(cUser);
-      if (existing && existing.sessionId) {
-        setProgress(cUser, 'validate:exists', { sessionId: existing.sessionId });
-        return { ok: true, cUser, sessionId: existing.sessionId, reused: true };
-      }
-    }
     const storedFingerprint = sessionStore.getFingerprint(cUser);
     const browserInstance = await createBrowser(tempSessionId, storedFingerprint, proxy);
     browser = browserInstance.browser;

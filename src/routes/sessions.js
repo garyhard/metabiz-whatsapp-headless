@@ -14,7 +14,7 @@ import {
   cleanupSessions,
   clearAllSessions,
 } from '../services/sessionManager.js';
-import { InvalidInputError, SessionNotFoundError, SessionAlreadyExistsError, AutomationError } from '../errors.js';
+import { InvalidInputError, SessionNotFoundError, AutomationError } from '../errors.js';
 
 const router = express.Router();
 
@@ -142,15 +142,6 @@ router.post('/', async (req, res, next) => {
         ok: false,
         error: error.message,
         errorCode: 'invalid_input',
-      });
-    }
-    if (error instanceof SessionAlreadyExistsError) {
-      return res.status(409).json({
-        ok: false,
-        error: error.message,
-        errorCode: 'session_exists',
-        cUser: error.cUser || null,
-        existingSessionId: error.sessionId || null,
       });
     }
     next(error);
