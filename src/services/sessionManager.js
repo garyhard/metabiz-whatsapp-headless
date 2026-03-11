@@ -345,6 +345,18 @@ async function suspendSession(sessionId) {
   sessionStore.updateStatus(sessionId, 'suspended', session.lastActivity || Date.now());
 }
 
+async function suspendUnhealthySession(sessionId, reason = 'unknown') {
+  try {
+    await suspendSession(sessionId);
+    logStep('session:suspended:unhealthy', { sessionId, reason });
+  } catch (error) {
+    console.warn(
+      `[SessionManager] Failed to suspend unhealthy session ${sessionId}:`,
+      error?.message || String(error)
+    );
+  }
+}
+
 async function ensureSessionActive(sessionId) {
   let session = sessions.get(sessionId);
   if (!session) {
@@ -1331,10 +1343,11 @@ export async function sendMessageForSession(
             );
             return { ok: true, retried: true, ...(result || {}) };
           } catch (retryError) {
-            sessions.delete(sessionId);
+            await suspendUnhealthySession(sessionId, 'send_retry_failed');
             throw new BrowserCrashError(`Browser crashed for session ${sessionId}: ${retryError.message}`);
           }
         }
+        await suspendUnhealthySession(sessionId, 'send_flow_failed');
         throw error;
       }
     })
@@ -1374,10 +1387,11 @@ export async function checkSessionForSession(sessionId) {
             );
             return { ok: true, retried: true };
           } catch (retryError) {
-            sessions.delete(sessionId);
+            await suspendUnhealthySession(sessionId, 'check_retry_failed');
             throw new BrowserCrashError(`Browser crashed for session ${sessionId}: ${retryError.message}`);
           }
         }
+        await suspendUnhealthySession(sessionId, 'check_flow_failed');
         throw error;
       }
     })
