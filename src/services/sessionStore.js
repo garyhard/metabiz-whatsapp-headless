@@ -52,10 +52,74 @@ db.exec(`
     fingerprint TEXT NOT NULL,
     updated_at INTEGER
   );
+  CREATE TABLE IF NOT EXISTS message_jobs (
+    id TEXT PRIMARY KEY,
+    request_id TEXT UNIQUE,
+    meta_blast_message_id TEXT,
+    session_id TEXT NOT NULL,
+    extension TEXT NOT NULL,
+    phone_number TEXT NOT NULL,
+    message TEXT NOT NULL,
+    use_reply_flow INTEGER NOT NULL DEFAULT 0,
+    include_success_screenshot INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'queued',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 5,
+    error_message TEXT,
+    result_json TEXT,
+    next_retry_at INTEGER NOT NULL DEFAULT 0,
+    webhook_notified INTEGER NOT NULL DEFAULT 0,
+    webhook_attempts INTEGER NOT NULL DEFAULT 0,
+    webhook_next_retry_at INTEGER NOT NULL DEFAULT 0,
+    webhook_last_error TEXT,
+    webhook_delivered_at INTEGER,
+    started_at INTEGER,
+    finished_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_message_jobs_status_next_retry
+    ON message_jobs(status, next_retry_at, created_at);
 `);
 
 try {
   db.exec('ALTER TABLE sessions ADD COLUMN twofa_secret TEXT');
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE message_jobs ADD COLUMN webhook_notified INTEGER NOT NULL DEFAULT 0');
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE message_jobs ADD COLUMN webhook_attempts INTEGER NOT NULL DEFAULT 0');
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE message_jobs ADD COLUMN webhook_next_retry_at INTEGER NOT NULL DEFAULT 0');
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE message_jobs ADD COLUMN webhook_last_error TEXT');
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE message_jobs ADD COLUMN webhook_delivered_at INTEGER');
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE message_jobs ADD COLUMN meta_blast_message_id TEXT');
 } catch {
   // Column already exists.
 }
@@ -133,6 +197,15 @@ function deserialize(value) {
   return JSON.parse(value);
 }
 
+function deserializeSafe(value) {
+  if (value === null || value === undefined || value === '') return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
 function serializeCookies(format, raw) {
   if (format === 'json') {
     return JSON.stringify(raw || []);
@@ -157,6 +230,18 @@ function runStatement(sql, params) {
   persistDb();
 }
 
+function runStatementWithChanges(sql, params) {
+  const stmt = db.prepare(sql);
+  try {
+    stmt.run(params);
+  } finally {
+    stmt.free();
+  }
+  const changes = db.getRowsModified();
+  persistDb();
+  return changes;
+}
+
 function getRow(sql, params) {
   const stmt = db.prepare(sql);
   try {
@@ -165,6 +250,20 @@ function getRow(sql, params) {
       return null;
     }
     return stmt.getAsObject();
+  } finally {
+    stmt.free();
+  }
+}
+
+function getRows(sql, params) {
+  const stmt = db.prepare(sql);
+  const rows = [];
+  try {
+    stmt.bind(params);
+    while (stmt.step()) {
+      rows.push(stmt.getAsObject());
+    }
+    return rows;
   } finally {
     stmt.free();
   }
@@ -184,6 +283,36 @@ function normalizeRow(row) {
     lastActivity: row.last_activity,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function normalizeMessageJobRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    requestId: row.request_id || null,
+    metaBlastMessageId: row.meta_blast_message_id || null,
+    sessionId: row.session_id,
+    extension: row.extension,
+    phoneNumber: row.phone_number,
+    message: row.message,
+    useReplyFlow: Number(row.use_reply_flow) === 1,
+    includeSuccessScreenshot: Number(row.include_success_screenshot) === 1,
+    status: row.status,
+    attempts: Number(row.attempts || 0),
+    maxAttempts: Number(row.max_attempts || 0),
+    errorMessage: row.error_message || null,
+    result: deserializeSafe(row.result_json),
+    nextRetryAt: Number(row.next_retry_at || 0),
+    webhookNotified: Number(row.webhook_notified || 0) === 1,
+    webhookAttempts: Number(row.webhook_attempts || 0),
+    webhookNextRetryAt: Number(row.webhook_next_retry_at || 0),
+    webhookLastError: row.webhook_last_error || null,
+    webhookDeliveredAt: row.webhook_delivered_at ? Number(row.webhook_delivered_at) : null,
+    startedAt: row.started_at ? Number(row.started_at) : null,
+    finishedAt: row.finished_at ? Number(row.finished_at) : null,
+    createdAt: Number(row.created_at || 0),
+    updatedAt: Number(row.updated_at || 0),
   };
 }
 
@@ -313,8 +442,275 @@ export const sessionStore = {
     runStatement('DELETE FROM sessions WHERE session_id = :session_id', { ':session_id': sessionId });
   },
 
+  enqueueMessageJob({
+    id,
+    requestId = null,
+    metaBlastMessageId = null,
+    sessionId,
+    extension,
+    phoneNumber,
+    message,
+    useReplyFlow = false,
+    includeSuccessScreenshot = false,
+    maxAttempts = 5,
+  }) {
+    const now = Date.now();
+    runStatement(`
+      INSERT INTO message_jobs (
+        id, request_id, meta_blast_message_id, session_id, extension, phone_number, message,
+        use_reply_flow, include_success_screenshot, status, attempts, max_attempts,
+        next_retry_at, webhook_notified, webhook_attempts, webhook_next_retry_at,
+        created_at, updated_at
+      ) VALUES (
+        :id, :request_id, :meta_blast_message_id, :session_id, :extension, :phone_number, :message,
+        :use_reply_flow, :include_success_screenshot, 'queued', 0, :max_attempts,
+        0, 0, 0, 0, :created_at, :updated_at
+      )
+    `, {
+      ':id': id,
+      ':request_id': requestId || null,
+      ':meta_blast_message_id': metaBlastMessageId || null,
+      ':session_id': sessionId,
+      ':extension': extension,
+      ':phone_number': phoneNumber,
+      ':message': message,
+      ':use_reply_flow': useReplyFlow ? 1 : 0,
+      ':include_success_screenshot': includeSuccessScreenshot ? 1 : 0,
+      ':max_attempts': maxAttempts,
+      ':created_at': now,
+      ':updated_at': now,
+    });
+    return this.getMessageJob(id);
+  },
+
+  getMessageJob(jobId) {
+    const row = getRow('SELECT * FROM message_jobs WHERE id = :id', { ':id': jobId });
+    return normalizeMessageJobRow(row);
+  },
+
+  getMessageJobByRequestId(requestId) {
+    if (!requestId) return null;
+    const row = getRow(`
+      SELECT *
+      FROM message_jobs
+      WHERE request_id = :request_id
+      ORDER BY created_at DESC
+      LIMIT 1
+    `, { ':request_id': requestId });
+    return normalizeMessageJobRow(row);
+  },
+
+  hasRunnableMessageJob(now = Date.now()) {
+    const row = getRow(`
+      SELECT id
+      FROM message_jobs
+      WHERE status = 'queued' AND next_retry_at <= :now
+      ORDER BY created_at ASC
+      LIMIT 1
+    `, { ':now': now });
+    return !!row;
+  },
+
+  claimNextMessageJob(now = Date.now()) {
+    const row = getRow(`
+      SELECT id
+      FROM message_jobs
+      WHERE status = 'queued' AND next_retry_at <= :now
+      ORDER BY created_at ASC
+      LIMIT 1
+    `, { ':now': now });
+    if (!row || !row.id) return null;
+
+    const changes = runStatementWithChanges(`
+      UPDATE message_jobs
+      SET status = 'processing',
+          attempts = attempts + 1,
+          started_at = COALESCE(started_at, :now),
+          updated_at = :now
+      WHERE id = :id AND status = 'queued' AND next_retry_at <= :now
+    `, {
+      ':id': row.id,
+      ':now': now,
+    });
+    if (changes <= 0) return null;
+    return this.getMessageJob(row.id);
+  },
+
+  markMessageJobSent(jobId, result) {
+    const now = Date.now();
+    runStatement(`
+      UPDATE message_jobs
+      SET status = 'sent',
+          error_message = NULL,
+          result_json = :result_json,
+          webhook_notified = 0,
+          webhook_attempts = 0,
+          webhook_next_retry_at = 0,
+          webhook_last_error = NULL,
+          webhook_delivered_at = NULL,
+          finished_at = :finished_at,
+          updated_at = :updated_at
+      WHERE id = :id
+    `, {
+      ':id': jobId,
+      ':result_json': serialize(result || {}),
+      ':finished_at': now,
+      ':updated_at': now,
+    });
+    return this.getMessageJob(jobId);
+  },
+
+  markMessageJobRetry(jobId, errorMessage, nextRetryAt) {
+    const now = Date.now();
+    runStatement(`
+      UPDATE message_jobs
+      SET status = 'queued',
+          error_message = :error_message,
+          next_retry_at = :next_retry_at,
+          updated_at = :updated_at
+      WHERE id = :id
+    `, {
+      ':id': jobId,
+      ':error_message': errorMessage || null,
+      ':next_retry_at': nextRetryAt || now,
+      ':updated_at': now,
+    });
+    return this.getMessageJob(jobId);
+  },
+
+  markMessageJobError(jobId, errorMessage) {
+    const now = Date.now();
+    runStatement(`
+      UPDATE message_jobs
+      SET status = 'error',
+          error_message = :error_message,
+          webhook_notified = 0,
+          webhook_attempts = 0,
+          webhook_next_retry_at = 0,
+          webhook_last_error = NULL,
+          webhook_delivered_at = NULL,
+          finished_at = :finished_at,
+          updated_at = :updated_at
+      WHERE id = :id
+    `, {
+      ':id': jobId,
+      ':error_message': errorMessage || null,
+      ':finished_at': now,
+      ':updated_at': now,
+    });
+    return this.getMessageJob(jobId);
+  },
+
+  requeueStaleProcessingMessageJobs(timeoutMs = 180000) {
+    const now = Date.now();
+    const threshold = now - Math.max(1000, Number(timeoutMs) || 180000);
+    runStatement(`
+      UPDATE message_jobs
+      SET status = 'queued',
+          next_retry_at = :now,
+          updated_at = :now
+      WHERE status = 'processing' AND updated_at < :threshold
+    `, {
+      ':now': now,
+      ':threshold': threshold,
+    });
+  },
+
+  listMessageJobsByStatus(status, limit = 100) {
+    const maxRows = Math.max(1, Number(limit) || 100);
+    const rows = getRows(`
+      SELECT *
+      FROM message_jobs
+      WHERE status = :status
+      ORDER BY created_at DESC
+      LIMIT :limit
+    `, {
+      ':status': status,
+      ':limit': maxRows,
+    });
+    return rows.map(normalizeMessageJobRow);
+  },
+
+  hasPendingWebhook(now = Date.now()) {
+    const row = getRow(`
+      SELECT id
+      FROM message_jobs
+      WHERE webhook_notified = 0
+        AND status IN ('sent', 'error')
+        AND webhook_next_retry_at <= :now
+      ORDER BY updated_at ASC
+      LIMIT 1
+    `, { ':now': now });
+    return !!row;
+  },
+
+  claimPendingWebhook(now = Date.now()) {
+    const row = getRow(`
+      SELECT id
+      FROM message_jobs
+      WHERE webhook_notified = 0
+        AND status IN ('sent', 'error')
+        AND webhook_next_retry_at <= :now
+      ORDER BY updated_at ASC
+      LIMIT 1
+    `, { ':now': now });
+    if (!row || !row.id) return null;
+
+    const changes = runStatementWithChanges(`
+      UPDATE message_jobs
+      SET webhook_attempts = webhook_attempts + 1,
+          updated_at = :updated_at
+      WHERE id = :id
+        AND webhook_notified = 0
+        AND status IN ('sent', 'error')
+        AND webhook_next_retry_at <= :now
+    `, {
+      ':id': row.id,
+      ':now': now,
+      ':updated_at': now,
+    });
+    if (changes <= 0) return null;
+    return this.getMessageJob(row.id);
+  },
+
+  markWebhookDelivered(jobId) {
+    const now = Date.now();
+    runStatement(`
+      UPDATE message_jobs
+      SET webhook_notified = 1,
+          webhook_last_error = NULL,
+          webhook_delivered_at = :webhook_delivered_at,
+          updated_at = :updated_at
+      WHERE id = :id
+    `, {
+      ':id': jobId,
+      ':webhook_delivered_at': now,
+      ':updated_at': now,
+    });
+    return this.getMessageJob(jobId);
+  },
+
+  markWebhookRetry(jobId, errorMessage, nextRetryAt) {
+    const now = Date.now();
+    runStatement(`
+      UPDATE message_jobs
+      SET webhook_notified = 0,
+          webhook_last_error = :webhook_last_error,
+          webhook_next_retry_at = :webhook_next_retry_at,
+          updated_at = :updated_at
+      WHERE id = :id
+    `, {
+      ':id': jobId,
+      ':webhook_last_error': errorMessage || null,
+      ':webhook_next_retry_at': nextRetryAt || now,
+      ':updated_at': now,
+    });
+    return this.getMessageJob(jobId);
+  },
+
   clearAll() {
     runStatement('DELETE FROM sessions', {});
     runStatement('DELETE FROM fingerprints', {});
+    runStatement('DELETE FROM message_jobs', {});
   },
 };

@@ -9,6 +9,7 @@ import sessionsRouter from './routes/sessions.js';
 import messagesRouter from './routes/messages.js';
 import cookiesRouter from './routes/cookies.js';
 import { destroyAllSessions, restoreSessions, getProgressByCUser } from './services/sessionManager.js';
+import { startMessageQueueWorker, stopMessageQueueWorker } from './services/messageQueue.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
@@ -140,6 +141,7 @@ async function gracefulShutdown(signal) {
   }
 
   // Close all browser sessions (skip in dev mode to preserve sessions across restarts)
+  stopMessageQueueWorker();
   if (config.devMode) {
     console.log('[Server] Dev mode: Preserving browser sessions across restart');
     console.log('[Server] Sessions will remain active. Use DELETE /api/sessions/:id to manually destroy them.');
@@ -165,6 +167,7 @@ server = app.listen(config.port, async () => {
   console.log(`[Server] Listening on port ${config.port}`);
   console.log(`[Server] API key authentication enabled`);
   console.log(`[Server] Health check: http://localhost:${config.port}/health`);
+  startMessageQueueWorker();
   if (config.devMode) {
     console.log(`[Server] 🛠️  Dev mode: Sessions will be preserved across restarts`);
   } else {

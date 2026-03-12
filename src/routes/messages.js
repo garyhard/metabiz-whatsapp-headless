@@ -5,6 +5,7 @@
 import express from 'express';
 import fs from 'fs/promises';
 import { sendMessageForSession, restoreSessionFromStore } from '../services/sessionManager.js';
+import { enqueueMessageJob, getMessageJob } from '../services/messageQueue.js';
 import {
   InvalidInputError,
   SessionNotFoundError,
@@ -12,6 +13,36 @@ import {
 } from '../errors.js';
 
 const router = express.Router();
+
+function toBoolean(value) {
+  if (value === true) return true;
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes';
+}
+
+function serializeJob(job) {
+  if (!job) return null;
+  return {
+    id: job.id,
+    requestId: job.requestId,
+    metaBlastMessageId: job.metaBlastMessageId || null,
+    sessionId: job.sessionId,
+    status: job.status,
+    attempts: job.attempts,
+    maxAttempts: job.maxAttempts,
+    errorMessage: job.errorMessage,
+    nextRetryAt: job.nextRetryAt || null,
+    result: job.result || null,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+    webhookNotified: job.webhookNotified === true,
+    webhookAttempts: job.webhookAttempts || 0,
+    webhookNextRetryAt: job.webhookNextRetryAt || null,
+    webhookLastError: job.webhookLastError || null,
+  };
+}
 
 async function buildScreenshotDataUrl(screenshot) {
   try {
@@ -25,6 +56,27 @@ async function buildScreenshotDataUrl(screenshot) {
     return null;
   }
 }
+
+/**
+ * GET /api/sessions/jobs/:jobId
+ * Get async message job status
+ */
+router.get('/jobs/:jobId', async (req, res) => {
+  const { jobId } = req.params;
+  const job = getMessageJob(jobId);
+  if (!job) {
+    return res.status(404).json({
+      ok: false,
+      error: 'Job not found',
+      errorCode: 'job_not_found',
+    });
+  }
+
+  return res.json({
+    ok: true,
+    job: serializeJob(job),
+  });
+});
 
 /**
  * POST /api/sessions/:sessionId/send-message
@@ -139,7 +191,7 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
  */
 router.post('/:sessionId/send-message-blast', async (req, res, next) => {
   const { sessionId } = req.params;
-  const { extension, phoneNumber, message, includeSuccessScreenshot } = req.body || {};
+  const { extension, phoneNumber, message, includeSuccessScreenshot, requestId, metaBlastMessageId, async } = req.body || {};
   try {
     console.log(`[Routes] send-message-blast request session=${sessionId}`);
 
@@ -154,6 +206,26 @@ router.post('/:sessionId/send-message-blast', async (req, res, next) => {
       return res.status(400).json({
         ok: false,
         error: 'All fields must be strings',
+      });
+    }
+
+    const asyncMode = toBoolean(req.query?.async) || toBoolean(async);
+    if (asyncMode) {
+      const { job, created } = enqueueMessageJob({
+        requestId,
+        metaBlastMessageId,
+        sessionId,
+        extension,
+        phoneNumber,
+        message,
+        useReplyFlow: false,
+        includeSuccessScreenshot: includeSuccessScreenshot === true,
+      });
+      return res.status(202).json({
+        ok: true,
+        accepted: true,
+        created,
+        job: serializeJob(job),
       });
     }
 

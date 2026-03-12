@@ -86,6 +86,17 @@ PROXY_PASSWORD=your-proxy-password
   - `proxy.example.com:8080` - HTTP proxy (protocol assumed if omitted)
 - `PROXY_USERNAME` (optional): Proxy username (required if proxy requires authentication)
 - `PROXY_PASSWORD` (optional): Proxy password (required if proxy requires authentication)
+- `MESSAGE_QUEUE_POLL_INTERVAL_MS` (optional): Polling interval worker queue (default: `1500`)
+- `MESSAGE_QUEUE_BATCH_SIZE` (optional): Max jobs per pump (default: `5`)
+- `SEND_CONCURRENCY` (optional): Batas paralel kirim lintas session. `10` untuk fixed 10 paralel, `0`/`all` untuk semua browser aktif (default: `1`)
+- `MESSAGE_QUEUE_MAX_ATTEMPTS` (optional): Retry attempts per job (default: `5`)
+- `MESSAGE_QUEUE_RETRY_BASE_MS` (optional): Base retry delay (default: `30000`)
+- `MESSAGE_QUEUE_RETRY_MAX_MS` (optional): Max retry delay (default: `300000`)
+- `MESSAGE_QUEUE_PROCESSING_TIMEOUT_MS` (optional): Timeout untuk requeue job `processing` setelah restart/crash (default: `180000`)
+- `META_BLAST_WEBHOOK_URL` (optional): URL webhook Rails penerima status blast (contoh: `https://your-app.com/webhooks/meta_blast_status`)
+- `META_BLAST_WEBHOOK_TIMEOUT_MS` (optional): Timeout HTTP webhook (default: `15000`)
+- `META_BLAST_WEBHOOK_RETRY_BASE_MS` (optional): Base delay retry webhook (default: `10000`)
+- `META_BLAST_WEBHOOK_RETRY_MAX_MS` (optional): Max delay retry webhook (default: `300000`)
 
 **Proxy Protocol Notes:**
 - **HTTP/HTTPS Proxy**: Application-level proxy designed for HTTP/HTTPS traffic. `https://` means the connection to the proxy is encrypted, but it still proxies HTTP/HTTPS traffic.
@@ -412,6 +423,75 @@ curl -X POST http://localhost:3000/api/sessions/123e4567-e89b-12d3-a456-42661417
   }'
 ```
 
+### 6. Send Message Blast (Async Queue, Persistent)
+
+Submit blast request ke queue persisten (SQLite), lalu worker proses di background. Job akan tetap ada saat service restart/reload.
+
+**Endpoint:** `POST /api/sessions/:sessionId/send-message-blast?async=1`
+
+**Body:**
+```json
+{
+  "extension": "62",
+  "phoneNumber": "87769691301",
+  "message": "Hello from async queue",
+  "requestId": "optional-idempotency-key",
+  "metaBlastMessageId": "12345"
+}
+```
+
+**Response (202):**
+```json
+{
+  "ok": true,
+  "accepted": true,
+  "created": true,
+  "job": {
+    "id": "uuid",
+    "status": "queued"
+  }
+}
+```
+
+### 7. Get Async Job Status
+
+**Endpoint:** `GET /api/sessions/jobs/:jobId`
+
+**Response (200):**
+```json
+{
+  "ok": true,
+  "job": {
+    "id": "uuid",
+    "status": "queued|processing|sent|error",
+    "attempts": 1,
+    "maxAttempts": 5
+  }
+}
+```
+
+### 8. Webhook Status ke Rails
+
+Jika `META_BLAST_WEBHOOK_URL` diisi, service akan kirim webhook saat job async masuk status final (`sent`/`error`).
+
+**Header signature:**
+- `X-MetaBlast-Signature: sha256=<hmac>`
+
+**Contoh payload:**
+```json
+{
+  "source": "metabiz-whatsapp-headless",
+  "event": "meta_blast_message.sent",
+  "occurred_at": "2026-03-12T15:00:00.000Z",
+  "job": {
+    "id": "uuid",
+    "request_id": "12345",
+    "meta_blast_message_id": "12345",
+    "status": "sent"
+  }
+}
+```
+
 ## Architecture
 
 ### Session Lifecycle
@@ -621,4 +701,3 @@ ISC
 ## Support
 
 For issues or questions, please refer to the project repository.
-

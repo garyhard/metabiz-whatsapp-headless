@@ -14,6 +14,19 @@ const FLOW_TIMEOUT_MS = parseInt(process.env.FLOW_TIMEOUT_MS || '60000', 10);
 const IDLE_TIMEOUT_MINUTES = parseInt(process.env.IDLE_TIMEOUT_MINUTES || '0', 10);
 const SEND_RELOAD_IDLE_MINUTES = parseInt(process.env.SEND_RELOAD_IDLE_MINUTES || '10', 10);
 
+function parsePositiveInt(value, fallback) {
+  const parsed = parseInt(String(value || ''), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseConcurrency(value, fallback) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return fallback;
+  if (raw === 'all' || raw === 'unlimited') return 0;
+  const parsed = parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
 function parseEnvList(value, fallback = []) {
   if (!value) return fallback;
   return value
@@ -47,6 +60,19 @@ export const config = {
   sendReloadIdleMs: Number.isFinite(SEND_RELOAD_IDLE_MINUTES) && SEND_RELOAD_IDLE_MINUTES > 0
     ? SEND_RELOAD_IDLE_MINUTES * 60 * 1000
     : 0,
+  sendConcurrency: parseConcurrency(process.env.SEND_CONCURRENCY, 1),
+  queue: {
+    pollIntervalMs: parsePositiveInt(process.env.MESSAGE_QUEUE_POLL_INTERVAL_MS, 1500),
+    batchSize: parsePositiveInt(process.env.MESSAGE_QUEUE_BATCH_SIZE, 5),
+    maxAttempts: parsePositiveInt(process.env.MESSAGE_QUEUE_MAX_ATTEMPTS, 5),
+    retryBaseMs: parsePositiveInt(process.env.MESSAGE_QUEUE_RETRY_BASE_MS, 30000),
+    retryMaxMs: parsePositiveInt(process.env.MESSAGE_QUEUE_RETRY_MAX_MS, 300000),
+    processingTimeoutMs: parsePositiveInt(process.env.MESSAGE_QUEUE_PROCESSING_TIMEOUT_MS, 180000),
+    webhookUrl: String(process.env.META_BLAST_WEBHOOK_URL || '').trim(),
+    webhookTimeoutMs: parsePositiveInt(process.env.META_BLAST_WEBHOOK_TIMEOUT_MS, 15000),
+    webhookRetryBaseMs: parsePositiveInt(process.env.META_BLAST_WEBHOOK_RETRY_BASE_MS, 10000),
+    webhookRetryMaxMs: parsePositiveInt(process.env.META_BLAST_WEBHOOK_RETRY_MAX_MS, 300000),
+  },
   proxy: defaultProxy,
   texts: {
     openWhatsappModal: parseEnvList(

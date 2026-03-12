@@ -51,8 +51,9 @@ const sessions = new Map();
 const sessionLocks = new Map();
 // Simple per-c_user mutex to serialize creation/check flow for the same account
 const cUserLocks = new Map();
-// Global mutex to avoid noisy concurrent UI automation across sessions
-let globalSendLock = Promise.resolve();
+// Global limiter for concurrent automation across sessions.
+let globalSendActive = 0;
+const globalSendWaiters = [];
 
 function extractCUser(normalized) {
   if (!normalized || !normalized.cookies) return '';
@@ -246,21 +247,24 @@ async function withCUserLock(cUser, task) {
 }
 
 async function withGlobalSendLock(task) {
-  const previous = globalSendLock;
-  let release;
-  const current = new Promise((resolve) => {
-    release = resolve;
-  });
-  globalSendLock = previous.then(() => current);
+  const maxConcurrent = Number(config.sendConcurrency) || 0;
+  if (maxConcurrent <= 0) {
+    return task();
+  }
 
+  while (globalSendActive >= maxConcurrent) {
+    await new Promise((resolve) => {
+      globalSendWaiters.push(resolve);
+    });
+  }
+
+  globalSendActive += 1;
   try {
-    await previous;
     return await task();
   } finally {
-    release();
-    if (globalSendLock === current) {
-      globalSendLock = Promise.resolve();
-    }
+    globalSendActive = Math.max(0, globalSendActive - 1);
+    const next = globalSendWaiters.shift();
+    if (next) next();
   }
 }
 
