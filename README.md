@@ -473,6 +473,7 @@ Submit blast request ke queue persisten (SQLite), lalu worker proses di backgrou
 ### 8. Webhook Status ke Rails
 
 Jika `META_BLAST_WEBHOOK_URL` diisi, service akan kirim webhook saat job async masuk status final (`sent`/`error`).
+Jika URL belum diisi, delivery webhook ditahan (pending) dan akan lanjut otomatis setelah URL diset + service restart.
 
 **Header signature:**
 - `X-MetaBlast-Signature: sha256=<hmac>`

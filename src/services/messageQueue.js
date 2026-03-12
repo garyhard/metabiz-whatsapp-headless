@@ -13,6 +13,10 @@ let stopRequested = false;
 let pumping = false;
 let timerRef = null;
 
+function webhookEnabled() {
+  return String(config.queue.webhookUrl || '').trim().length > 0;
+}
+
 function clearWorkerTimer() {
   if (!timerRef) return;
   clearTimeout(timerRef);
@@ -39,6 +43,21 @@ function backoffMs(attempt, baseMs, maxMs) {
   return Math.min(exp + jitter, maxMs);
 }
 
+function buildErrorResult(error, fallbackMessage) {
+  const message = fallbackMessage || (error?.message ? String(error.message) : String(error || 'Unknown error'));
+  const details = (error?.details && typeof error.details === 'object' && !Array.isArray(error.details))
+    ? error.details
+    : null;
+
+  return {
+    ok: false,
+    error: message,
+    errorCode: error?.errorCode ? String(error.errorCode) : null,
+    name: error?.name ? String(error.name) : null,
+    details,
+  };
+}
+
 async function processJob(job) {
   try {
     const result = await sendMessageForSession(job.sessionId, {
@@ -56,7 +75,7 @@ async function processJob(job) {
     const maxAttempts = Math.max(1, Number(job.maxAttempts) || config.queue.maxAttempts);
     const attempts = Math.max(1, Number(job.attempts) || 1);
     if (attempts >= maxAttempts) {
-      sessionStore.markMessageJobError(job.id, message);
+      sessionStore.markMessageJobError(job.id, message, buildErrorResult(error, message));
       console.warn(`[MessageQueue] job failed id=${job.id} attempts=${attempts}/${maxAttempts}`);
       return;
     }
@@ -100,7 +119,7 @@ function signPayload(rawBody) {
 async function postWebhook(job) {
   const url = config.queue.webhookUrl;
   if (!url) {
-    return { ok: true, skipped: true };
+    return { ok: false, error: 'webhook_url_not_set', retryable: false };
   }
 
   const payload = buildWebhookPayload(job);
@@ -151,6 +170,10 @@ async function deliverWebhook(job) {
 }
 
 async function flushWebhookQueue(maxBatch) {
+  if (!webhookEnabled()) {
+    return 0;
+  }
+
   let delivered = 0;
   for (let i = 0; i < maxBatch; i += 1) {
     const pending = sessionStore.claimPendingWebhook(Date.now());
@@ -186,7 +209,10 @@ export async function pumpQueue() {
   }
 
   if (stopRequested) return;
-  if (sessionStore.hasRunnableMessageJob(Date.now()) || sessionStore.hasPendingWebhook(Date.now())) {
+  if (
+    sessionStore.hasRunnableMessageJob(Date.now()) ||
+    (webhookEnabled() && sessionStore.hasPendingWebhook(Date.now()))
+  ) {
     schedulePump(0);
   } else {
     schedulePump(config.queue.pollIntervalMs);

@@ -578,12 +578,13 @@ export const sessionStore = {
     return this.getMessageJob(jobId);
   },
 
-  markMessageJobError(jobId, errorMessage) {
+  markMessageJobError(jobId, errorMessage, result = null) {
     const now = Date.now();
     runStatement(`
       UPDATE message_jobs
       SET status = 'error',
           error_message = :error_message,
+          result_json = :result_json,
           webhook_notified = 0,
           webhook_attempts = 0,
           webhook_next_retry_at = 0,
@@ -595,6 +596,7 @@ export const sessionStore = {
     `, {
       ':id': jobId,
       ':error_message': errorMessage || null,
+      ':result_json': serialize(result),
       ':finished_at': now,
       ':updated_at': now,
     });
