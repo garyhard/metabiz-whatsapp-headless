@@ -26,24 +26,61 @@ const INBOX_DISMISS_LABELS = normalizeList(['dismiss', 'tutup', 'close']);
 const CONNECT_INSTAGRAM_HINTS = normalizeList(['connect to instagram']);
 const TWO_FACTOR_TEXT_HINTS = normalizeList([
   'try another way',
+  'other ways to authenticate',
   'check your notifications on another device',
   'waiting for approval',
   'two-factor',
   'two factor',
+  'authenticator app',
+  'authentication app',
+  'security code',
+  'verification code',
+  'kode keamanan',
+  'kode verifikasi',
 ]);
 const TRY_ANOTHER_WAY_LABELS = normalizeList([
   'try another way',
   'coba cara lain',
+  'cara lain',
+  'metode lain',
+  'opsi lain',
 ]);
-const CONTINUE_LABELS = normalizeList(['continue', 'submit', 'next', 'lanjut', 'lanjutkan']);
+const CONTINUE_LABELS = normalizeList([
+  'continue',
+  'submit',
+  'next',
+  'lanjut',
+  'lanjutkan',
+  'selanjutnya',
+  'berikutnya',
+]);
 const TRUST_DEVICE_LABELS = normalizeList(['trust this device']);
 const ALWAYS_CONFIRM_LABELS = normalizeList(["always confirm it's me", 'always confirm it’s me']);
-const CODE_HINTS = normalizeList(['code', 'kode']);
-const AUTH_APP_LABELS = normalizeList(['authentication app', 'aplikasi autentikasi']);
+const CODE_HINTS = normalizeList([
+  'code',
+  'kode',
+  'otp',
+  'security',
+  'verification',
+  'authenticator',
+  'approvals_code',
+]);
+const AUTH_APP_LABELS = normalizeList([
+  'authentication app',
+  'authenticator app',
+  'use authentication app',
+  'aplikasi autentikasi',
+  'aplikasi autentikator',
+]);
 const CHOOSE_METHOD_HINTS = normalizeList([
   "choose a way to confirm it's you",
   'choose a way to confirm it’s you',
   'available confirmation methods',
+  'choose a way to authenticate',
+  'pilih cara untuk mengonfirmasi bahwa ini anda',
+  'pilih cara untuk mengonfirmasi ini anda',
+  'pilih metode konfirmasi',
+  'metode konfirmasi yang tersedia',
 ]);
 
 async function dismissSaveLoginInfo(page, label = 'Automation') {
@@ -253,10 +290,19 @@ async function hasTwoFactorChallenge(page) {
 async function findTwoFactorCodeInput(page) {
   const directSelectors = [
     'input[autocomplete="one-time-code"]',
+    'input[name*="approvals_code" i]',
+    'input[id*="approvals_code" i]',
+    'input[name*="otp" i]',
+    'input[id*="otp" i]',
     'input[name*="code" i]',
     'input[id*="code" i]',
+    'input[inputmode="numeric"]',
     'input[aria-label*="code" i]',
+    'input[aria-label*="security" i]',
+    'input[aria-label*="verification" i]',
     'input[placeholder*="code" i]',
+    'input[placeholder*="security" i]',
+    'input[placeholder*="verification" i]',
   ];
 
   for (const selector of directSelectors) {
@@ -273,23 +319,32 @@ async function findTwoFactorCodeInput(page) {
       const aria = String(el.getAttribute('aria-label') || '');
       const placeholder = String(el.getAttribute('placeholder') || '');
       const type = String(el.getAttribute('type') || '').toLowerCase();
+      const inputMode = String(el.getAttribute('inputmode') || '').toLowerCase();
+      const autoComplete = String(el.getAttribute('autocomplete') || '').toLowerCase();
+      const maxLength = Number(el.getAttribute('maxlength') || 0);
       let labelText = '';
       if (id) {
         const label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
         labelText = String(label?.textContent || '');
       }
-      return { id, name, aria, placeholder, labelText, type };
+      return { id, name, aria, placeholder, labelText, type, inputMode, autoComplete, maxLength };
     });
     const bag = normalizeText(
       `${score.id} ${score.name} ${score.aria} ${score.placeholder} ${score.labelText}`
     );
     const textHasCode = CODE_HINTS.some((hint) => bag.includes(hint));
+    const autoLooksCode =
+      score.autoComplete.includes('one-time-code') ||
+      score.autoComplete.includes('otp');
+    const numericLooksCode = score.inputMode.includes('numeric') || score.inputMode.includes('decimal');
+    const shortDigitsLike = Number.isFinite(score.maxLength) && score.maxLength > 0 && score.maxLength <= 8;
     const typeLooksCode =
       score.type === 'text' ||
       score.type === 'tel' ||
       score.type === 'number' ||
+      score.type === 'password' ||
       score.type === '';
-    if (textHasCode && typeLooksCode) {
+    if ((textHasCode && typeLooksCode) || autoLooksCode || (numericLooksCode && (shortDigitsLike || typeLooksCode))) {
       return input;
     }
   }
@@ -297,29 +352,44 @@ async function findTwoFactorCodeInput(page) {
 }
 
 async function selectAuthenticationAppMethod(page) {
-  const looksLikeMethodChooser = await page.evaluate((hints) => {
+  const looksLikeMethodChooserByText = await page.evaluate((hints) => {
     const text = (document.body?.innerText || '').toLowerCase();
     return hints.some((hint) => text.includes(hint));
   }, CHOOSE_METHOD_HINTS);
-  if (!looksLikeMethodChooser) {
+
+  let hasAuthAppOption = false;
+  for (const label of AUTH_APP_LABELS) {
+    const option = await findByText(page, {
+      text: label,
+      selector: 'label,[role="radio"],[role="button"],div,span',
+    });
+    if (option) {
+      hasAuthAppOption = true;
+      break;
+    }
+  }
+
+  if (!looksLikeMethodChooserByText && !hasAuthAppOption) {
     return false;
   }
 
   // Click the "Authentication app" option (label/container/radio) if present.
+  let selectedOption = false;
   for (const label of AUTH_APP_LABELS) {
     const option = await findByText(page, {
       text: label,
-      selector: 'label,[role="radio"],[role="button"],div',
+      selector: 'label,[role="radio"],[role="button"],div,span',
     });
     if (option) {
       await clickElement(page, option, `Auth: select "${label}"`);
       await sleep(300);
+      selectedOption = true;
       break;
     }
   }
 
   const clickedContinue = await clickFirstMatchingText(page, CONTINUE_LABELS);
-  if (!clickedContinue) {
+  if (!clickedContinue && !selectedOption) {
     return false;
   }
   await sleep(900);
@@ -350,10 +420,25 @@ async function resolveTwoFactorChallenge(page, { twofaSecret = null, label = 'Au
   const input = await waitFor(
     page,
     async () => findTwoFactorCodeInput(page),
-    { timeoutMs: 12000, intervalMs: 200 }
+    { timeoutMs: 25000, intervalMs: 250 }
   ).catch(() => null);
 
   if (!input) {
+    const debug = await captureDebugScreenshot(page, 'twofa-input-not-found').catch(() => null);
+    const diag = await page.evaluate(() => {
+      const title = document.title || '';
+      const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 250);
+      return { title, text };
+    }).catch(() => ({ title: '', text: '' }));
+    console.warn(
+      `[${label}] Two-factor code input not found`,
+      JSON.stringify({
+        url: page.url(),
+        title: diag.title,
+        text: diag.text,
+        debugPath: debug?.path || null,
+      })
+    );
     throw new AutomationError(`${label}: Two-factor code input not found`);
   }
 
