@@ -37,6 +37,9 @@ const TWO_FACTOR_TEXT_HINTS = normalizeList([
   'verification code',
   'kode keamanan',
   'kode verifikasi',
+  "confirm you're human",
+  'confirm you’re human',
+  'confirm you are human',
 ]);
 const TRY_ANOTHER_WAY_LABELS = normalizeList([
   'try another way',
@@ -81,6 +84,13 @@ const CHOOSE_METHOD_HINTS = normalizeList([
   'pilih cara untuk mengonfirmasi ini anda',
   'pilih metode konfirmasi',
   'metode konfirmasi yang tersedia',
+]);
+const HUMAN_CONFIRM_HINTS = normalizeList([
+  "confirm you're human",
+  'confirm you’re human',
+  'confirm you are human',
+  'human to use your account',
+  'human to use this account',
 ]);
 
 async function dismissSaveLoginInfo(page, label = 'Automation') {
@@ -396,16 +406,101 @@ async function selectAuthenticationAppMethod(page) {
   return true;
 }
 
+async function isHumanConfirmationStep(page) {
+  try {
+    return await page.evaluate(({ hints, continueLabels }) => {
+      const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const hasHint = hints.some((hint) => text.includes(hint));
+      if (!hasHint) return false;
+
+      const clickables = Array.from(document.querySelectorAll('[role="button"],button,a,[role="link"]'));
+      return clickables.some((el) => {
+        const style = window.getComputedStyle(el);
+        if (!style) return false;
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+          return false;
+        }
+
+        const label = `${el.textContent || ''} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''}`
+          .replace(/\s+/g, ' ')
+          .trim()
+          .toLowerCase();
+
+        return continueLabels.some((continueLabel) => label === continueLabel || label.includes(continueLabel));
+      });
+    }, {
+      hints: HUMAN_CONFIRM_HINTS,
+      continueLabels: CONTINUE_LABELS,
+    });
+  } catch {
+    return false;
+  }
+}
+
+async function advanceHumanConfirmation(page, label = 'Automation') {
+  let handled = false;
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const humanStep = await isHumanConfirmationStep(page);
+    if (!humanStep) {
+      break;
+    }
+
+    let continueButton = null;
+    for (const continueLabel of CONTINUE_LABELS) {
+      continueButton = await findByText(page, {
+        text: continueLabel,
+        selector: '[role="button"],button,a,[role="link"]',
+      });
+      if (continueButton) {
+        break;
+      }
+    }
+
+    if (!continueButton) {
+      throw new AutomationError(`${label}: Human confirmation continue button not found`);
+    }
+
+    console.log(`[${label}] Human confirmation detected, continuing...`);
+    await clickElement(page, continueButton, `${label}: human confirmation continue`);
+    handled = true;
+
+    await waitFor(
+      page,
+      async () => {
+        if (await isHumanConfirmationStep(page)) return false;
+        if (!isTwoFactorUrl(page.url())) return true;
+        return (await findTwoFactorCodeInput(page)) || false;
+      },
+      { timeoutMs: 15000, intervalMs: 250 }
+    ).catch(() => null);
+
+    await sleep(1200);
+  }
+
+  if (handled) {
+    console.log(`[${label}] Human confirmation step handled`);
+  }
+
+  return handled;
+}
+
 async function resolveTwoFactorChallenge(page, { twofaSecret = null, label = 'Automation' } = {}) {
   const challengeDetected = await hasTwoFactorChallenge(page);
   if (!challengeDetected) return false;
 
-  const normalizedSecret = String(twofaSecret || '').trim();
-  if (!normalizedSecret) {
-    throw new AutomationError(`${label}: Two-factor challenge detected but twofaSecret is missing`);
-  }
-
   console.log(`[${label}] Two-factor challenge detected, resolving via TOTP...`);
+
+  await advanceHumanConfirmation(page, label).catch(() => false);
+
+  if (!isTwoFactorUrl(page.url())) {
+    if (!page.url().includes('business.facebook.com') || (!page.url().includes('inbox') && !page.url().includes('messages'))) {
+      await page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
+      await sleep(800);
+    }
+    console.log(`[${label}] ✓ Two-factor challenge resolved`);
+    return true;
+  }
 
   try {
     await clickFirstMatchingText(page, TRY_ANOTHER_WAY_LABELS);
@@ -416,12 +511,45 @@ async function resolveTwoFactorChallenge(page, { twofaSecret = null, label = 'Au
 
   // Some flows open a method-picker modal first: choose Authentication app then Continue.
   await selectAuthenticationAppMethod(page).catch(() => false);
+  await advanceHumanConfirmation(page, label).catch(() => false);
+
+  if (!isTwoFactorUrl(page.url())) {
+    if (!page.url().includes('business.facebook.com') || (!page.url().includes('inbox') && !page.url().includes('messages'))) {
+      await page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
+      await sleep(800);
+    }
+    console.log(`[${label}] ✓ Two-factor challenge resolved`);
+    return true;
+  }
 
   const input = await waitFor(
     page,
-    async () => findTwoFactorCodeInput(page),
+    async () => {
+      const resolvedInput = await findTwoFactorCodeInput(page);
+      if (resolvedInput) return resolvedInput;
+
+      if (await isHumanConfirmationStep(page)) {
+        await advanceHumanConfirmation(page, label).catch(() => false);
+        return (await findTwoFactorCodeInput(page)) || (!isTwoFactorUrl(page.url()) ? 'resolved' : null);
+      }
+
+      if (!isTwoFactorUrl(page.url())) {
+        return 'resolved';
+      }
+
+      return null;
+    },
     { timeoutMs: 25000, intervalMs: 250 }
   ).catch(() => null);
+
+  if (input === 'resolved') {
+    if (!page.url().includes('business.facebook.com') || (!page.url().includes('inbox') && !page.url().includes('messages'))) {
+      await page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
+      await sleep(800);
+    }
+    console.log(`[${label}] ✓ Two-factor challenge resolved`);
+    return true;
+  }
 
   if (!input) {
     const debug = await captureDebugScreenshot(page, 'twofa-input-not-found').catch(() => null);
@@ -440,6 +568,11 @@ async function resolveTwoFactorChallenge(page, { twofaSecret = null, label = 'Au
       })
     );
     throw new AutomationError(`${label}: Two-factor code input not found`);
+  }
+
+  const normalizedSecret = String(twofaSecret || '').trim();
+  if (!normalizedSecret) {
+    throw new AutomationError(`${label}: Two-factor challenge detected but twofaSecret is missing`);
   }
 
   let otp = generateTotpCode(normalizedSecret);
