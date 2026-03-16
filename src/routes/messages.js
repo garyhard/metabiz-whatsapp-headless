@@ -14,6 +14,15 @@ import {
 
 const router = express.Router();
 
+function getAutomationErrorCode(error) {
+  const message = String(error?.message || '').toLowerCase();
+  const type = String(error?.details?.type || '').toLowerCase();
+  if (message.includes('account restricted')) return 'account_restricted';
+  if (type === 'captcha_required' || message.includes('captcha checkpoint')) return 'captcha_required';
+  if (type === 'need_new_cookies' || message.includes('need new cookies')) return 'need_new_cookies';
+  return 'automation_error';
+}
+
 function toBoolean(value) {
   if (value === true) return true;
   const normalized = String(value || '').trim().toLowerCase();
@@ -146,11 +155,10 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
           });
         }
         if (restoreError instanceof AutomationError) {
-          const isRestricted = String(restoreError.message || '').toLowerCase().includes('account restricted');
           return res.status(500).json({
             ok: false,
             error: restoreError.message,
-            errorCode: isRestricted ? 'account_restricted' : 'automation_error',
+            errorCode: getAutomationErrorCode(restoreError),
             details: restoreError.details,
           });
         }
@@ -173,11 +181,10 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
       });
     }
     if (error instanceof AutomationError) {
-      const isRestricted = String(error.message || '').toLowerCase().includes('account restricted');
       return res.status(500).json({
         ok: false,
         error: error.message,
-        errorCode: isRestricted ? 'account_restricted' : 'automation_error',
+        errorCode: getAutomationErrorCode(error),
         details: error.details,
       });
     }
@@ -273,11 +280,10 @@ router.post('/:sessionId/send-message-blast', async (req, res, next) => {
           });
         }
         if (restoreError instanceof AutomationError) {
-          const isRestricted = String(restoreError.message || '').toLowerCase().includes('account restricted');
           return res.status(500).json({
             ok: false,
             error: restoreError.message,
-            errorCode: isRestricted ? 'account_restricted' : 'automation_error',
+            errorCode: getAutomationErrorCode(restoreError),
             details: restoreError.details,
           });
         }
@@ -300,11 +306,10 @@ router.post('/:sessionId/send-message-blast', async (req, res, next) => {
       });
     }
     if (error instanceof AutomationError) {
-      const isRestricted = String(error.message || '').toLowerCase().includes('account restricted');
       return res.status(500).json({
         ok: false,
         error: error.message,
-        errorCode: isRestricted ? 'account_restricted' : 'automation_error',
+        errorCode: getAutomationErrorCode(error),
         details: error.details,
       });
     }

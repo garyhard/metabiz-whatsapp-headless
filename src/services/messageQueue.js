@@ -48,11 +48,22 @@ function buildErrorResult(error, fallbackMessage) {
   const details = (error?.details && typeof error.details === 'object' && !Array.isArray(error.details))
     ? error.details
     : null;
+  const type = String(details?.type || '').toLowerCase();
+  let errorCode = error?.errorCode ? String(error.errorCode) : null;
+  if (!errorCode) {
+    if (type === 'account_restricted' || message.toLowerCase().includes('account restricted')) {
+      errorCode = 'account_restricted';
+    } else if (type === 'captcha_required' || message.toLowerCase().includes('captcha checkpoint')) {
+      errorCode = 'captcha_required';
+    } else if (type === 'need_new_cookies' || message.toLowerCase().includes('need new cookies')) {
+      errorCode = 'need_new_cookies';
+    }
+  }
 
   return {
     ok: false,
     error: message,
-    errorCode: error?.errorCode ? String(error.errorCode) : null,
+    errorCode,
     name: error?.name ? String(error.name) : null,
     details,
   };

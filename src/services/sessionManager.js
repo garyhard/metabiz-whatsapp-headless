@@ -6,7 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { createBrowser } from './browserFactory.js';
 import { normalizeCookiesInput, parseCookieString, toPlaywrightCookies, toPlaywrightCookiesFromJson } from '../utils/cookies.js';
 import { sendMessage, checkSessionFlow, captureDebugScreenshot, resolveTwoFactorIfNeeded } from './automation.js';
-import { SessionNotFoundError, InvalidInputError, BrowserCrashError } from '../errors.js';
+import { SessionNotFoundError, InvalidInputError, BrowserCrashError, AutomationError } from '../errors.js';
 import { config } from '../config.js';
 import { sessionStore } from './sessionStore.js';
 import fs from 'fs/promises';
@@ -284,6 +284,28 @@ function isRecoverableCrash(error) {
   return error instanceof BrowserCrashError || isBrowserClosedError(error);
 }
 
+function isCaptchaRequiredError(error) {
+  return error instanceof AutomationError && String(error?.details?.type || '').toLowerCase() === 'captcha_required';
+}
+
+function getEffectiveSessionStatus(session) {
+  if (!session) return 'suspended';
+  if (session.status) return session.status;
+  return session.page && session.context && session.browser ? 'active' : 'suspended';
+}
+
+function clearSessionTimers(session) {
+  if (!session) return;
+  if (session.activityTimer) {
+    clearInterval(session.activityTimer);
+    session.activityTimer = null;
+  }
+  if (session.idleTimer) {
+    clearTimeout(session.idleTimer);
+    session.idleTimer = null;
+  }
+}
+
 function setIdleTimer(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) return;
@@ -309,21 +331,53 @@ function touchSession(sessionId) {
   if (!session) return;
   session.lastActivity = Date.now();
   setIdleTimer(sessionId);
-  sessionStore.updateStatus(sessionId, session.status || 'active', session.lastActivity);
+  sessionStore.updateStatus(sessionId, getEffectiveSessionStatus(session), session.lastActivity);
+}
+
+function markSessionActive(sessionId) {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+  session.status = 'active';
+  session.suspendedAt = null;
+  session.manualAction = null;
+  session.lastActivity = Date.now();
+  if (session.page && !session.activityTimer) {
+    session.activityTimer = startActivitySimulation(session.page, sessionId);
+  }
+  setIdleTimer(sessionId);
+  sessionStore.updateStatus(sessionId, 'active', session.lastActivity);
+}
+
+function markSessionNeedsManualAction(sessionId, error, flow = 'unknown') {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+  clearSessionTimers(session);
+  session.status = 'needs_manual_action';
+  session.lastActivity = Date.now();
+  session.manualAction = {
+    type: String(error?.details?.type || 'manual_action_required'),
+    flow,
+    detectedAt: new Date().toISOString(),
+    details: {
+      ...(error?.details || {}),
+      flow,
+    },
+    message: error?.message || 'Manual action required',
+  };
+  sessionStore.updateStatus(sessionId, 'needs_manual_action', session.lastActivity);
+  logStep('session:manual_action_required', {
+    sessionId,
+    flow,
+    type: session.manualAction.type,
+    message: session.manualAction.message,
+  });
 }
 
 async function suspendSession(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) return;
 
-  if (session.activityTimer) {
-    clearInterval(session.activityTimer);
-    session.activityTimer = null;
-  }
-  if (session.idleTimer) {
-    clearTimeout(session.idleTimer);
-    session.idleTimer = null;
-  }
+  clearSessionTimers(session);
 
   try {
     if (session.page) {
@@ -385,7 +439,6 @@ async function ensureSessionActive(sessionId) {
     throw new SessionNotFoundError(sessionId);
   }
   if (session.page && session.context && session.browser) {
-    session.status = 'active';
     return session;
   }
 
@@ -744,6 +797,7 @@ export async function createSession(
         proxy: proxyConfig, // Save proxy for recreation
         status: 'active',
         suspendedAt: null,
+        manualAction: null,
         cUser: finalCUser,
         twofaSecret: normalizedTwofaSecret,
       };
@@ -909,6 +963,7 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
         proxy: proxy || null,
         status: 'active',
         suspendedAt: null,
+        manualAction: null,
         cUser,
         twofaSecret: normalizedTwofaSecret,
       };
@@ -1323,8 +1378,13 @@ export async function sendMessageForSession(
           config.flowTimeoutMs,
           'Send flow'
         );
+        markSessionActive(sessionId);
         return { ok: true, ...(result || {}) };
       } catch (error) {
+        if (isCaptchaRequiredError(error)) {
+          markSessionNeedsManualAction(sessionId, error, 'send');
+          throw error;
+        }
         if (isRecoverableCrash(error)) {
           try {
             await recreateSessionFromMemory(sessionId);
@@ -1345,8 +1405,13 @@ export async function sendMessageForSession(
               config.flowTimeoutMs,
               'Send flow (retry)'
             );
+            markSessionActive(sessionId);
             return { ok: true, retried: true, ...(result || {}) };
           } catch (retryError) {
+            if (isCaptchaRequiredError(retryError)) {
+              markSessionNeedsManualAction(sessionId, retryError, 'send_retry');
+              throw retryError;
+            }
             await suspendUnhealthySession(sessionId, 'send_retry_failed');
             throw new BrowserCrashError(`Browser crashed for session ${sessionId}: ${retryError.message}`);
           }
@@ -1373,8 +1438,13 @@ export async function checkSessionForSession(sessionId) {
           config.flowTimeoutMs,
           'Check flow'
         );
+        markSessionActive(sessionId);
         return { ok: true };
       } catch (error) {
+        if (isCaptchaRequiredError(error)) {
+          markSessionNeedsManualAction(sessionId, error, 'check');
+          throw error;
+        }
         if (isRecoverableCrash(error)) {
           try {
             await recreateSessionFromMemory(sessionId);
@@ -1389,8 +1459,13 @@ export async function checkSessionForSession(sessionId) {
               config.flowTimeoutMs,
               'Check flow (retry)'
             );
+            markSessionActive(sessionId);
             return { ok: true, retried: true };
           } catch (retryError) {
+            if (isCaptchaRequiredError(retryError)) {
+              markSessionNeedsManualAction(sessionId, retryError, 'check_retry');
+              throw retryError;
+            }
             await suspendUnhealthySession(sessionId, 'check_retry_failed');
             throw new BrowserCrashError(`Browser crashed for session ${sessionId}: ${retryError.message}`);
           }
@@ -1436,7 +1511,31 @@ export function getSessionInfo(sessionId) {
     sessionId,
     createdAt: session.createdAt,
     lastActivity: session.lastActivity,
-    status: session.page && session.context && session.browser ? 'active' : 'suspended',
+    ipAddress: session.ipAddress || null,
+    cUser: session.cUser || null,
+    status: getEffectiveSessionStatus(session),
+    manualAction: session.manualAction || null,
+  };
+}
+
+export function getSessionCaptchaImageInfo(sessionId) {
+  const session = sessions.get(sessionId);
+  if (!session) {
+    return null;
+  }
+  const manualAction = session.manualAction || null;
+  const details = manualAction?.details || null;
+  const captchaImagePath = details?.captchaImagePath || null;
+  if (!captchaImagePath) {
+    return null;
+  }
+  return {
+    sessionId,
+    status: getEffectiveSessionStatus(session),
+    type: manualAction?.type || null,
+    path: captchaImagePath,
+    filename: details?.captchaImageFilename || path.basename(captchaImagePath),
+    detectedAt: manualAction?.detectedAt || null,
   };
 }
 

@@ -20,6 +20,15 @@ import {
   BrowserCrashError,
 } from './errors.js';
 
+function getAutomationErrorCode(error) {
+  const message = String(error?.message || '').toLowerCase();
+  const type = String(error?.details?.type || '').toLowerCase();
+  if (message.includes('account restricted')) return 'account_restricted';
+  if (type === 'captcha_required' || message.includes('captcha checkpoint')) return 'captcha_required';
+  if (type === 'need_new_cookies' || message.includes('need new cookies')) return 'need_new_cookies';
+  return 'automation_error';
+}
+
 const app = express();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -88,11 +97,10 @@ app.use((err, req, res, next) => {
   }
 
   if (err instanceof AutomationError) {
-    const isRestricted = String(err.message || '').toLowerCase().includes('account restricted');
     return res.status(500).json({
       ok: false,
       error: err.message,
-      errorCode: isRestricted ? 'account_restricted' : 'automation_error',
+      errorCode: getAutomationErrorCode(err),
       details: err.details,
     });
   }

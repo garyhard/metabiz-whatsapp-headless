@@ -4,6 +4,7 @@
 
 import { AutomationError } from '../errors.js';
 import { generateTotpCode } from '../utils/totp.js';
+import { easyOCR, isOcrConfigured } from '../utils/ocr.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
@@ -13,6 +14,7 @@ const __dirname = path.dirname(__filename);
 const INBOX_URL = 'https://business.facebook.com/latest/inbox';
 const DEBUG_DIR = path.join(__dirname, '../../profiles/debug');
 const REQUEST_LOG_DIR = path.join(DEBUG_DIR, 'requests');
+const CAPTCHA_DIR = path.join(DEBUG_DIR, 'captcha');
 const RELOAD_TIMEOUT_MS = 60000;
 const SPINNER_TIMEOUT_MS = 15000;
 const SAVE_LOGIN_INFO_HINTS = normalizeList([
@@ -91,6 +93,30 @@ const HUMAN_CONFIRM_HINTS = normalizeList([
   'confirm you are human',
   'human to use your account',
   'human to use this account',
+]);
+const CAPTCHA_TEXT_HINTS = normalizeList([
+  'enter the text from the image',
+  "can't read this text?",
+  'hear this code',
+  'confirm you\'re human',
+  'confirm you’re human',
+  'security check',
+  'captcha',
+]);
+const CAPTCHA_MISMATCH_TEXT_HINTS = normalizeList([
+  "the text you entered didn't match the security check. please try again.",
+  'the text you entered didn’t match the security check. please try again.',
+  "didn't match the security check",
+  'didn’t match the security check',
+]);
+const CAPTCHA_AUTO_SUBMIT_MAX_ATTEMPTS = 3;
+const NEED_NEW_COOKIES_TEXT_HINTS = normalizeList([
+  'confirm your identity',
+  "confirm you're a real person with a video selfie",
+  'confirm you’re a real person with a video selfie',
+  "we need more info to make sure you're human",
+  'we need more info to make sure you’re human',
+  'start video selfie',
 ]);
 
 async function dismissSaveLoginInfo(page, label = 'Automation') {
@@ -175,39 +201,183 @@ async function dismissInboxBlockingPrompts(page, label = 'Automation') {
   return dismissed;
 }
 
+async function prepareDebugCapture(page, { hideRails = true } = {}) {
+  await fs.mkdir(DEBUG_DIR, { recursive: true });
+  try {
+    const viewport = page.viewportSize();
+    if (!viewport || viewport.width < 1600) {
+      await page.setViewportSize({ width: 1600, height: viewport?.height || 900 });
+    }
+  } catch {
+    // Ignore viewport resize errors for debug captures
+  }
+  if (!hideRails) {
+    return;
+  }
+  try {
+    await page.addStyleTag({
+      content: `
+        [role="navigation"],
+        [data-pagelet*="LeftRail"],
+        [aria-label*="Navigation"],
+        [aria-label*="Meta Business Suite"],
+        [role="complementary"],
+        [data-testid*="right_rail"],
+        [data-pagelet*="RightRail"] {
+          display: none !important;
+        }
+        body { overflow: hidden !important; }
+      `,
+    });
+  } catch {
+    // Ignore style injection errors for debug captures
+  }
+}
+
+function buildDebugImagePath(dirPath, label, cUser = 'unknown') {
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const safeLabel = String(label || 'error').replace(/[^a-zA-Z0-9_-]/g, '_');
+  const filename = `cuser-${cUser}-${safeLabel}-${ts}.png`;
+  return {
+    filename,
+    filePath: path.join(dirPath, filename),
+  };
+}
+
+async function getCaptchaClip(page) {
+  try {
+    return await page.evaluate((captchaHints, continueLabels) => {
+      const isVisible = (el) => {
+        if (!el) return false;
+        const rect = el.getBoundingClientRect();
+        if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+        const style = window.getComputedStyle(el);
+        if (!style) return false;
+        return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+      };
+
+      const rectOf = (el) => {
+        if (!isVisible(el)) return null;
+        const rect = el.getBoundingClientRect();
+        return {
+          x: rect.left + window.scrollX,
+          y: rect.top + window.scrollY,
+          width: rect.width,
+          height: rect.height,
+        };
+      };
+
+      const mergeRects = (rects) => {
+        const valid = rects.filter(Boolean);
+        if (valid.length === 0) return null;
+        const left = Math.min(...valid.map((rect) => rect.x));
+        const top = Math.min(...valid.map((rect) => rect.y));
+        const right = Math.max(...valid.map((rect) => rect.x + rect.width));
+        const bottom = Math.max(...valid.map((rect) => rect.y + rect.height));
+        return {
+          x: left,
+          y: top,
+          width: right - left,
+          height: bottom - top,
+        };
+      };
+
+      const bodyText = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const hasCaptchaHint = captchaHints.some((hint) => bodyText.includes(hint));
+      if (!hasCaptchaHint) return null;
+
+      const input = Array.from(document.querySelectorAll('input')).find((el) => {
+        const type = String(el.getAttribute('type') || 'text').toLowerCase();
+        return ['text', 'search', 'tel', ''].includes(type) && isVisible(el);
+      }) || null;
+
+      const findNearestVisibleImage = () => {
+        let current = input?.parentElement || null;
+        while (current) {
+          const nestedImage = Array.from(current.querySelectorAll('img')).find((el) => isVisible(el));
+          if (nestedImage) {
+            return nestedImage;
+          }
+          current = current.parentElement;
+        }
+        return Array.from(document.querySelectorAll('img')).find((el) => isVisible(el)) || null;
+      };
+
+      const challengeImage = findNearestVisibleImage();
+
+      const continueButton = Array.from(document.querySelectorAll('[role="button"],button,a,[role="link"]')).find((el) => {
+        if (!isVisible(el)) return false;
+        const label = `${el.textContent || ''} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''}`
+          .replace(/\s+/g, ' ')
+          .trim()
+          .toLowerCase();
+        return continueLabels.some((continueLabel) => label === continueLabel || label.includes(continueLabel));
+      }) || null;
+
+      let container = null;
+      let node = input?.parentElement || challengeImage?.parentElement || null;
+      while (node) {
+        const rect = rectOf(node);
+        if (rect && rect.width >= 220 && rect.height >= 120 && rect.width <= window.innerWidth * 0.95) {
+          const containsInput = !input || node.contains(input);
+          const containsImage = !challengeImage || node.contains(challengeImage);
+          if (containsInput && containsImage) {
+            container = node;
+            if (!continueButton || node.contains(continueButton)) {
+              break;
+            }
+          }
+        }
+        node = node.parentElement;
+      }
+
+      let clip = rectOf(container);
+      if (!clip) {
+        clip = mergeRects([rectOf(challengeImage), rectOf(input), rectOf(continueButton)]);
+      }
+      if (!clip) {
+        return null;
+      }
+
+      const padding = 16;
+      return {
+        x: Math.max(0, clip.x - padding),
+        y: Math.max(0, clip.y - padding),
+        width: Math.max(1, clip.width + padding * 2),
+        height: Math.max(1, clip.height + padding * 2),
+      };
+    }, CAPTCHA_TEXT_HINTS, CONTINUE_LABELS);
+  } catch {
+    return null;
+  }
+}
+
+async function captureCaptchaImage(page, cUser = 'unknown') {
+  try {
+    await prepareDebugCapture(page, { hideRails: false });
+    await fs.mkdir(CAPTCHA_DIR, { recursive: true });
+    const clip = await getCaptchaClip(page);
+    if (!clip) {
+      return { path: null, url: page.url(), clip: null };
+    }
+    const { filename, filePath } = buildDebugImagePath(CAPTCHA_DIR, 'captcha', cUser);
+    await page.screenshot({ path: filePath, clip });
+    console.log('[Automation] Captcha crop saved:', JSON.stringify({
+      path: filePath,
+      filename,
+      clip,
+      url: page.url(),
+    }));
+    return { path: filePath, filename, url: page.url(), clip };
+  } catch (error) {
+    return { path: null, url: page?.url?.() || null, error: error?.message || String(error), clip: null };
+  }
+}
+
 export async function captureDebugScreenshot(page, label, cUser = 'unknown') {
   try {
-    await fs.mkdir(DEBUG_DIR, { recursive: true });
-    try {
-      const viewport = page.viewportSize();
-      if (!viewport || viewport.width < 1600) {
-        await page.setViewportSize({ width: 1600, height: viewport?.height || 900 });
-      }
-    } catch {
-      // Ignore viewport resize errors for debug screenshots
-    }
-    try {
-      await page.addStyleTag({
-        content: `
-          [role="navigation"],
-          [data-pagelet*="LeftRail"],
-          [aria-label*="Navigation"],
-          [aria-label*="Meta Business Suite"],
-          [role="complementary"],
-          [data-testid*="right_rail"],
-          [data-pagelet*="RightRail"] {
-            display: none !important;
-          }
-          body { overflow: hidden !important; }
-        `,
-      });
-    } catch {
-      // Ignore style injection errors for debug screenshots
-    }
-    const ts = new Date().toISOString().replace(/[:.]/g, '-');
-    const safeLabel = String(label || 'error').replace(/[^a-zA-Z0-9_-]/g, '_');
-    const filename = `cuser-${cUser}-${safeLabel}-${ts}.png`;
-    const filePath = path.join(DEBUG_DIR, filename);
+    await prepareDebugCapture(page, { hideRails: true });
+    const { filePath } = buildDebugImagePath(DEBUG_DIR, label, cUser);
     await page.screenshot({ path: filePath, fullPage: true });
     return { path: filePath, url: page.url() };
   } catch (error) {
@@ -223,6 +393,31 @@ async function writeRequestLog(requestId, payload) {
   } catch (error) {
     console.warn(`[Automation] Failed to write request log: ${error?.message || String(error)}`);
   }
+}
+
+function getCaptchaLogDetails(details) {
+  if (String(details?.type || '').toLowerCase() !== 'captcha_required') {
+    return null;
+  }
+  return {
+    captcha: {
+      imagePath: details?.captchaImagePath || null,
+      imageFilename: details?.captchaImageFilename || null,
+      imageClip: details?.captchaImageClip || null,
+      ocrText: details?.captchaOcrText || null,
+      ocrProvider: details?.captchaOcrProvider || null,
+      ocrError: details?.captchaOcrError || null,
+      autoSubmitAttempted: details?.captchaAutoSubmitAttempted === true,
+      autoSubmitSucceeded: details?.captchaAutoSubmitSucceeded === true,
+      submittedText: details?.captchaSubmittedText || null,
+      continueClicked: details?.captchaContinueClicked === true,
+      autoResolveError: details?.captchaAutoResolveError || null,
+      attemptCount: details?.captchaAttemptCount || 0,
+      retryTriggered: details?.captchaRetryTriggered === true,
+      mismatchMessageDetected: details?.captchaMismatchMessageDetected === true,
+      pageDidNotMove: details?.captchaPageDidNotMove === true,
+    },
+  };
 }
 
 /**
@@ -267,7 +462,9 @@ function isTwoFactorUrl(url) {
 
 function isAuthRelatedError(error) {
   const message = String(error?.message || '').toLowerCase();
+  const type = String(error?.details?.type || '').toLowerCase();
   return (
+    type === 'account_restricted' ||
     message.includes('redirected to auth') ||
     message.includes('checkpoint') ||
     message.includes('login') ||
@@ -485,6 +682,316 @@ async function advanceHumanConfirmation(page, label = 'Automation') {
   return handled;
 }
 
+async function getAuthPageDiagnostics(page) {
+  try {
+    return await page.evaluate(() => {
+      const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+      const title = document.title || '';
+      return {
+        title,
+        text: text.slice(0, 400),
+        url: window.location.href,
+      };
+    });
+  } catch {
+    return {
+      title: '',
+      text: '',
+      url: page.url(),
+    };
+  }
+}
+
+async function detectCaptchaCheckpoint(page) {
+  try {
+    return await page.evaluate((hints) => {
+      const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const hasHint = hints.some((hint) => text.includes(hint));
+      if (!hasHint) return false;
+
+      const hasImage = !!document.querySelector('img');
+      const hasTextInput = !!Array.from(document.querySelectorAll('input')).find((el) => {
+        const type = String(el.getAttribute('type') || 'text').toLowerCase();
+        return ['text', 'search', 'tel', ''].includes(type);
+      });
+
+      return hasTextInput || hasImage;
+    }, CAPTCHA_TEXT_HINTS);
+  } catch {
+    return false;
+  }
+}
+
+async function hasCaptchaMismatchMessage(page) {
+  try {
+    return await page.evaluate((hints) => {
+      const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      return hints.some((hint) => text.includes(hint));
+    }, CAPTCHA_MISMATCH_TEXT_HINTS);
+  } catch {
+    return false;
+  }
+}
+
+async function detectNeedNewCookiesPage(page) {
+  try {
+    return await page.evaluate((hints) => {
+      const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const matchedHints = hints.filter((hint) => text.includes(hint));
+      const hasStrongVideoHint =
+        text.includes("confirm you're a real person with a video selfie") ||
+        text.includes('confirm you’re a real person with a video selfie') ||
+        text.includes('start video selfie');
+      const hasIdentityHint =
+        text.includes('confirm your identity') ||
+        text.includes("we need more info to make sure you're human") ||
+        text.includes('we need more info to make sure you’re human');
+      return {
+        detected: hasStrongVideoHint && hasIdentityHint,
+        matchedHints,
+      };
+    }, NEED_NEW_COOKIES_TEXT_HINTS);
+  } catch {
+    return { detected: false, matchedHints: [] };
+  }
+}
+
+async function collectCaptchaCheckpointDetails(page, label = 'Automation') {
+  const debug = await captureDebugScreenshot(page, 'captcha-checkpoint').catch(() => null);
+  const captchaImage = await captureCaptchaImage(page).catch(() => null);
+  const diag = await getAuthPageDiagnostics(page);
+  const ocrConfigured = isOcrConfigured();
+  let captchaOcrText = null;
+  let captchaOcrError = null;
+
+  if (captchaImage?.path && ocrConfigured) {
+    try {
+      captchaOcrText = await easyOCR(captchaImage.path);
+    } catch (error) {
+      captchaOcrError = error?.message || String(error);
+      console.warn(`[${label}] OCR failed: ${captchaOcrError}`);
+    }
+  }
+
+  return {
+    type: 'captcha_required',
+    url: diag.url || page.url(),
+    title: diag.title,
+    text: diag.text,
+    screenshotPath: debug?.path || null,
+    captchaImagePath: captchaImage?.path || null,
+    captchaImageFilename: captchaImage?.filename || null,
+    captchaImageClip: captchaImage?.clip || null,
+    captchaOcrText: captchaOcrText || null,
+    captchaOcrProvider: ocrConfigured ? 'easyOCR' : null,
+    captchaOcrError,
+  };
+}
+
+async function collectRestrictedIdentityDetails(page, label = 'Automation', extraDetails = {}) {
+  const debug = await captureDebugScreenshot(page, 'account-restricted-identity').catch(() => null);
+  const diag = await getAuthPageDiagnostics(page);
+  const detected = await detectNeedNewCookiesPage(page);
+  console.warn(
+    `[${label}] Account restricted identity verification detected`,
+    JSON.stringify({
+      url: diag.url || page.url(),
+      title: diag.title,
+      matchedHints: detected?.matchedHints || [],
+      debugPath: debug?.path || null,
+    })
+  );
+  return {
+    type: 'account_restricted',
+    indicator: 'identity_verification_video_selfie',
+    url: diag.url || page.url(),
+    title: diag.title,
+    text: diag.text,
+    screenshotPath: debug?.path || null,
+    matchedHints: detected?.matchedHints || [],
+    ...extraDetails,
+  };
+}
+
+async function findCaptchaInput(page) {
+  const candidates = await page.$$('input, textarea');
+  for (const candidate of candidates) {
+    const visible = await isVisible(page, candidate);
+    if (!visible) continue;
+    const accepted = await candidate.evaluate((el) => {
+      const tag = String(el.tagName || '').toLowerCase();
+      if (tag === 'textarea') return true;
+      const type = String(el.getAttribute('type') || 'text').toLowerCase();
+      return ['text', 'search', 'tel', ''].includes(type);
+    }).catch(() => false);
+    if (accepted) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+async function tryResolveCaptchaCheckpoint(page, label = 'Automation') {
+  let lastFailure = null;
+
+  for (let attempt = 1; attempt <= CAPTCHA_AUTO_SUBMIT_MAX_ATTEMPTS; attempt += 1) {
+    const details = await collectCaptchaCheckpointDetails(page, label);
+    const captchaText = String(details?.captchaOcrText || '').trim();
+
+    if (!captchaText) {
+      return {
+        resolved: false,
+        details: {
+          ...details,
+          captchaAutoSubmitAttempted: false,
+          captchaAutoSubmitSucceeded: false,
+          captchaAttemptCount: attempt,
+          captchaAutoResolveError: 'OCR returned empty result',
+        },
+      };
+    }
+
+    const input = await findCaptchaInput(page);
+    if (!input) {
+      return {
+        resolved: false,
+        details: {
+          ...details,
+          captchaAutoSubmitAttempted: false,
+          captchaAutoSubmitSucceeded: false,
+          captchaSubmittedText: captchaText,
+          captchaAttemptCount: attempt,
+          captchaAutoResolveError: 'Captcha input not found',
+        },
+      };
+    }
+
+    const urlBeforeSubmit = page.url();
+
+    await input.focus().catch(() => {});
+    await sleep(100);
+    await setNativeValue(page, input, '');
+    await sleep(100);
+    await setNativeValue(page, input, captchaText);
+    await sleep(250);
+
+    const clickedContinue = await clickFirstMatchingText(page, CONTINUE_LABELS).catch(() => false);
+    if (!clickedContinue) {
+      await page.keyboard.press('Enter').catch(() => {});
+    }
+
+    console.log(`[${label}] Captcha OCR text submitted (attempt ${attempt}): ${captchaText}`);
+
+    const cleared = await waitFor(
+      page,
+      async () => {
+        const stillCaptcha = await detectCaptchaCheckpoint(page);
+        return stillCaptcha ? null : true;
+      },
+      { timeoutMs: 10000, intervalMs: 400 }
+    ).catch(() => null);
+
+    if (cleared) {
+      const needNewCookies = await detectNeedNewCookiesPage(page);
+      if (needNewCookies?.detected) {
+        return {
+          resolved: false,
+          details: await collectRestrictedIdentityDetails(page, label, {
+            captchaAutoSubmitAttempted: true,
+            captchaAutoSubmitSucceeded: true,
+            captchaSubmittedText: captchaText,
+            captchaContinueClicked: clickedContinue === true,
+            captchaAttemptCount: attempt,
+            captchaRetryTriggered: attempt > 1,
+            captchaMismatchMessageDetected: false,
+            captchaPageDidNotMove: false,
+          }),
+        };
+      }
+
+      return {
+        resolved: true,
+        details: {
+          ...details,
+          captchaAutoSubmitAttempted: true,
+          captchaAutoSubmitSucceeded: true,
+          captchaSubmittedText: captchaText,
+          captchaContinueClicked: clickedContinue === true,
+          captchaAttemptCount: attempt,
+          captchaRetryTriggered: attempt > 1,
+          captchaAutoResolveError: null,
+        },
+      };
+    }
+
+    const urlAfterSubmit = page.url();
+    const pageDidNotMove = urlAfterSubmit === urlBeforeSubmit;
+    const mismatchDetected = await hasCaptchaMismatchMessage(page);
+    const shouldRetry =
+      attempt < CAPTCHA_AUTO_SUBMIT_MAX_ATTEMPTS &&
+      pageDidNotMove &&
+      mismatchDetected;
+
+    const latestDetails = await collectCaptchaCheckpointDetails(page, label);
+    lastFailure = {
+      resolved: false,
+      details: {
+        ...latestDetails,
+        captchaAutoSubmitAttempted: true,
+        captchaAutoSubmitSucceeded: false,
+        captchaSubmittedText: captchaText,
+        captchaContinueClicked: clickedContinue === true,
+        captchaAttemptCount: attempt,
+        captchaRetryTriggered: shouldRetry,
+        captchaMismatchMessageDetected: mismatchDetected,
+        captchaPageDidNotMove: pageDidNotMove,
+        captchaAutoResolveError: shouldRetry
+          ? 'Captcha mismatch detected, retrying OCR submit'
+          : 'Captcha still present after OCR submit',
+      },
+    };
+
+    if (shouldRetry) {
+      console.warn(
+        `[${label}] Captcha mismatch detected and page did not move, retrying OCR submit (${attempt + 1}/${CAPTCHA_AUTO_SUBMIT_MAX_ATTEMPTS})`
+      );
+      await sleep(500);
+      continue;
+    }
+
+    return lastFailure;
+  }
+
+  return lastFailure || {
+    resolved: false,
+    details: {
+      type: 'captcha_required',
+      captchaAutoSubmitAttempted: true,
+      captchaAutoSubmitSucceeded: false,
+      captchaAutoResolveError: 'Captcha retry exhausted',
+    },
+  };
+}
+
+async function resolveCaptchaCheckpointIfPresent(page, label = 'Automation') {
+  if (!(await detectCaptchaCheckpoint(page))) {
+    return false;
+  }
+
+  const result = await tryResolveCaptchaCheckpoint(page, label);
+  if (result?.resolved) {
+    console.log(`[${label}] Captcha checkpoint resolved via OCR`);
+    return true;
+  }
+
+  const errorType = String(result?.details?.type || '').toLowerCase();
+  if (errorType === 'account_restricted') {
+    throw new AutomationError(`${label}: Account restricted detected`, result?.details || null);
+  }
+
+  throw new AutomationError(`${label}: Captcha checkpoint detected`, result?.details || null);
+}
+
 async function resolveTwoFactorChallenge(page, { twofaSecret = null, label = 'Automation' } = {}) {
   const challengeDetected = await hasTwoFactorChallenge(page);
   if (!challengeDetected) return false;
@@ -492,6 +999,8 @@ async function resolveTwoFactorChallenge(page, { twofaSecret = null, label = 'Au
   console.log(`[${label}] Two-factor challenge detected, resolving via TOTP...`);
 
   await advanceHumanConfirmation(page, label).catch(() => false);
+
+  await resolveCaptchaCheckpointIfPresent(page, label);
 
   if (!isTwoFactorUrl(page.url())) {
     if (!page.url().includes('business.facebook.com') || (!page.url().includes('inbox') && !page.url().includes('messages'))) {
@@ -513,6 +1022,8 @@ async function resolveTwoFactorChallenge(page, { twofaSecret = null, label = 'Au
   await selectAuthenticationAppMethod(page).catch(() => false);
   await advanceHumanConfirmation(page, label).catch(() => false);
 
+  await resolveCaptchaCheckpointIfPresent(page, label);
+
   if (!isTwoFactorUrl(page.url())) {
     if (!page.url().includes('business.facebook.com') || (!page.url().includes('inbox') && !page.url().includes('messages'))) {
       await page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
@@ -533,6 +1044,10 @@ async function resolveTwoFactorChallenge(page, { twofaSecret = null, label = 'Au
         return (await findTwoFactorCodeInput(page)) || (!isTwoFactorUrl(page.url()) ? 'resolved' : null);
       }
 
+      if (await detectCaptchaCheckpoint(page)) {
+        return 'captcha';
+      }
+
       if (!isTwoFactorUrl(page.url())) {
         return 'resolved';
       }
@@ -551,17 +1066,18 @@ async function resolveTwoFactorChallenge(page, { twofaSecret = null, label = 'Au
     return true;
   }
 
+  if (input === 'captcha') {
+    await resolveCaptchaCheckpointIfPresent(page, label);
+    return resolveTwoFactorChallenge(page, { twofaSecret, label });
+  }
+
   if (!input) {
     const debug = await captureDebugScreenshot(page, 'twofa-input-not-found').catch(() => null);
-    const diag = await page.evaluate(() => {
-      const title = document.title || '';
-      const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 250);
-      return { title, text };
-    }).catch(() => ({ title: '', text: '' }));
+    const diag = await getAuthPageDiagnostics(page);
     console.warn(
       `[${label}] Two-factor code input not found`,
       JSON.stringify({
-        url: page.url(),
+        url: diag.url || page.url(),
         title: diag.title,
         text: diag.text,
         debugPath: debug?.path || null,
@@ -1773,6 +2289,7 @@ export async function sendMessage(
     
     console.error('[Automation] ========================================');
   const debug = await captureDebugScreenshot(page, 'send', cUser || 'unknown');
+    const captchaLog = getCaptchaLogDetails(lastError?.details || null);
     await writeRequestLog(requestId, {
       requestId,
       type: 'send',
@@ -1780,6 +2297,7 @@ export async function sendMessage(
       error: lastError.message,
       screenshotPath: debug.path,
       url: debug.url,
+      ...(captchaLog || {}),
     });
     if (lastError instanceof AutomationError) {
       if (!lastError.details) {
@@ -1920,6 +2438,7 @@ export async function checkSessionFlow(page, { sessionId = null, cUser = null, t
   console.error(`[Automation] Error: ${lastError?.message || 'unknown error'}`);
   console.error('[Automation] ========================================');
   const debug = await captureDebugScreenshot(page, 'check', cUser || 'unknown');
+  const captchaLog = getCaptchaLogDetails(lastError?.details || null);
   await writeRequestLog(requestId, {
     requestId,
     type: 'check',
@@ -1927,6 +2446,7 @@ export async function checkSessionFlow(page, { sessionId = null, cUser = null, t
     error: lastError?.message || 'unknown error',
     screenshotPath: debug.path,
     url: debug.url,
+    ...(captchaLog || {}),
   });
   if (lastError instanceof AutomationError) {
     if (!lastError.details) {

@@ -88,6 +88,8 @@ export const config = {
       ['Send Message', 'Send message']
     ),
   },
+  ocrUrl: String(process.env.OCR_URL || '').trim(),
+  ocrApikey: String(process.env.OCR_API_KEY || '').trim(),
   browser: {
     // Allow non-headless mode for debugging (set HEADLESS=false in .env)
     headless: process.env.HEADLESS !== 'false',

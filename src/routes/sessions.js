@@ -3,18 +3,29 @@
  */
 
 import express from 'express';
+import fs from 'fs/promises';
 import {
   createSession,
   destroySession,
   getAllSessionIds,
-  getSession,
+  getSessionInfo,
   checkSessionForSession,
   updateSessionCookies,
   updateSessionProxy,
   cleanupSessions,
   clearAllSessions,
+  getSessionCaptchaImageInfo,
 } from '../services/sessionManager.js';
 import { InvalidInputError, SessionNotFoundError, AutomationError } from '../errors.js';
+
+function getAutomationErrorCode(error) {
+  const message = String(error?.message || '').toLowerCase();
+  const type = String(error?.details?.type || '').toLowerCase();
+  if (message.includes('account restricted')) return 'account_restricted';
+  if (type === 'captcha_required' || message.includes('captcha checkpoint')) return 'captcha_required';
+  if (type === 'need_new_cookies' || message.includes('need new cookies')) return 'need_new_cookies';
+  return 'automation_error';
+}
 
 const router = express.Router();
 
@@ -25,33 +36,7 @@ const router = express.Router();
 router.get('/', async (req, res, next) => {
   try {
     const sessionIds = getAllSessionIds();
-    const sessions = sessionIds.map(id => {
-      try {
-        const session = getSession(id);
-        let cUser = null;
-        if (session.cookieFormat === 'json' && Array.isArray(session.cookieJson)) {
-          const cUserCookie = session.cookieJson.find(c => c && c.name === 'c_user');
-          if (cUserCookie && cUserCookie.value) {
-            cUser = String(cUserCookie.value);
-          }
-        } else if (session.cookieString) {
-          const match = session.cookieString.match(/(?:^|;)\s*c_user=([^;]+)/);
-          if (match && match[1]) {
-            cUser = match[1].trim();
-          }
-        }
-        return {
-          sessionId: id,
-          createdAt: session.createdAt,
-          lastActivity: session.lastActivity,
-          ipAddress: session.ipAddress || null,
-          cUser,
-          status: session.page && session.context && session.browser ? 'active' : 'suspended',
-        };
-      } catch {
-        return null;
-      }
-    }).filter(Boolean);
+    const sessions = sessionIds.map((id) => getSessionInfo(id)).filter(Boolean);
 
     res.json({
       ok: true,
@@ -70,21 +55,66 @@ router.get('/', async (req, res, next) => {
 router.get('/:sessionId', async (req, res, next) => {
   try {
     const { sessionId } = req.params;
-    const session = getSession(sessionId);
+    const session = getSessionInfo(sessionId);
+    if (!session) {
+      throw new SessionNotFoundError(sessionId);
+    }
 
     res.json({
       ok: true,
-      sessionId,
-      createdAt: session.createdAt,
-      lastActivity: session.lastActivity,
-      ipAddress: session.ipAddress || null,
-      status: 'active',
+      ...session,
     });
   } catch (error) {
     if (error instanceof SessionNotFoundError) {
       return res.status(404).json({
         ok: false,
         error: error.message,
+      });
+    }
+    next(error);
+  }
+});
+
+/**
+ * GET /api/sessions/:sessionId/captcha-image
+ * Return latest captcha crop image for the session
+ */
+router.get('/:sessionId/captcha-image', async (req, res, next) => {
+  const { sessionId } = req.params;
+  try {
+    const session = getSessionInfo(sessionId);
+    if (!session) {
+      throw new SessionNotFoundError(sessionId);
+    }
+    const image = getSessionCaptchaImageInfo(sessionId);
+    if (!image?.path) {
+      return res.status(404).json({
+        ok: false,
+        error: 'Captcha image not found',
+        errorCode: 'captcha_image_not_found',
+        sessionId,
+      });
+    }
+
+    await fs.access(image.path);
+    res.setHeader('x-session-id', sessionId);
+    res.setHeader('x-session-status', image.status || session.status || 'needs_manual_action');
+    return res.sendFile(image.path);
+  } catch (error) {
+    if (error instanceof SessionNotFoundError) {
+      return res.status(404).json({
+        ok: false,
+        error: error.message,
+        errorCode: 'session_not_found',
+        sessionId,
+      });
+    }
+    if (String(error?.code || '') === 'ENOENT') {
+      return res.status(404).json({
+        ok: false,
+        error: 'Captcha image file not found',
+        errorCode: 'captcha_image_not_found',
+        sessionId,
       });
     }
     next(error);
@@ -203,11 +233,53 @@ router.post('/:sessionId/check', async (req, res, next) => {
       });
     }
     if (error instanceof AutomationError) {
-      const isRestricted = String(error.message || '').toLowerCase().includes('account restricted');
       return res.status(500).json({
         ok: false,
         error: error.message,
-        errorCode: isRestricted ? 'account_restricted' : 'automation_error',
+        errorCode: getAutomationErrorCode(error),
+        details: error.details,
+      });
+    }
+    next(error);
+  }
+});
+
+/**
+ * POST /api/sessions/:sessionId/resume-check
+ * Re-run check flow after manual action on an existing browser session
+ */
+router.post('/:sessionId/resume-check', async (req, res, next) => {
+  const { sessionId } = req.params;
+  try {
+    const result = await checkSessionForSession(sessionId);
+    const session = getSessionInfo(sessionId);
+    res.json({
+      ok: true,
+      message: 'Session resumed and check ok',
+      retried: result?.retried === true,
+      session,
+    });
+  } catch (error) {
+    if (error instanceof SessionNotFoundError) {
+      return res.status(404).json({
+        ok: false,
+        error: error.message,
+        errorCode: 'session_not_found',
+        sessionId,
+      });
+    }
+    if (error instanceof InvalidInputError) {
+      return res.status(400).json({
+        ok: false,
+        error: error.message,
+        errorCode: 'invalid_input',
+      });
+    }
+    if (error instanceof AutomationError) {
+      return res.status(500).json({
+        ok: false,
+        error: error.message,
+        errorCode: getAutomationErrorCode(error),
         details: error.details,
       });
     }
