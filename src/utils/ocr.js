@@ -72,6 +72,7 @@ export async function easyOCR(imageCropPath) {
   const apiKey = config.ocrApikey;
 
   if (!apiUrl || !apiKey) {
+    console.warn('[OCR] easyOCR skipped: OCR_URL or OCR_API_KEY missing');
     return null;
   }
 
@@ -92,7 +93,7 @@ export async function easyOCR(imageCropPath) {
   }
 
   const payload = JSON.stringify({
-    base64: `data:image/png;base64,${base64Image}`,
+    base64: base64Image,
   });
 
   let attempt = 1;
@@ -115,6 +116,9 @@ export async function easyOCR(imageCropPath) {
       const data = await response.json();
       const responseCaptcha = String(data?.result || '').trim();
       console.log('[OCR] Captcha result:', responseCaptcha);
+      if (!responseCaptcha) {
+        console.warn('[OCR] easyOCR returned empty result');
+      }
       return responseCaptcha;
     } catch (err) {
       const errorCode = getErrorCode(err);

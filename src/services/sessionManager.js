@@ -1346,7 +1346,7 @@ export async function destroySession(sessionId, options = {}) {
  */
 export async function sendMessageForSession(
   sessionId,
-  { extension, phoneNumber, message, useReplyFlow = true, includeSuccessScreenshot = false }
+  { extension, phoneNumber, message, useReplyFlow = true, includeSuccessScreenshot = false, requestId = null }
 ) {
   return withGlobalSendLock(() =>
     withSessionLock(sessionId, async () => {
@@ -1374,6 +1374,7 @@ export async function sendMessageForSession(
             forceInitialRefresh,
             useReplyFlow,
             includeSuccessScreenshot,
+            requestId,
           }),
           config.flowTimeoutMs,
           'Send flow'
@@ -1401,6 +1402,7 @@ export async function sendMessageForSession(
                 forceInitialRefresh: true,
                 useReplyFlow,
                 includeSuccessScreenshot,
+                requestId,
               }),
               config.flowTimeoutMs,
               'Send flow (retry)'
@@ -1423,23 +1425,24 @@ export async function sendMessageForSession(
   );
 }
 
-export async function checkSessionForSession(sessionId) {
+export async function checkSessionForSession(sessionId, { requestId = null } = {}) {
   return withGlobalSendLock(() =>
     withSessionLock(sessionId, async () => {
       const session = await ensureSessionActive(sessionId);
       try {
         touchSession(sessionId);
-        await withTimeout(
+        const result = await withTimeout(
           checkSessionFlow(session.page, {
             sessionId,
             cUser: session.cUser || null,
             twofaSecret: session.twofaSecret || null,
+            requestId,
           }),
           config.flowTimeoutMs,
           'Check flow'
         );
         markSessionActive(sessionId);
-        return { ok: true };
+        return { ok: true, ...(result || {}) };
       } catch (error) {
         if (isCaptchaRequiredError(error)) {
           markSessionNeedsManualAction(sessionId, error, 'check');
@@ -1450,17 +1453,18 @@ export async function checkSessionForSession(sessionId) {
             await recreateSessionFromMemory(sessionId);
             const recreated = getSession(sessionId);
             recreated.lastActivity = Date.now();
-            await withTimeout(
+            const result = await withTimeout(
               checkSessionFlow(recreated.page, {
                 sessionId,
                 cUser: recreated.cUser || null,
                 twofaSecret: recreated.twofaSecret || null,
+                requestId,
               }),
               config.flowTimeoutMs,
               'Check flow (retry)'
             );
             markSessionActive(sessionId);
-            return { ok: true, retried: true };
+            return { ok: true, retried: true, ...(result || {}) };
           } catch (retryError) {
             if (isCaptchaRequiredError(retryError)) {
               markSessionNeedsManualAction(sessionId, retryError, 'check_retry');

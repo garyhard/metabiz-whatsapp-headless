@@ -16,6 +16,8 @@ import {
   clearAllSessions,
   getSessionCaptchaImageInfo,
 } from '../services/sessionManager.js';
+import { buildAutomationErrorBody } from '../services/debugArtifacts.js';
+import { normalizeRequestId } from '../services/automation.js';
 import { InvalidInputError, SessionNotFoundError, AutomationError } from '../errors.js';
 
 function getAutomationErrorCode(error) {
@@ -210,11 +212,13 @@ router.delete('/:sessionId', async (req, res, next) => {
  */
 router.post('/:sessionId/check', async (req, res, next) => {
   const { sessionId } = req.params;
+  const requestId = normalizeRequestId(sessionId, req.body?.requestId);
   try {
-    await checkSessionForSession(sessionId);
+    const result = await checkSessionForSession(sessionId, { requestId });
     res.json({
       ok: true,
       message: 'Session check ok',
+      requestId: result?.requestId || requestId,
     });
   } catch (error) {
     if (error instanceof SessionNotFoundError) {
@@ -233,12 +237,7 @@ router.post('/:sessionId/check', async (req, res, next) => {
       });
     }
     if (error instanceof AutomationError) {
-      return res.status(500).json({
-        ok: false,
-        error: error.message,
-        errorCode: getAutomationErrorCode(error),
-        details: error.details,
-      });
+      return res.status(500).json(await buildAutomationErrorBody(error, getAutomationErrorCode, requestId));
     }
     next(error);
   }
@@ -250,13 +249,15 @@ router.post('/:sessionId/check', async (req, res, next) => {
  */
 router.post('/:sessionId/resume-check', async (req, res, next) => {
   const { sessionId } = req.params;
+  const requestId = normalizeRequestId(sessionId, req.body?.requestId);
   try {
-    const result = await checkSessionForSession(sessionId);
+    const result = await checkSessionForSession(sessionId, { requestId });
     const session = getSessionInfo(sessionId);
     res.json({
       ok: true,
       message: 'Session resumed and check ok',
       retried: result?.retried === true,
+      requestId: result?.requestId || requestId,
       session,
     });
   } catch (error) {
@@ -276,12 +277,7 @@ router.post('/:sessionId/resume-check', async (req, res, next) => {
       });
     }
     if (error instanceof AutomationError) {
-      return res.status(500).json({
-        ok: false,
-        error: error.message,
-        errorCode: getAutomationErrorCode(error),
-        details: error.details,
-      });
+      return res.status(500).json(await buildAutomationErrorBody(error, getAutomationErrorCode, requestId));
     }
     next(error);
   }

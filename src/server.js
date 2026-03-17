@@ -19,6 +19,7 @@ import {
   AutomationError,
   BrowserCrashError,
 } from './errors.js';
+import { readRequestLog } from './services/automation.js';
 
 function getAutomationErrorCode(error) {
   const message = String(error?.message || '').toLowerCase();
@@ -63,6 +64,19 @@ app.get('/api/debug/screenshot', apiKeyAuth, async (req, res) => {
   } catch {
     res.status(404).json({ ok: false, error: 'Screenshot not found' });
   }
+});
+app.get('/api/debug/request-log', apiKeyAuth, async (req, res) => {
+  const requestId = String(req.query.requestId || '').trim();
+  if (!requestId) {
+    return res.status(400).json({ ok: false, error: 'requestId is required' });
+  }
+
+  const payload = await readRequestLog(requestId);
+  if (!payload) {
+    return res.status(404).json({ ok: false, error: 'Request log not found' });
+  }
+
+  return res.json({ ok: true, requestId, payload });
 });
 // Progress polling (by c_user)
 app.get('/api/progress', apiKeyAuth, (req, res) => {

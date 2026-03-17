@@ -358,6 +358,10 @@ async function captureCaptchaImage(page, cUser = 'unknown') {
     await fs.mkdir(CAPTCHA_DIR, { recursive: true });
     const clip = await getCaptchaClip(page);
     if (!clip) {
+      console.warn('[Automation] Captcha crop not found:', JSON.stringify({
+        url: page.url(),
+        cUser,
+      }));
       return { path: null, url: page.url(), clip: null };
     }
     const { filename, filePath } = buildDebugImagePath(CAPTCHA_DIR, 'captcha', cUser);
@@ -370,6 +374,11 @@ async function captureCaptchaImage(page, cUser = 'unknown') {
     }));
     return { path: filePath, filename, url: page.url(), clip };
   } catch (error) {
+    console.warn('[Automation] Captcha crop failed:', JSON.stringify({
+      url: page?.url?.() || null,
+      cUser,
+      error: error?.message || String(error),
+    }));
     return { path: null, url: page?.url?.() || null, error: error?.message || String(error), clip: null };
   }
 }
@@ -393,6 +402,30 @@ async function writeRequestLog(requestId, payload) {
   } catch (error) {
     console.warn(`[Automation] Failed to write request log: ${error?.message || String(error)}`);
   }
+}
+
+export async function readRequestLog(requestId) {
+  const normalized = String(requestId || '').trim();
+  if (!normalized) return null;
+
+  try {
+    const filePath = path.join(REQUEST_LOG_DIR, `request-${normalized}.json`);
+    const raw = await fs.readFile(filePath, 'utf8');
+    if (!raw.trim()) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+export function normalizeRequestId(sessionId = null, requestId = null) {
+  const explicit = String(requestId || '').trim();
+  if (explicit) {
+    return explicit.replace(/[^a-zA-Z0-9._:-]/g, '-');
+  }
+
+  const sessionPart = String(sessionId || 'unknown').trim().replace(/[^a-zA-Z0-9._:-]/g, '-') || 'unknown';
+  return `${sessionPart}-${Date.now()}`;
 }
 
 function getCaptchaLogDetails(details) {
@@ -764,9 +797,29 @@ async function collectCaptchaCheckpointDetails(page, label = 'Automation') {
   let captchaOcrText = null;
   let captchaOcrError = null;
 
+  console.warn(
+    `[${label}] Captcha checkpoint detected`,
+    JSON.stringify({
+      url: diag.url || page.url(),
+      title: diag.title,
+      screenshotPath: debug?.path || null,
+      captchaImagePath: captchaImage?.path || null,
+      ocrConfigured,
+    })
+  );
+
+  if (!captchaImage?.path) {
+    console.warn(`[${label}] Captcha OCR skipped: crop image not available`);
+  } else if (!ocrConfigured) {
+    console.warn(`[${label}] Captcha OCR skipped: OCR config missing`);
+  }
+
   if (captchaImage?.path && ocrConfigured) {
     try {
       captchaOcrText = await easyOCR(captchaImage.path);
+      if (!captchaOcrText) {
+        console.warn(`[${label}] Captcha OCR returned empty text`);
+      }
     } catch (error) {
       captchaOcrError = error?.message || String(error);
       console.warn(`[${label}] OCR failed: ${captchaOcrError}`);
@@ -835,10 +888,12 @@ async function tryResolveCaptchaCheckpoint(page, label = 'Automation') {
   let lastFailure = null;
 
   for (let attempt = 1; attempt <= CAPTCHA_AUTO_SUBMIT_MAX_ATTEMPTS; attempt += 1) {
+    console.log(`[${label}] Captcha auto-resolve attempt ${attempt}/${CAPTCHA_AUTO_SUBMIT_MAX_ATTEMPTS}`);
     const details = await collectCaptchaCheckpointDetails(page, label);
     const captchaText = String(details?.captchaOcrText || '').trim();
 
     if (!captchaText) {
+      console.warn(`[${label}] Captcha auto-resolve stopped: OCR text empty`);
       return {
         resolved: false,
         details: {
@@ -853,6 +908,7 @@ async function tryResolveCaptchaCheckpoint(page, label = 'Automation') {
 
     const input = await findCaptchaInput(page);
     if (!input) {
+      console.warn(`[${label}] Captcha auto-resolve stopped: captcha input not found`);
       return {
         resolved: false,
         details: {
@@ -877,7 +933,10 @@ async function tryResolveCaptchaCheckpoint(page, label = 'Automation') {
 
     const clickedContinue = await clickFirstMatchingText(page, CONTINUE_LABELS).catch(() => false);
     if (!clickedContinue) {
+      console.warn(`[${label}] Captcha continue button not found, fallback to Enter`);
       await page.keyboard.press('Enter').catch(() => {});
+    } else {
+      console.log(`[${label}] Captcha continue button clicked`);
     }
 
     console.log(`[${label}] Captcha OCR text submitted (attempt ${attempt}): ${captchaText}`);
@@ -892,6 +951,7 @@ async function tryResolveCaptchaCheckpoint(page, label = 'Automation') {
     ).catch(() => null);
 
     if (cleared) {
+      console.log(`[${label}] Captcha cleared after submit (attempt ${attempt})`);
       const needNewCookies = await detectNeedNewCookiesPage(page);
       if (needNewCookies?.detected) {
         return {
@@ -931,6 +991,18 @@ async function tryResolveCaptchaCheckpoint(page, label = 'Automation') {
       attempt < CAPTCHA_AUTO_SUBMIT_MAX_ATTEMPTS &&
       pageDidNotMove &&
       mismatchDetected;
+
+    console.warn(
+      `[${label}] Captcha still present after submit`,
+      JSON.stringify({
+        attempt,
+        pageDidNotMove,
+        mismatchDetected,
+        shouldRetry,
+        urlBeforeSubmit,
+        urlAfterSubmit,
+      })
+    );
 
     const latestDetails = await collectCaptchaCheckpointDetails(page, label);
     lastFailure = {
@@ -2121,13 +2193,14 @@ export async function sendMessage(
     forceInitialRefresh = false,
     useReplyFlow = true,
     includeSuccessScreenshot = false,
+    requestId = null,
   }
 ) {
   if (!extension || !phoneNumber || !message) {
     throw new AutomationError('Missing required fields: extension, phoneNumber, message');
   }
 
-  const requestId = `${sessionId || 'unknown'}-${Date.now()}`;
+  const normalizedRequestId = normalizeRequestId(sessionId, requestId);
   const steps = [];
   const logStep = (label, extra = {}) => {
     steps.push({ at: new Date().toISOString(), label, ...extra });
@@ -2238,8 +2311,8 @@ export async function sendMessage(
         };
       }
       logStep('send:ok', { attempt });
-      await writeRequestLog(requestId, {
-        requestId,
+      await writeRequestLog(normalizedRequestId, {
+        requestId: normalizedRequestId,
         type: 'send',
         steps,
         screenshotPath: successScreenshot?.path || null,
@@ -2248,6 +2321,7 @@ export async function sendMessage(
       return {
         ok: true,
         screenshot: successScreenshot,
+        requestId: normalizedRequestId,
       };
     } catch (error) {
       lastError = error;
@@ -2290,8 +2364,8 @@ export async function sendMessage(
     console.error('[Automation] ========================================');
   const debug = await captureDebugScreenshot(page, 'send', cUser || 'unknown');
     const captchaLog = getCaptchaLogDetails(lastError?.details || null);
-    await writeRequestLog(requestId, {
-      requestId,
+    await writeRequestLog(normalizedRequestId, {
+      requestId: normalizedRequestId,
       type: 'send',
       steps,
       error: lastError.message,
@@ -2300,12 +2374,16 @@ export async function sendMessage(
       ...(captchaLog || {}),
     });
     if (lastError instanceof AutomationError) {
-      if (!lastError.details) {
-        lastError.details = { url: debug.url, screenshotPath: debug.path };
-      }
+      lastError.details = {
+        ...(lastError.details || {}),
+        requestId: lastError?.details?.requestId || normalizedRequestId,
+        url: lastError?.details?.url || debug.url,
+        screenshotPath: lastError?.details?.screenshotPath || debug.path,
+      };
       throw lastError;
     }
     throw new AutomationError(`Automation failed: ${lastError.message}`, {
+      requestId: normalizedRequestId,
       url: debug.url,
       screenshotPath: debug.path,
       cause: lastError,
@@ -2317,12 +2395,12 @@ export async function sendMessage(
  * Lightweight UI check to validate session can open WhatsApp flow
  * @param {Page} page - Playwright page instance
  */
-export async function checkSessionFlow(page, { sessionId = null, cUser = null, twofaSecret = null } = {}) {
+export async function checkSessionFlow(page, { sessionId = null, cUser = null, twofaSecret = null, requestId = null } = {}) {
   console.log('[Automation] ========================================');
   console.log('[Automation] Starting WhatsApp session check');
   console.log(`[Automation] Current URL: ${page.url()}`);
 
-  const requestId = `${sessionId || 'unknown'}-${Date.now()}`;
+  const normalizedRequestId = normalizeRequestId(sessionId, requestId);
   const steps = [];
   const logStep = (label, extra = {}) => {
     steps.push({ at: new Date().toISOString(), label, ...extra });
@@ -2416,8 +2494,8 @@ export async function checkSessionFlow(page, { sessionId = null, cUser = null, t
       console.log('[Automation] ✓ Session check completed successfully');
       console.log('[Automation] ========================================');
       logStep('check:ok', { attempt });
-      await writeRequestLog(requestId, { requestId, type: 'check', steps });
-      return true;
+      await writeRequestLog(normalizedRequestId, { requestId: normalizedRequestId, type: 'check', steps });
+      return { ok: true, requestId: normalizedRequestId };
     } catch (error) {
       lastError = error;
       logStep('check:error', { attempt, error: error?.message || String(error) });
@@ -2439,8 +2517,8 @@ export async function checkSessionFlow(page, { sessionId = null, cUser = null, t
   console.error('[Automation] ========================================');
   const debug = await captureDebugScreenshot(page, 'check', cUser || 'unknown');
   const captchaLog = getCaptchaLogDetails(lastError?.details || null);
-  await writeRequestLog(requestId, {
-    requestId,
+  await writeRequestLog(normalizedRequestId, {
+    requestId: normalizedRequestId,
     type: 'check',
     steps,
     error: lastError?.message || 'unknown error',
@@ -2449,13 +2527,16 @@ export async function checkSessionFlow(page, { sessionId = null, cUser = null, t
     ...(captchaLog || {}),
   });
   if (lastError instanceof AutomationError) {
-    if (!lastError.details) {
-      lastError.details = { url: debug.url, screenshotPath: debug.path };
-    }
+    lastError.details = {
+      ...(lastError.details || {}),
+      requestId: lastError?.details?.requestId || normalizedRequestId,
+      url: lastError?.details?.url || debug.url,
+      screenshotPath: lastError?.details?.screenshotPath || debug.path,
+    };
     throw lastError;
   }
   throw new AutomationError(
     `Session check failed: ${lastError?.message || 'unknown error'}`,
-    { url: debug.url, screenshotPath: debug.path, cause: lastError }
+    { requestId: normalizedRequestId, url: debug.url, screenshotPath: debug.path, cause: lastError }
   );
 }

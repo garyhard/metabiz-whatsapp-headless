@@ -3,9 +3,13 @@
  */
 
 import express from 'express';
-import fs from 'fs/promises';
 import { sendMessageForSession, restoreSessionFromStore } from '../services/sessionManager.js';
 import { enqueueMessageJob, getMessageJob } from '../services/messageQueue.js';
+import {
+  buildAutomationErrorBody,
+  buildScreenshotDataUrl,
+} from '../services/debugArtifacts.js';
+import { normalizeRequestId } from '../services/automation.js';
 import {
   InvalidInputError,
   SessionNotFoundError,
@@ -53,19 +57,6 @@ function serializeJob(job) {
   };
 }
 
-async function buildScreenshotDataUrl(screenshot) {
-  try {
-    const filePath = screenshot?.path ? String(screenshot.path) : '';
-    if (!filePath) return null;
-    const buffer = await fs.readFile(filePath);
-    if (!buffer || buffer.length === 0) return null;
-    const ext = filePath.toLowerCase().endsWith('.png') ? 'png' : 'png';
-    return `data:image/${ext};base64,${buffer.toString('base64')}`;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * GET /api/sessions/jobs/:jobId
  * Get async message job status
@@ -93,7 +84,8 @@ router.get('/jobs/:jobId', async (req, res) => {
  */
 router.post('/:sessionId/send-message', async (req, res, next) => {
   const { sessionId } = req.params;
-  const { extension, phoneNumber, message, includeSuccessScreenshot } = req.body || {};
+  const { extension, phoneNumber, message, includeSuccessScreenshot, requestId } = req.body || {};
+  const normalizedRequestId = normalizeRequestId(sessionId, requestId);
   try {
     console.log(`[Routes] send-message request session=${sessionId}`);
 
@@ -118,6 +110,7 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
       message,
       useReplyFlow: true,
       includeSuccessScreenshot: includeSuccessScreenshot === true,
+      requestId: normalizedRequestId,
     });
     const screenshotDataUrl = await buildScreenshotDataUrl(result?.screenshot || null);
 
@@ -127,6 +120,7 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
       screenshot: result?.screenshot || null,
       screenshotFilename: result?.screenshot?.filename || null,
       screenshotDataUrl,
+      requestId: result?.requestId || normalizedRequestId,
     });
   } catch (error) {
     if (error instanceof SessionNotFoundError) {
@@ -137,6 +131,7 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
           phoneNumber,
           message,
           includeSuccessScreenshot: includeSuccessScreenshot === true,
+          requestId: normalizedRequestId,
         });
         const screenshotDataUrl = await buildScreenshotDataUrl(result?.screenshot || null);
         return res.json({
@@ -145,6 +140,7 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
           screenshot: result?.screenshot || null,
           screenshotFilename: result?.screenshot?.filename || null,
           screenshotDataUrl,
+          requestId: result?.requestId || normalizedRequestId,
         });
       } catch (restoreError) {
         if (restoreError instanceof InvalidInputError) {
@@ -155,12 +151,7 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
           });
         }
         if (restoreError instanceof AutomationError) {
-          return res.status(500).json({
-            ok: false,
-            error: restoreError.message,
-            errorCode: getAutomationErrorCode(restoreError),
-            details: restoreError.details,
-          });
+          return res.status(500).json(await buildAutomationErrorBody(restoreError, getAutomationErrorCode, normalizedRequestId));
         }
         if (restoreError instanceof SessionNotFoundError) {
           return res.status(404).json({
@@ -181,12 +172,7 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
       });
     }
     if (error instanceof AutomationError) {
-      return res.status(500).json({
-        ok: false,
-        error: error.message,
-        errorCode: getAutomationErrorCode(error),
-        details: error.details,
-      });
+      return res.status(500).json(await buildAutomationErrorBody(error, getAutomationErrorCode, normalizedRequestId));
     }
     next(error);
   }
@@ -199,6 +185,7 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
 router.post('/:sessionId/send-message-blast', async (req, res, next) => {
   const { sessionId } = req.params;
   const { extension, phoneNumber, message, includeSuccessScreenshot, requestId, metaBlastMessageId, async } = req.body || {};
+  const normalizedRequestId = normalizeRequestId(sessionId, requestId);
   try {
     console.log(`[Routes] send-message-blast request session=${sessionId}`);
 
@@ -219,7 +206,7 @@ router.post('/:sessionId/send-message-blast', async (req, res, next) => {
     const asyncMode = toBoolean(req.query?.async) || toBoolean(async);
     if (asyncMode) {
       const { job, created } = enqueueMessageJob({
-        requestId,
+        requestId: normalizedRequestId,
         metaBlastMessageId,
         sessionId,
         extension,
@@ -242,6 +229,7 @@ router.post('/:sessionId/send-message-blast', async (req, res, next) => {
       message,
       useReplyFlow: false,
       includeSuccessScreenshot: includeSuccessScreenshot === true,
+      requestId: normalizedRequestId,
     });
     const screenshotDataUrl = await buildScreenshotDataUrl(result?.screenshot || null);
 
@@ -251,6 +239,7 @@ router.post('/:sessionId/send-message-blast', async (req, res, next) => {
       screenshot: result?.screenshot || null,
       screenshotFilename: result?.screenshot?.filename || null,
       screenshotDataUrl,
+      requestId: result?.requestId || normalizedRequestId,
     });
   } catch (error) {
     if (error instanceof SessionNotFoundError) {
@@ -262,6 +251,7 @@ router.post('/:sessionId/send-message-blast', async (req, res, next) => {
           message,
           useReplyFlow: false,
           includeSuccessScreenshot: includeSuccessScreenshot === true,
+          requestId: normalizedRequestId,
         });
         const screenshotDataUrl = await buildScreenshotDataUrl(result?.screenshot || null);
         return res.json({
@@ -270,6 +260,7 @@ router.post('/:sessionId/send-message-blast', async (req, res, next) => {
           screenshot: result?.screenshot || null,
           screenshotFilename: result?.screenshot?.filename || null,
           screenshotDataUrl,
+          requestId: result?.requestId || normalizedRequestId,
         });
       } catch (restoreError) {
         if (restoreError instanceof InvalidInputError) {
@@ -280,12 +271,7 @@ router.post('/:sessionId/send-message-blast', async (req, res, next) => {
           });
         }
         if (restoreError instanceof AutomationError) {
-          return res.status(500).json({
-            ok: false,
-            error: restoreError.message,
-            errorCode: getAutomationErrorCode(restoreError),
-            details: restoreError.details,
-          });
+          return res.status(500).json(await buildAutomationErrorBody(restoreError, getAutomationErrorCode, normalizedRequestId));
         }
         if (restoreError instanceof SessionNotFoundError) {
           return res.status(404).json({
@@ -306,12 +292,7 @@ router.post('/:sessionId/send-message-blast', async (req, res, next) => {
       });
     }
     if (error instanceof AutomationError) {
-      return res.status(500).json({
-        ok: false,
-        error: error.message,
-        errorCode: getAutomationErrorCode(error),
-        details: error.details,
-      });
+      return res.status(500).json(await buildAutomationErrorBody(error, getAutomationErrorCode, normalizedRequestId));
     }
     next(error);
   }
