@@ -6,7 +6,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { createBrowser } from './browserFactory.js';
 import { normalizeCookiesInput, parseCookieString, toPlaywrightCookies, toPlaywrightCookiesFromJson } from '../utils/cookies.js';
 import { sendMessage, checkSessionFlow, captureDebugScreenshot, resolveTwoFactorIfNeeded } from './automation.js';
-import { SessionNotFoundError, InvalidInputError, BrowserCrashError, AutomationError } from '../errors.js';
+import { SessionNotFoundError, InvalidInputError, BrowserCrashError, FlowTimeoutError, AutomationError } from '../errors.js';
 import { config } from '../config.js';
 import { sessionStore } from './sessionStore.js';
 import fs from 'fs/promises';
@@ -49,11 +49,206 @@ async function applyResolutionCookies(context, viewport) {
 const sessions = new Map();
 // Simple per-session mutex to serialize UI automation
 const sessionLocks = new Map();
+const sessionBusyCounts = new Map();
 // Simple per-c_user mutex to serialize creation/check flow for the same account
 const cUserLocks = new Map();
+const pendingBrowserReservations = new Set();
 // Global limiter for concurrent automation across sessions.
 let globalSendActive = 0;
 const globalSendWaiters = [];
+let browserPoolLock = Promise.resolve();
+
+const BROWSER_POOL_POLL_MS = 500;
+
+function hasLiveBrowser(session) {
+  return !!(session?.page && session?.context && session?.browser);
+}
+
+function getLiveBrowserCount() {
+  let count = 0;
+  for (const session of sessions.values()) {
+    if (hasLiveBrowser(session)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function getSessionBusyCount(sessionId) {
+  return sessionBusyCounts.get(sessionId) || 0;
+}
+
+function markSessionBusy(sessionId) {
+  sessionBusyCounts.set(sessionId, getSessionBusyCount(sessionId) + 1);
+}
+
+function unmarkSessionBusy(sessionId) {
+  const nextCount = Math.max(0, getSessionBusyCount(sessionId) - 1);
+  if (nextCount <= 0) {
+    sessionBusyCounts.delete(sessionId);
+    return;
+  }
+  sessionBusyCounts.set(sessionId, nextCount);
+}
+
+function isSessionBusy(sessionId) {
+  return getSessionBusyCount(sessionId) > 0;
+}
+
+async function withBrowserPoolLock(task) {
+  const previous = browserPoolLock;
+  let release;
+  const current = new Promise((resolve) => {
+    release = resolve;
+  });
+  const queued = previous.then(() => current);
+  browserPoolLock = queued;
+
+  try {
+    await previous;
+    return await task();
+  } finally {
+    release();
+    if (browserPoolLock === queued) {
+      browserPoolLock = Promise.resolve();
+    }
+  }
+}
+
+function getEvictableSessionCandidate(protectedSessionIds = []) {
+  const protectedIds = new Set(
+    Array.isArray(protectedSessionIds)
+      ? protectedSessionIds.filter(Boolean).map((value) => String(value))
+      : []
+  );
+
+  const candidates = [];
+  for (const [sessionId, session] of sessions.entries()) {
+    if (!hasLiveBrowser(session)) continue;
+    if (protectedIds.has(String(sessionId))) continue;
+    if (isSessionBusy(sessionId)) continue;
+    if (getEffectiveSessionStatus(session) !== 'active') continue;
+    if (session.manualAction) continue;
+
+    candidates.push({
+      sessionId,
+      lastActivity: Number(session.lastActivity || session.createdAt || 0),
+      cUser: session.cUser || null,
+    });
+  }
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  candidates.sort((a, b) => {
+    if (a.lastActivity !== b.lastActivity) {
+      return a.lastActivity - b.lastActivity;
+    }
+    return String(a.sessionId).localeCompare(String(b.sessionId));
+  });
+
+  return candidates[0];
+}
+
+async function tryReserveBrowserSlot(reservationKey, protectedSessionIds = [], reason = 'activation') {
+  return withBrowserPoolLock(async () => {
+    const maxActiveBrowsers = Number(config.maxActiveBrowsers) || 0;
+    if (maxActiveBrowsers <= 0) {
+      return { reserved: true, liveCount: getLiveBrowserCount(), pendingCount: pendingBrowserReservations.size };
+    }
+
+    const currentLiveBrowsers = getLiveBrowserCount();
+    const currentPendingReservations = pendingBrowserReservations.size;
+    if (currentLiveBrowsers + currentPendingReservations < maxActiveBrowsers) {
+      pendingBrowserReservations.add(reservationKey);
+      return {
+        reserved: true,
+        liveCount: currentLiveBrowsers,
+        pendingCount: currentPendingReservations + 1,
+      };
+    }
+
+    const candidate = getEvictableSessionCandidate(protectedSessionIds);
+    if (!candidate) {
+      return {
+        reserved: false,
+        liveCount: currentLiveBrowsers,
+        pendingCount: currentPendingReservations,
+      };
+    }
+
+    logStep('browser_pool:evict:start', {
+      reason,
+      maxActiveBrowsers,
+      evictSessionId: candidate.sessionId,
+      cUser: candidate.cUser,
+      lastActivity: candidate.lastActivity || null,
+      liveCount: currentLiveBrowsers,
+      pendingCount: currentPendingReservations,
+    });
+    await suspendSession(candidate.sessionId);
+    pendingBrowserReservations.add(reservationKey);
+    const nextLiveCount = getLiveBrowserCount();
+    const nextPendingCount = pendingBrowserReservations.size;
+    logStep('browser_pool:evict:done', {
+      reason,
+      maxActiveBrowsers,
+      evictSessionId: candidate.sessionId,
+      liveCount: nextLiveCount,
+      pendingCount: nextPendingCount,
+    });
+    return {
+      reserved: true,
+      evictedSessionId: candidate.sessionId,
+      liveCount: nextLiveCount,
+      pendingCount: nextPendingCount,
+    };
+  });
+}
+
+async function reserveBrowserSlot(reservationKey, protectedSessionIds = [], reason = 'activation') {
+  const maxActiveBrowsers = Number(config.maxActiveBrowsers) || 0;
+  if (maxActiveBrowsers <= 0) {
+    return;
+  }
+
+  const waitMs = Math.max(0, Number(config.browserPoolWaitMs) || 0);
+  const deadline = Date.now() + waitMs;
+
+  while (true) {
+    const result = await tryReserveBrowserSlot(reservationKey, protectedSessionIds, reason);
+    if (result.reserved) {
+      logStep('browser_pool:reserve', {
+        reason,
+        maxActiveBrowsers,
+        liveCount: result.liveCount,
+        pendingCount: result.pendingCount,
+        reservationKey,
+      });
+      return;
+    }
+
+    if (Date.now() >= deadline) {
+      throw new BrowserCrashError(
+        `Active browser limit reached (${maxActiveBrowsers}) and no idle session could be suspended`
+      );
+    }
+
+    await sleep(BROWSER_POOL_POLL_MS);
+  }
+}
+
+async function releaseBrowserSlot(reservationKey) {
+  const maxActiveBrowsers = Number(config.maxActiveBrowsers) || 0;
+  if (maxActiveBrowsers <= 0) {
+    return;
+  }
+
+  await withBrowserPoolLock(async () => {
+    pendingBrowserReservations.delete(reservationKey);
+  });
+}
 
 function extractCUser(normalized) {
   if (!normalized || !normalized.cookies) return '';
@@ -196,7 +391,7 @@ function withTimeout(promise, ms, label) {
   let timer;
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => {
-      reject(new BrowserCrashError(`${label} timed out after ${ms}ms`));
+      reject(new FlowTimeoutError(`${label} timed out after ${ms}ms`));
     }, ms);
   });
   return Promise.race([
@@ -211,14 +406,17 @@ async function withSessionLock(sessionId, task) {
   const current = new Promise((resolve) => {
     release = resolve;
   });
-  sessionLocks.set(sessionId, previous.then(() => current));
+  const queued = previous.then(() => current);
+  sessionLocks.set(sessionId, queued);
 
   try {
     await previous;
+    markSessionBusy(sessionId);
     return await task();
   } finally {
+    unmarkSessionBusy(sessionId);
     release();
-    if (sessionLocks.get(sessionId) === current) {
+    if (sessionLocks.get(sessionId) === queued) {
       sessionLocks.delete(sessionId);
     }
   }
@@ -233,14 +431,15 @@ async function withCUserLock(cUser, task) {
   const current = new Promise((resolve) => {
     release = resolve;
   });
-  cUserLocks.set(cUser, previous.then(() => current));
+  const queued = previous.then(() => current);
+  cUserLocks.set(cUser, queued);
 
   try {
     await previous;
     return await task();
   } finally {
     release();
-    if (cUserLocks.get(cUser) === current) {
+    if (cUserLocks.get(cUser) === queued) {
       cUserLocks.delete(cUser);
     }
   }
@@ -280,18 +479,248 @@ function isBrowserClosedError(error) {
   );
 }
 
-function isRecoverableCrash(error) {
-  return error instanceof BrowserCrashError || isBrowserClosedError(error);
+function isRecoverableFlowError(error) {
+  return error instanceof BrowserCrashError || error instanceof FlowTimeoutError || isBrowserClosedError(error);
 }
 
 function isCaptchaRequiredError(error) {
   return error instanceof AutomationError && String(error?.details?.type || '').toLowerCase() === 'captcha_required';
 }
 
+function isAccountRestrictedError(error) {
+  return error instanceof AutomationError && String(error?.details?.type || '').toLowerCase() === 'account_restricted';
+}
+
 function getEffectiveSessionStatus(session) {
   if (!session) return 'suspended';
   if (session.status) return session.status;
   return session.page && session.context && session.browser ? 'active' : 'suspended';
+}
+
+function normalizeRestrictedDetails(details = null) {
+  const normalized = details && typeof details === 'object' ? { ...details } : {};
+  normalized.type = 'account_restricted';
+  if (normalized.screenshotPath && !normalized.screenshotFilename) {
+    normalized.screenshotFilename = path.basename(normalized.screenshotPath);
+  }
+  return normalized;
+}
+
+function buildRestrictedManualAction(details = null, detectedAtMs = Date.now(), flow = 'restricted', message = 'Account restricted detected') {
+  const normalizedDetails = normalizeRestrictedDetails(details);
+  const isoDetectedAt = new Date(detectedAtMs || Date.now()).toISOString();
+  return {
+    type: 'account_restricted',
+    flow,
+    detectedAt: isoDetectedAt,
+    details: {
+      ...normalizedDetails,
+      flow,
+      restrictedDetectedAt: isoDetectedAt,
+    },
+    message,
+  };
+}
+
+function getStoredRestrictedSnapshot(sessionId) {
+  const stored = sessionStore.getBySessionId(sessionId);
+  if (!stored?.restricted) {
+    return null;
+  }
+
+  return {
+    detectedAtMs: Number(stored.restrictionDetectedAt || stored.updatedAt || Date.now()),
+    details: normalizeRestrictedDetails(stored.restrictionDetails),
+    message: 'Account restricted detected',
+  };
+}
+
+function hydrateStoredRestrictedState(sessionId, session) {
+  if (!session) return null;
+  if (session.manualAction?.type === 'account_restricted') {
+    return session.manualAction;
+  }
+
+  const snapshot = getStoredRestrictedSnapshot(sessionId);
+  if (!snapshot) {
+    return null;
+  }
+
+  session.status = 'restricted';
+  session.lastActivity = session.lastActivity || snapshot.detectedAtMs;
+  session.manualAction = buildRestrictedManualAction(
+    snapshot.details,
+    snapshot.detectedAtMs,
+    snapshot.details?.flow || 'restricted_cache',
+    snapshot.message
+  );
+  return session.manualAction;
+}
+
+function getCachedRestrictedManualAction(sessionId) {
+  const session = sessions.get(sessionId);
+  if (session?.manualAction?.type === 'account_restricted') {
+    return session.manualAction;
+  }
+  if (session) {
+    return hydrateStoredRestrictedState(sessionId, session);
+  }
+
+  const snapshot = getStoredRestrictedSnapshot(sessionId);
+  if (!snapshot) {
+    return null;
+  }
+
+  return buildRestrictedManualAction(
+    snapshot.details,
+    snapshot.detectedAtMs,
+    snapshot.details?.flow || 'restricted_cache',
+    snapshot.message
+  );
+}
+
+function clearRestrictedSessionState(sessionId, nextStatus = null) {
+  const session = sessions.get(sessionId);
+  if (session) {
+    if (session.manualAction?.type === 'account_restricted') {
+      session.manualAction = null;
+    }
+    if (session.status === 'restricted' && nextStatus) {
+      session.status = nextStatus;
+    }
+  }
+  sessionStore.clearSessionRestricted(sessionId);
+}
+
+function markSessionRestricted(sessionId, error, flow = 'unknown') {
+  const session = sessions.get(sessionId);
+  const detectedAtMs = Date.now();
+  const manualAction = buildRestrictedManualAction(
+    {
+      ...(error?.details || {}),
+      sessionId,
+    },
+    detectedAtMs,
+    flow,
+    error?.message || 'Account restricted detected'
+  );
+
+  if (session) {
+    if (session.activityTimer) {
+      clearInterval(session.activityTimer);
+      session.activityTimer = null;
+    }
+    session.status = 'restricted';
+    session.lastActivity = detectedAtMs;
+    session.manualAction = manualAction;
+    setIdleTimer(sessionId);
+  }
+
+  sessionStore.markSessionRestricted(sessionId, manualAction.details, detectedAtMs);
+  sessionStore.updateStatus(sessionId, 'restricted', detectedAtMs);
+  logStep('session:restricted', {
+    sessionId,
+    flow,
+    screenshotPath: manualAction.details?.screenshotPath || null,
+    message: manualAction.message,
+  });
+}
+
+function throwIfSessionRestricted(sessionId, flow = 'unknown') {
+  const manualAction = getCachedRestrictedManualAction(sessionId);
+  if (!manualAction) {
+    return;
+  }
+
+  throw new AutomationError(`Session ${sessionId}: Account restricted detected`, {
+    ...(manualAction.details || {}),
+    flow,
+    cachedRestricted: true,
+    sessionId,
+  });
+}
+
+function wrapRecoverableFlowError(sessionId, error) {
+  const message = error?.message ? String(error.message) : String(error || 'Unknown recoverable flow failure');
+  if (error instanceof FlowTimeoutError) {
+    return new FlowTimeoutError(
+      message.includes(`Session ${sessionId}:`) ? message : `Session ${sessionId}: ${message}`
+    );
+  }
+  return new BrowserCrashError(
+    message.includes(`session ${sessionId}`) ? message : `Browser crashed for session ${sessionId}: ${message}`
+  );
+}
+
+async function runRecoverableSessionFlow({
+  sessionId,
+  flowName,
+  manualActionFlow,
+  restrictedFlow,
+  failureSuspendReason,
+  retryFailureSuspendReason,
+  initialTask,
+  retryTask,
+}) {
+  try {
+    return await initialTask();
+  } catch (error) {
+    if (isCaptchaRequiredError(error)) {
+      markSessionNeedsManualAction(sessionId, error, manualActionFlow);
+      throw error;
+    }
+    if (isAccountRestrictedError(error)) {
+      markSessionRestricted(sessionId, error, restrictedFlow);
+      throw error;
+    }
+    if (!isRecoverableFlowError(error)) {
+      await suspendUnhealthySession(sessionId, failureSuspendReason);
+      throw error;
+    }
+
+    let lastError = error;
+    const maxRecoveryAttempts = Math.max(0, Number(config.flowRecoverableRetryAttempts) || 0);
+    const retryDelayMs = Math.max(0, Number(config.flowRecoverableRetryDelayMs) || 0);
+
+    for (let attempt = 1; attempt <= maxRecoveryAttempts; attempt += 1) {
+      logStep('session:flow:recoverable_retry', {
+        sessionId,
+        flow: flowName,
+        attempt,
+        maxAttempts: maxRecoveryAttempts,
+        error: lastError?.message || String(lastError),
+      });
+
+      if (retryDelayMs > 0) {
+        await sleep(retryDelayMs);
+      }
+
+      try {
+        await recreateSessionFromMemory(sessionId);
+        return {
+          retried: true,
+          ...(await retryTask(attempt) || {}),
+        };
+      } catch (retryError) {
+        lastError = retryError;
+        if (isCaptchaRequiredError(retryError)) {
+          markSessionNeedsManualAction(sessionId, retryError, `${manualActionFlow}_retry`);
+          throw retryError;
+        }
+        if (isAccountRestrictedError(retryError)) {
+          markSessionRestricted(sessionId, retryError, `${restrictedFlow}_retry`);
+          throw retryError;
+        }
+        if (!isRecoverableFlowError(retryError)) {
+          await suspendUnhealthySession(sessionId, failureSuspendReason);
+          throw retryError;
+        }
+      }
+    }
+
+    await suspendUnhealthySession(sessionId, retryFailureSuspendReason);
+    throw wrapRecoverableFlowError(sessionId, lastError);
+  }
 }
 
 function clearSessionTimers(session) {
@@ -337,6 +766,9 @@ function touchSession(sessionId) {
 function markSessionActive(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) return;
+  if (session.status === 'restricted' || session.manualAction?.type === 'account_restricted') {
+    clearRestrictedSessionState(sessionId, 'active');
+  }
   session.status = 'active';
   session.suspendedAt = null;
   session.manualAction = null;
@@ -417,6 +849,9 @@ async function suspendUnhealthySession(sessionId, reason = 'unknown') {
 
 async function ensureSessionActive(sessionId) {
   let session = sessions.get(sessionId);
+  if (session) {
+    hydrateStoredRestrictedState(sessionId, session);
+  }
   if (!session) {
     const stored = sessionStore.getBySessionId(sessionId);
     if (!stored) {
@@ -434,6 +869,9 @@ async function ensureSessionActive(sessionId) {
       }
     );
     session = sessions.get(sessionId);
+    if (session) {
+      hydrateStoredRestrictedState(sessionId, session);
+    }
   }
   if (!session) {
     throw new SessionNotFoundError(sessionId);
@@ -456,7 +894,10 @@ async function ensureSessionActive(sessionId) {
   );
   const refreshed = sessions.get(sessionId);
   if (refreshed) {
-    refreshed.status = 'active';
+    hydrateStoredRestrictedState(sessionId, refreshed);
+    if (!refreshed.status || refreshed.status === 'suspended') {
+      refreshed.status = 'active';
+    }
     return refreshed;
   }
   return getSession(sessionId);
@@ -629,9 +1070,15 @@ export async function createSession(
     }
     // Use existing sessionId if provided (for recreation), otherwise generate new one
     const sessionId = existingSessionId || uuidv4();
+    const cachedRestriction = existingSessionId ? getCachedRestrictedManualAction(sessionId) : null;
     const stored = sessionStore.getByCUser(finalCUser);
     const storedFingerprint = stored ? stored.fingerprint : sessionStore.getFingerprint(finalCUser);
     const fingerprintToUse = existingFingerprint || storedFingerprint || null;
+    const existingSession = existingSessionId ? sessions.get(sessionId) : null;
+    const browserReservationKey = `session:${sessionId}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
+    const needsBrowserReservation = !hasLiveBrowser(existingSession);
+    let browserSlotReserved = false;
+    let browserInstance = null;
     let browser = null;
     let context = null;
     let page = null;
@@ -643,9 +1090,18 @@ export async function createSession(
       setProgress(finalCUser, 'create:browser:init', { sessionId });
       // Use provided proxy, or fall back to config proxy, or null
       const proxyConfig = proxy || config.proxy || null;
-      
+
+      if (needsBrowserReservation) {
+        await reserveBrowserSlot(
+          browserReservationKey,
+          [sessionId],
+          existingSessionId ? 'restore_session' : 'create_session'
+        );
+        browserSlotReserved = true;
+      }
+
       // Create browser instance with existing fingerprint and proxy if provided (for recreation)
-      const browserInstance = await createBrowser(sessionId, fingerprintToUse, proxyConfig);
+      browserInstance = await createBrowser(sessionId, fingerprintToUse, proxyConfig);
       browser = browserInstance.browser;
       context = browserInstance.context;
       page = browserInstance.page;
@@ -669,19 +1125,19 @@ export async function createSession(
         for (const domain of domains) {
           try {
             const playwrightCookies = toPlaywrightCookies(cookies, domain);
-          await context.addCookies(playwrightCookies);
-        } catch (error) {
-          // Some cookies might fail for certain domains, continue
-          console.warn(`[SessionManager] Failed to set cookies for ${domain}:`, error.message);
+            await context.addCookies(playwrightCookies);
+          } catch (error) {
+            // Some cookies might fail for certain domains, continue
+            console.warn(`[SessionManager] Failed to set cookies for ${domain}:`, error.message);
+          }
         }
+      } else {
+        const playwrightCookies = toPlaywrightCookiesFromJson(normalized.raw);
+        if (playwrightCookies.length === 0) {
+          throw new InvalidInputError('No valid cookies found in the input array');
+        }
+        await context.addCookies(playwrightCookies);
       }
-    } else {
-      const playwrightCookies = toPlaywrightCookiesFromJson(normalized.raw);
-      if (playwrightCookies.length === 0) {
-        throw new InvalidInputError('No valid cookies found in the input array');
-      }
-      await context.addCookies(playwrightCookies);
-    }
       await applyResolutionCookies(context, browserInstance.fingerprint?.viewport);
       logStep('createSession:cookies:applied', { sessionId, cUser: finalCUser, format: normalized.format });
       setProgress(finalCUser, 'create:cookies:applied', { sessionId, format: normalized.format });
@@ -717,8 +1173,13 @@ export async function createSession(
           await resolveTwoFactorIfNeeded(page, {
             twofaSecret: normalizedTwofaSecret,
             label: 'CreateSession',
+            cUser: finalCUser,
           });
         } catch (error) {
+          if (isAccountRestrictedError(error) && sessionId) {
+            markSessionRestricted(sessionId, error, 'create_session');
+            throw error;
+          }
           throw new InvalidInputError(error.message);
         }
         authCheck = await detectLoginOrCheckpoint(page);
@@ -795,9 +1256,14 @@ export async function createSession(
         cookieJson: normalized.format === 'json' ? normalized.raw : null,
         cookieFormat: normalized.format,
         proxy: proxyConfig, // Save proxy for recreation
-        status: 'active',
+        status: cachedRestriction ? 'restricted' : 'active',
         suspendedAt: null,
-        manualAction: null,
+        manualAction: cachedRestriction
+          ? {
+              ...cachedRestriction,
+              details: { ...(cachedRestriction.details || {}) },
+            }
+          : null,
         cUser: finalCUser,
         twofaSecret: normalizedTwofaSecret,
       };
@@ -812,7 +1278,7 @@ export async function createSession(
         fingerprint: browserInstance.fingerprint,
         proxy: proxyConfig,
         twofaSecret: normalizedTwofaSecret,
-        status: 'active',
+        status: sessionData.status,
         lastActivity: sessionData.lastActivity,
       });
 
@@ -823,7 +1289,7 @@ export async function createSession(
       }
 
       console.log(`[SessionManager] ✓ Session created successfully: ${sessionId}`);
-      console.log(`[SessionManager] Active sessions: ${sessions.size}`);
+      console.log(`[SessionManager] Loaded sessions: ${sessions.size}, live browsers: ${getLiveBrowserCount()}`);
       logStep('createSession:done', { sessionId, cUser: finalCUser });
       setProgress(finalCUser, 'create:done', { sessionId });
       
@@ -842,11 +1308,15 @@ export async function createSession(
       if (context) await context.close().catch(() => {});
       if (browser) await browser.close().catch(() => {});
 
-      if (error instanceof InvalidInputError) {
+      if (error instanceof InvalidInputError || error instanceof AutomationError) {
         throw error;
       }
       const message = error?.message || error?.toString() || 'unknown error';
       throw new BrowserCrashError(`Failed to create session: ${message}`);
+    } finally {
+      if (browserSlotReserved) {
+        await releaseBrowserSlot(browserReservationKey);
+      }
     }
   });
 }
@@ -874,6 +1344,11 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
   }
 
   const tempSessionId = persist ? uuidv4() : `validate-${uuidv4()}`;
+  const browserReservationKey = persist
+    ? `validate:${tempSessionId}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`
+    : null;
+  let browserSlotReserved = false;
+  let browserInstance = null;
   let browser = null;
   let context = null;
   let page = null;
@@ -883,7 +1358,11 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
     logStep('validateCookies:start', { cUser });
     setProgress(cUser, 'validate:start');
     const storedFingerprint = sessionStore.getFingerprint(cUser);
-    const browserInstance = await createBrowser(tempSessionId, storedFingerprint, proxy);
+    if (persist) {
+      await reserveBrowserSlot(browserReservationKey, [], 'validate_cookies_persist');
+      browserSlotReserved = true;
+    }
+    browserInstance = await createBrowser(tempSessionId, storedFingerprint, proxy);
     browser = browserInstance.browser;
     context = browserInstance.context;
     page = browserInstance.page;
@@ -928,6 +1407,7 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
       await resolveTwoFactorIfNeeded(page, {
         twofaSecret: normalizedTwofaSecret,
         label: 'ValidateCookies',
+        cUser,
       });
     } catch (error) {
       throw new InvalidInputError(error.message);
@@ -996,6 +1476,9 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
     }
     throw new BrowserCrashError(`Validate cookies failed: ${error.message}`);
   } finally {
+    if (browserSlotReserved) {
+      await releaseBrowserSlot(browserReservationKey);
+    }
     if (!persist) {
       if (page) await page.close().catch(() => {});
       if (context) await context.close().catch(() => {});
@@ -1046,138 +1529,159 @@ export async function validateProxy(proxy = null) {
  * @param {string|Array<Object>} cookieInput - Cookie string or JSON array
  */
 export async function updateSessionCookies(sessionId, cookieInput, options = {}) {
-  const normalized = normalizeCookiesInput(cookieInput);
-  const incomingTwofa = String(options?.twofaSecret || '').trim();
-  if (normalized.format === 'string') {
-    if (!normalized.raw || !String(normalized.raw).trim()) {
+  return withSessionLock(sessionId, async () => {
+    const normalized = normalizeCookiesInput(cookieInput);
+    const incomingTwofa = String(options?.twofaSecret || '').trim();
+    if (normalized.format === 'string') {
+      if (!normalized.raw || !String(normalized.raw).trim()) {
+        throw new InvalidInputError('Cookies are required');
+      }
+    }
+    if (normalized.format === 'json' && (!Array.isArray(normalized.raw) || normalized.raw.length === 0)) {
       throw new InvalidInputError('Cookies are required');
     }
-  }
-  if (normalized.format === 'json' && (!Array.isArray(normalized.raw) || normalized.raw.length === 0)) {
-    throw new InvalidInputError('Cookies are required');
-  }
 
-  let session = sessions.get(sessionId);
-  if (!session) {
-    const stored = sessionStore.getBySessionId(sessionId);
-    if (!stored) {
+    let session = sessions.get(sessionId);
+    if (!session) {
+      const stored = sessionStore.getBySessionId(sessionId);
+      if (!stored) {
+        throw new SessionNotFoundError(sessionId);
+      }
+      logStep('updateSessionCookies:restore', { sessionId, cUser: stored.cUser });
+      await createSession(
+        stored.cookies,
+        sessionId,
+        stored.fingerprint,
+        stored.proxy || null,
+        {
+          skipCUserCheck: true,
+          cUserOverride: stored.cUser,
+          twofaSecret: stored.twofaSecret || null,
+        }
+      );
+      session = sessions.get(sessionId);
+    }
+    if (!session) {
       throw new SessionNotFoundError(sessionId);
     }
-    logStep('updateSessionCookies:restore', { sessionId, cUser: stored.cUser });
-    await createSession(
-      stored.cookies,
-      sessionId,
-      stored.fingerprint,
-      stored.proxy || null,
-      {
-        skipCUserCheck: true,
-        cUserOverride: stored.cUser,
-        twofaSecret: stored.twofaSecret || null,
+    const cUser = extractCUser(normalized);
+    if (!cUser) {
+      throw new InvalidInputError('c_user cookie is required');
+    }
+    const stored = sessionStore.getBySessionId(sessionId);
+    const previousCUser = session.cUser || stored?.cUser || null;
+    if (previousCUser && previousCUser !== cUser) {
+      logStep('updateSessionCookies:cuser_changed', { sessionId, from: previousCUser, to: cUser });
+    }
+    if (normalized.format === 'string') {
+      const cookies = parseCookieString(normalized.raw);
+      if (cookies.length === 0) {
+        throw new InvalidInputError('No valid cookies found in the input string');
       }
-    );
-    session = sessions.get(sessionId);
-  }
-  if (!session) {
-    throw new SessionNotFoundError(sessionId);
-  }
-  const cUser = extractCUser(normalized);
-  if (!cUser) {
-    throw new InvalidInputError('c_user cookie is required');
-  }
-  const stored = sessionStore.getBySessionId(sessionId);
-  const expectedCUser = stored?.cUser || session.cUser;
-  if (expectedCUser && expectedCUser !== cUser) {
-    throw new InvalidInputError('c_user does not match existing session');
-  }
-  if (normalized.format === 'string') {
-    const cookies = parseCookieString(normalized.raw);
-    if (cookies.length === 0) {
-      throw new InvalidInputError('No valid cookies found in the input string');
+
+      const domains = ['business.facebook.com', '.facebook.com'];
+      for (const domain of domains) {
+        try {
+          const playwrightCookies = toPlaywrightCookies(cookies, domain);
+          await session.context.addCookies(playwrightCookies);
+        } catch (error) {
+          console.warn(`[SessionManager] Failed to set cookies for ${domain}:`, error.message);
+        }
+      }
+    } else {
+      const playwrightCookies = toPlaywrightCookiesFromJson(normalized.raw);
+      if (playwrightCookies.length === 0) {
+        throw new InvalidInputError('No valid cookies found in the input array');
+      }
+      await session.context.addCookies(playwrightCookies);
     }
 
-    const domains = ['business.facebook.com', '.facebook.com'];
-    for (const domain of domains) {
+    const viewport = session.page ? session.page.viewportSize() : null;
+    await applyResolutionCookies(session.context, viewport);
+
+    // Refresh page to ensure cookies are applied
+    if (session.page) {
       try {
-        const playwrightCookies = toPlaywrightCookies(cookies, domain);
-        await session.context.addCookies(playwrightCookies);
+        await withRetry(
+          () => session.page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }),
+          { retries: 2, delayMs: 1000 }
+        );
       } catch (error) {
-        console.warn(`[SessionManager] Failed to set cookies for ${domain}:`, error.message);
+        console.warn(`[SessionManager] Cookie update reload failed: ${error.message}`);
       }
     }
-  } else {
-    const playwrightCookies = toPlaywrightCookiesFromJson(normalized.raw);
-    if (playwrightCookies.length === 0) {
-      throw new InvalidInputError('No valid cookies found in the input array');
-    }
-    await session.context.addCookies(playwrightCookies);
-  }
 
-  const viewport = session.page ? session.page.viewportSize() : null;
-  await applyResolutionCookies(session.context, viewport);
-
-  // Refresh page to ensure cookies are applied
-  if (session.page) {
-    try {
-      await withRetry(
-        () => session.page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }),
-        { retries: 2, delayMs: 1000 }
-      );
-    } catch (error) {
-      console.warn(`[SessionManager] Cookie update reload failed: ${error.message}`);
-    }
-  }
-
-  if (session.page) {
-    const twofaSecret = incomingTwofa || session.twofaSecret || stored?.twofaSecret || null;
-    try {
-      await resolveTwoFactorIfNeeded(session.page, {
-        twofaSecret,
-        label: 'UpdateSessionCookies',
-      });
-    } catch (error) {
-      throw new InvalidInputError(error.message);
-    }
-    const authCheck = await detectLoginOrCheckpoint(session.page);
-    if (authCheck.blocked) {
-      throw new InvalidInputError(`Session not authenticated: ${authCheck.reason}`);
-    }
-    try {
-      await checkSessionFlow(session.page, {
-        sessionId,
-        cUser: session.cUser || null,
-        twofaSecret,
-      });
-    } catch (error) {
-      if (error instanceof InvalidInputError) {
-        throw error;
+    if (session.page) {
+      const twofaSecret = incomingTwofa || session.twofaSecret || stored?.twofaSecret || null;
+      try {
+        await resolveTwoFactorIfNeeded(session.page, {
+          twofaSecret,
+          label: 'UpdateSessionCookies',
+          cUser,
+        });
+      } catch (error) {
+        if (isAccountRestrictedError(error)) {
+          markSessionRestricted(sessionId, error, 'update_cookies');
+          throw error;
+        }
+        throw new InvalidInputError(error.message);
       }
-      throw new InvalidInputError(error.message);
+      const authCheck = await detectLoginOrCheckpoint(session.page);
+      if (authCheck.blocked) {
+        throw new InvalidInputError(`Session not authenticated: ${authCheck.reason}`);
+      }
+      try {
+        await checkSessionFlow(session.page, {
+          sessionId,
+          cUser,
+          twofaSecret,
+        });
+      } catch (error) {
+        if (isAccountRestrictedError(error)) {
+          markSessionRestricted(sessionId, error, 'update_cookies');
+          throw error;
+        }
+        if (error instanceof InvalidInputError) {
+          throw error;
+        }
+        throw new InvalidInputError(error.message);
+      }
     }
-  }
-  logStep('updateSessionCookies:done', { sessionId, cUser: session.cUser || cUser });
+    logStep('updateSessionCookies:done', { sessionId, cUser });
 
-  session.cookieString = normalized.format === 'string' ? normalized.raw : null;
-  session.cookieJson = normalized.format === 'json' ? normalized.raw : null;
-  session.cookieFormat = normalized.format;
-  session.cUser = expectedCUser || cUser;
-  if (incomingTwofa) {
-    session.twofaSecret = incomingTwofa;
-  } else if (session.twofaSecret === undefined && stored?.twofaSecret) {
-    session.twofaSecret = stored.twofaSecret;
-  }
-  touchSession(sessionId);
+    clearRestrictedSessionState(sessionId, 'active');
+    session.cookieString = normalized.format === 'string' ? normalized.raw : null;
+    session.cookieJson = normalized.format === 'json' ? normalized.raw : null;
+    session.cookieFormat = normalized.format;
+    session.cUser = cUser;
+    if (incomingTwofa) {
+      session.twofaSecret = incomingTwofa;
+    } else if (session.twofaSecret === undefined && stored?.twofaSecret) {
+      session.twofaSecret = stored.twofaSecret;
+    }
+    touchSession(sessionId);
 
-  const twofaToStore = incomingTwofa || session.twofaSecret || stored?.twofaSecret;
-  if (twofaToStore) {
-    sessionStore.updateCookies(sessionId, normalized.format, normalized.raw, twofaToStore);
-  } else {
-    sessionStore.updateCookies(sessionId, normalized.format, normalized.raw);
-  }
+    const twofaToStore = incomingTwofa || session.twofaSecret || stored?.twofaSecret;
+    sessionStore.saveSession({
+      sessionId,
+      cUser,
+      cookieFormat: normalized.format,
+      cookies: normalized.raw,
+      fingerprint: session.fingerprint || stored?.fingerprint || null,
+      proxy: session.proxy || stored?.proxy || null,
+      twofaSecret: twofaToStore || null,
+      status: getEffectiveSessionStatus(session),
+      lastActivity: session.lastActivity,
+    });
+    if (session.fingerprint) {
+      sessionStore.saveFingerprint(cUser, session.fingerprint);
+    }
 
-  if (config.devMode) {
-    await saveSessionMetadata(sessionId, session, normalized, session.proxy || null, twofaToStore || null);
-  }
-  return { ok: true };
+    if (config.devMode) {
+      await saveSessionMetadata(sessionId, session, normalized, session.proxy || null, twofaToStore || null);
+    }
+    return { ok: true };
+  });
 }
 
 /**
@@ -1335,7 +1839,7 @@ export async function destroySession(sessionId, options = {}) {
     }
     
     console.log(`[SessionManager] ✓ Session destroyed: ${sessionId}`);
-    console.log(`[SessionManager] Active sessions: ${sessions.size}`);
+    console.log(`[SessionManager] Loaded sessions: ${sessions.size}, live browsers: ${getLiveBrowserCount()}`);
   }
 }
 
@@ -1350,6 +1854,7 @@ export async function sendMessageForSession(
 ) {
   return withGlobalSendLock(() =>
     withSessionLock(sessionId, async () => {
+      throwIfSessionRestricted(sessionId, 'send_cached');
       const session = await ensureSessionActive(sessionId);
       const now = Date.now();
       const lastActivity = session.lastActivity || 0;
@@ -1358,69 +1863,40 @@ export async function sendMessageForSession(
         lastActivity > 0 &&
         now - lastActivity > config.sendReloadIdleMs;
 
-      try {
-        // Update last activity
+      const executeSendFlow = async (label, forceRefresh) => {
+        const activeSession = await ensureSessionActive(sessionId);
         touchSession(sessionId);
-
-        // Run automation
         const result = await withTimeout(
-          sendMessage(session.page, {
+          sendMessage(activeSession.page, {
             extension,
             phoneNumber,
             message,
             sessionId,
-            cUser: session.cUser || null,
-            twofaSecret: session.twofaSecret || null,
-            forceInitialRefresh,
+            cUser: activeSession.cUser || null,
+            twofaSecret: activeSession.twofaSecret || null,
+            forceInitialRefresh: forceRefresh,
             useReplyFlow,
             includeSuccessScreenshot,
             requestId,
           }),
           config.flowTimeoutMs,
-          'Send flow'
+          label
         );
-        markSessionActive(sessionId);
-        return { ok: true, ...(result || {}) };
-      } catch (error) {
-        if (isCaptchaRequiredError(error)) {
-          markSessionNeedsManualAction(sessionId, error, 'send');
-          throw error;
-        }
-        if (isRecoverableCrash(error)) {
-          try {
-            await recreateSessionFromMemory(sessionId);
-            const recreated = getSession(sessionId);
-            recreated.lastActivity = Date.now();
-            const result = await withTimeout(
-              sendMessage(recreated.page, {
-                extension,
-                phoneNumber,
-                message,
-                sessionId,
-                cUser: recreated.cUser || null,
-                twofaSecret: recreated.twofaSecret || null,
-                forceInitialRefresh: true,
-                useReplyFlow,
-                includeSuccessScreenshot,
-                requestId,
-              }),
-              config.flowTimeoutMs,
-              'Send flow (retry)'
-            );
-            markSessionActive(sessionId);
-            return { ok: true, retried: true, ...(result || {}) };
-          } catch (retryError) {
-            if (isCaptchaRequiredError(retryError)) {
-              markSessionNeedsManualAction(sessionId, retryError, 'send_retry');
-              throw retryError;
-            }
-            await suspendUnhealthySession(sessionId, 'send_retry_failed');
-            throw new BrowserCrashError(`Browser crashed for session ${sessionId}: ${retryError.message}`);
-          }
-        }
-        await suspendUnhealthySession(sessionId, 'send_flow_failed');
-        throw error;
-      }
+        return result || {};
+      };
+
+      const result = await runRecoverableSessionFlow({
+        sessionId,
+        flowName: 'send',
+        manualActionFlow: 'send',
+        restrictedFlow: 'send',
+        failureSuspendReason: 'send_flow_failed',
+        retryFailureSuspendReason: 'send_retry_failed',
+        initialTask: () => executeSendFlow('Send flow', forceInitialRefresh),
+        retryTask: (attempt) => executeSendFlow(`Send flow (recovery ${attempt})`, true),
+      });
+      markSessionActive(sessionId);
+      return { ok: true, ...(result || {}) };
     })
   );
 }
@@ -1428,55 +1904,36 @@ export async function sendMessageForSession(
 export async function checkSessionForSession(sessionId, { requestId = null } = {}) {
   return withGlobalSendLock(() =>
     withSessionLock(sessionId, async () => {
-      const session = await ensureSessionActive(sessionId);
-      try {
+      throwIfSessionRestricted(sessionId, 'check_cached');
+      await ensureSessionActive(sessionId);
+      const executeCheckFlow = async (label) => {
+        const activeSession = await ensureSessionActive(sessionId);
         touchSession(sessionId);
         const result = await withTimeout(
-          checkSessionFlow(session.page, {
+          checkSessionFlow(activeSession.page, {
             sessionId,
-            cUser: session.cUser || null,
-            twofaSecret: session.twofaSecret || null,
+            cUser: activeSession.cUser || null,
+            twofaSecret: activeSession.twofaSecret || null,
             requestId,
           }),
           config.flowTimeoutMs,
-          'Check flow'
+          label
         );
-        markSessionActive(sessionId);
-        return { ok: true, ...(result || {}) };
-      } catch (error) {
-        if (isCaptchaRequiredError(error)) {
-          markSessionNeedsManualAction(sessionId, error, 'check');
-          throw error;
-        }
-        if (isRecoverableCrash(error)) {
-          try {
-            await recreateSessionFromMemory(sessionId);
-            const recreated = getSession(sessionId);
-            recreated.lastActivity = Date.now();
-            const result = await withTimeout(
-              checkSessionFlow(recreated.page, {
-                sessionId,
-                cUser: recreated.cUser || null,
-                twofaSecret: recreated.twofaSecret || null,
-                requestId,
-              }),
-              config.flowTimeoutMs,
-              'Check flow (retry)'
-            );
-            markSessionActive(sessionId);
-            return { ok: true, retried: true, ...(result || {}) };
-          } catch (retryError) {
-            if (isCaptchaRequiredError(retryError)) {
-              markSessionNeedsManualAction(sessionId, retryError, 'check_retry');
-              throw retryError;
-            }
-            await suspendUnhealthySession(sessionId, 'check_retry_failed');
-            throw new BrowserCrashError(`Browser crashed for session ${sessionId}: ${retryError.message}`);
-          }
-        }
-        await suspendUnhealthySession(sessionId, 'check_flow_failed');
-        throw error;
-      }
+        return result || {};
+      };
+
+      const result = await runRecoverableSessionFlow({
+        sessionId,
+        flowName: 'check',
+        manualActionFlow: 'check',
+        restrictedFlow: 'check',
+        failureSuspendReason: 'check_flow_failed',
+        retryFailureSuspendReason: 'check_retry_failed',
+        initialTask: () => executeCheckFlow('Check flow'),
+        retryTask: (attempt) => executeCheckFlow(`Check flow (recovery ${attempt})`),
+      });
+      markSessionActive(sessionId);
+      return { ok: true, ...(result || {}) };
     })
   );
 }
@@ -1511,13 +1968,16 @@ export function getSessionInfo(sessionId) {
   if (!session) {
     return null;
   }
+  hydrateStoredRestrictedState(sessionId, session);
   return {
     sessionId,
     createdAt: session.createdAt,
     lastActivity: session.lastActivity,
+    suspendedAt: session.suspendedAt || null,
     ipAddress: session.ipAddress || null,
     cUser: session.cUser || null,
     status: getEffectiveSessionStatus(session),
+    liveBrowser: hasLiveBrowser(session),
     manualAction: session.manualAction || null,
   };
 }

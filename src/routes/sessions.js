@@ -18,18 +18,26 @@ import {
 } from '../services/sessionManager.js';
 import { buildAutomationErrorBody } from '../services/debugArtifacts.js';
 import { normalizeRequestId } from '../services/automation.js';
+import { enqueueSessionFlowJob, serializeSessionFlowJob } from '../services/sessionFlowQueue.js';
 import { InvalidInputError, SessionNotFoundError, AutomationError } from '../errors.js';
+import { buildJsonErrorBody } from '../utils/apiErrors.js';
 
 function getAutomationErrorCode(error) {
   const message = String(error?.message || '').toLowerCase();
   const type = String(error?.details?.type || '').toLowerCase();
-  if (message.includes('account restricted')) return 'account_restricted';
+  if (type === 'account_restricted' || message.includes('account restricted')) return 'account_restricted';
   if (type === 'captcha_required' || message.includes('captcha checkpoint')) return 'captcha_required';
   if (type === 'need_new_cookies' || message.includes('need new cookies')) return 'need_new_cookies';
   return 'automation_error';
 }
 
 const router = express.Router();
+
+function toBoolean(value) {
+  if (value === true) return true;
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes';
+}
 
 /**
  * GET /api/sessions
@@ -68,10 +76,7 @@ router.get('/:sessionId', async (req, res, next) => {
     });
   } catch (error) {
     if (error instanceof SessionNotFoundError) {
-      return res.status(404).json({
-        ok: false,
-        error: error.message,
-      });
+      return res.status(404).json(buildJsonErrorBody(error, 'Session not found'));
     }
     next(error);
   }
@@ -104,12 +109,12 @@ router.get('/:sessionId/captcha-image', async (req, res, next) => {
     return res.sendFile(image.path);
   } catch (error) {
     if (error instanceof SessionNotFoundError) {
-      return res.status(404).json({
-        ok: false,
-        error: error.message,
-        errorCode: 'session_not_found',
-        sessionId,
-      });
+      return res.status(404).json(
+        buildJsonErrorBody(error, 'Session not found', {
+          errorCode: 'session_not_found',
+          sessionId,
+        })
+      );
     }
     if (String(error?.code || '') === 'ENOENT') {
       return res.status(404).json({
@@ -129,7 +134,7 @@ router.get('/:sessionId/captcha-image', async (req, res, next) => {
  */
 router.post('/', async (req, res, next) => {
   try {
-    const { cookies, proxy, twofaSecret } = req.body || {};
+    const { cookies, proxy, twofaSecret, async, requestId, context, webhookUrl } = req.body || {};
 
     const cookiesIsString = typeof cookies === 'string';
     const cookiesIsArray = Array.isArray(cookies);
@@ -159,6 +164,28 @@ router.post('/', async (req, res, next) => {
       );
     }
 
+    const asyncMode = toBoolean(req.query?.async) || toBoolean(async);
+    const normalizedRequestId = normalizeRequestId('create-session', requestId);
+    if (asyncMode) {
+      const { job, created } = enqueueSessionFlowJob({
+        requestId: normalizedRequestId,
+        jobType: 'create_session',
+        payload: {
+          cookies,
+          proxy: proxyConfig,
+          twofaSecret,
+          context: context && typeof context === 'object' && !Array.isArray(context) ? context : null,
+        },
+        webhookUrl: webhookUrl ? String(webhookUrl).trim() : null,
+      });
+      return res.status(202).json({
+        ok: true,
+        accepted: true,
+        created,
+        job: serializeSessionFlowJob(job),
+      });
+    }
+
     const result = await createSession(cookies, null, null, proxyConfig, { twofaSecret });
 
     res.status(201).json({
@@ -170,11 +197,14 @@ router.post('/', async (req, res, next) => {
     });
   } catch (error) {
     if (error instanceof InvalidInputError) {
-      return res.status(400).json({
-        ok: false,
-        error: error.message,
-        errorCode: 'invalid_input',
-      });
+      return res.status(400).json(
+        buildJsonErrorBody(error, 'Invalid input', {
+          errorCode: 'invalid_input',
+        })
+      );
+    }
+    if (error instanceof AutomationError) {
+      return res.status(500).json(await buildAutomationErrorBody(error, getAutomationErrorCode));
     }
     next(error);
   }
@@ -195,12 +225,12 @@ router.delete('/:sessionId', async (req, res, next) => {
     });
   } catch (error) {
     if (error instanceof SessionNotFoundError) {
-      return res.status(404).json({
-        ok: false,
-        error: error.message,
-        errorCode: 'session_not_found',
-        sessionId,
-      });
+      return res.status(404).json(
+        buildJsonErrorBody(error, 'Session not found', {
+          errorCode: 'session_not_found',
+          sessionId,
+        })
+      );
     }
     next(error);
   }
@@ -214,6 +244,27 @@ router.post('/:sessionId/check', async (req, res, next) => {
   const { sessionId } = req.params;
   const requestId = normalizeRequestId(sessionId, req.body?.requestId);
   try {
+    const asyncMode = toBoolean(req.query?.async) || toBoolean(req.body?.async);
+    if (asyncMode) {
+      const { job, created } = enqueueSessionFlowJob({
+        requestId,
+        jobType: 'check_session',
+        targetSessionId: sessionId,
+        payload: {
+          context: req.body?.context && typeof req.body.context === 'object' && !Array.isArray(req.body.context)
+            ? req.body.context
+            : null,
+        },
+        webhookUrl: req.body?.webhookUrl ? String(req.body.webhookUrl).trim() : null,
+      });
+      return res.status(202).json({
+        ok: true,
+        accepted: true,
+        created,
+        job: serializeSessionFlowJob(job),
+      });
+    }
+
     const result = await checkSessionForSession(sessionId, { requestId });
     res.json({
       ok: true,
@@ -222,19 +273,19 @@ router.post('/:sessionId/check', async (req, res, next) => {
     });
   } catch (error) {
     if (error instanceof SessionNotFoundError) {
-      return res.status(404).json({
-        ok: false,
-        error: error.message,
-        errorCode: 'session_not_found',
-        sessionId,
-      });
+      return res.status(404).json(
+        buildJsonErrorBody(error, 'Session not found', {
+          errorCode: 'session_not_found',
+          sessionId,
+        })
+      );
     }
     if (error instanceof InvalidInputError) {
-      return res.status(400).json({
-        ok: false,
-        error: error.message,
-        errorCode: 'invalid_input',
-      });
+      return res.status(400).json(
+        buildJsonErrorBody(error, 'Invalid input', {
+          errorCode: 'invalid_input',
+        })
+      );
     }
     if (error instanceof AutomationError) {
       return res.status(500).json(await buildAutomationErrorBody(error, getAutomationErrorCode, requestId));
@@ -251,6 +302,27 @@ router.post('/:sessionId/resume-check', async (req, res, next) => {
   const { sessionId } = req.params;
   const requestId = normalizeRequestId(sessionId, req.body?.requestId);
   try {
+    const asyncMode = toBoolean(req.query?.async) || toBoolean(req.body?.async);
+    if (asyncMode) {
+      const { job, created } = enqueueSessionFlowJob({
+        requestId,
+        jobType: 'resume_check',
+        targetSessionId: sessionId,
+        payload: {
+          context: req.body?.context && typeof req.body.context === 'object' && !Array.isArray(req.body.context)
+            ? req.body.context
+            : null,
+        },
+        webhookUrl: req.body?.webhookUrl ? String(req.body.webhookUrl).trim() : null,
+      });
+      return res.status(202).json({
+        ok: true,
+        accepted: true,
+        created,
+        job: serializeSessionFlowJob(job),
+      });
+    }
+
     const result = await checkSessionForSession(sessionId, { requestId });
     const session = getSessionInfo(sessionId);
     res.json({
@@ -262,19 +334,19 @@ router.post('/:sessionId/resume-check', async (req, res, next) => {
     });
   } catch (error) {
     if (error instanceof SessionNotFoundError) {
-      return res.status(404).json({
-        ok: false,
-        error: error.message,
-        errorCode: 'session_not_found',
-        sessionId,
-      });
+      return res.status(404).json(
+        buildJsonErrorBody(error, 'Session not found', {
+          errorCode: 'session_not_found',
+          sessionId,
+        })
+      );
     }
     if (error instanceof InvalidInputError) {
-      return res.status(400).json({
-        ok: false,
-        error: error.message,
-        errorCode: 'invalid_input',
-      });
+      return res.status(400).json(
+        buildJsonErrorBody(error, 'Invalid input', {
+          errorCode: 'invalid_input',
+        })
+      );
     }
     if (error instanceof AutomationError) {
       return res.status(500).json(await buildAutomationErrorBody(error, getAutomationErrorCode, requestId));
@@ -290,13 +362,61 @@ router.post('/:sessionId/resume-check', async (req, res, next) => {
 router.put('/:sessionId/cookies', async (req, res, next) => {
   const { sessionId } = req.params;
   try {
-    const { cookies, twofaSecret } = req.body || {};
+    const {
+      cookies,
+      twofaSecret,
+      proxy,
+      async,
+      requestId,
+      context,
+      webhookUrl,
+      fallbackCreateOnNotFound,
+    } = req.body || {};
     const cookiesIsString = typeof cookies === 'string';
     const cookiesIsArray = Array.isArray(cookies);
     if (!cookies || (!cookiesIsString && !cookiesIsArray)) {
       return res.status(400).json({
         ok: false,
         error: 'Invalid cookies format. Expected a string or array.',
+      });
+    }
+
+    let proxyConfig = null;
+    if (proxy) {
+      if (typeof proxy !== 'object' || !proxy.server) {
+        return res.status(400).json({
+          ok: false,
+          error: 'Invalid proxy format. Expected {server: string, username?: string, password?: string}.',
+        });
+      }
+      proxyConfig = {
+        server: proxy.server,
+        username: proxy.username || undefined,
+        password: proxy.password || undefined,
+      };
+    }
+
+    const asyncMode = toBoolean(req.query?.async) || toBoolean(async);
+    const normalizedRequestId = normalizeRequestId(sessionId, requestId);
+    if (asyncMode) {
+      const { job, created } = enqueueSessionFlowJob({
+        requestId: normalizedRequestId,
+        jobType: 'update_session_cookies',
+        targetSessionId: sessionId,
+        payload: {
+          cookies,
+          twofaSecret,
+          proxy: proxyConfig,
+          fallbackCreateOnNotFound: toBoolean(fallbackCreateOnNotFound),
+          context: context && typeof context === 'object' && !Array.isArray(context) ? context : null,
+        },
+        webhookUrl: webhookUrl ? String(webhookUrl).trim() : null,
+      });
+      return res.status(202).json({
+        ok: true,
+        accepted: true,
+        created,
+        job: serializeSessionFlowJob(job),
       });
     }
 
@@ -307,19 +427,22 @@ router.put('/:sessionId/cookies', async (req, res, next) => {
     });
   } catch (error) {
     if (error instanceof SessionNotFoundError) {
-      return res.status(404).json({
-        ok: false,
-        error: error.message,
-        errorCode: 'session_not_found',
-        sessionId,
-      });
+      return res.status(404).json(
+        buildJsonErrorBody(error, 'Session not found', {
+          errorCode: 'session_not_found',
+          sessionId,
+        })
+      );
     }
     if (error instanceof InvalidInputError) {
-      return res.status(400).json({
-        ok: false,
-        error: error.message,
-        errorCode: 'invalid_input',
-      });
+      return res.status(400).json(
+        buildJsonErrorBody(error, 'Invalid input', {
+          errorCode: 'invalid_input',
+        })
+      );
+    }
+    if (error instanceof AutomationError) {
+      return res.status(500).json(await buildAutomationErrorBody(error, getAutomationErrorCode));
     }
     next(error);
   }
@@ -357,19 +480,19 @@ router.put('/:sessionId/proxy', async (req, res, next) => {
     });
   } catch (error) {
     if (error instanceof SessionNotFoundError) {
-      return res.status(404).json({
-        ok: false,
-        error: error.message,
-        errorCode: 'session_not_found',
-        sessionId,
-      });
+      return res.status(404).json(
+        buildJsonErrorBody(error, 'Session not found', {
+          errorCode: 'session_not_found',
+          sessionId,
+        })
+      );
     }
     if (error instanceof InvalidInputError) {
-      return res.status(400).json({
-        ok: false,
-        error: error.message,
-        errorCode: 'invalid_input',
-      });
+      return res.status(400).json(
+        buildJsonErrorBody(error, 'Invalid input', {
+          errorCode: 'invalid_input',
+        })
+      );
     }
     next(error);
   }

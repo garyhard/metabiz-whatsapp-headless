@@ -24,8 +24,8 @@ const SAVE_LOGIN_INFO_HINTS = normalizeList([
   'simpan info masuk',
 ]);
 const NOT_NOW_LABELS = normalizeList(['not now', 'nanti', 'tidak sekarang', 'jangan sekarang', 'skip', 'lewati']);
-const INBOX_DISMISS_LABELS = normalizeList(['dismiss', 'tutup', 'close']);
-const CONNECT_INSTAGRAM_HINTS = normalizeList(['connect to instagram']);
+const INBOX_DISMISS_LABELS = normalizeList(['dismiss', 'tutup', 'close', 'abaikan']);
+const CONNECT_INSTAGRAM_HINTS = normalizeList(['connect to instagram', 'hubungkan ke instagram']);
 const TWO_FACTOR_TEXT_HINTS = normalizeList([
   'try another way',
   'other ways to authenticate',
@@ -42,6 +42,15 @@ const TWO_FACTOR_TEXT_HINTS = normalizeList([
   "confirm you're human",
   'confirm you’re human',
   'confirm you are human',
+  'coba cara lain',
+  'cara lain untuk mengautentikasi',
+  'periksa notifikasi anda di perangkat lain',
+  'menunggu persetujuan',
+  'aplikasi autentikasi',
+  'konfirmasikan bahwa anda adalah manusia',
+  'konfirmasikan bahwa anda adalah manusia untuk menggunakan akun anda',
+  'manusia untuk menggunakan akun anda',
+  'manusia untuk menggunakan akun ini',
 ]);
 const TRY_ANOTHER_WAY_LABELS = normalizeList([
   'try another way',
@@ -59,15 +68,23 @@ const CONTINUE_LABELS = normalizeList([
   'selanjutnya',
   'berikutnya',
 ]);
-const TRUST_DEVICE_LABELS = normalizeList(['trust this device']);
-const ALWAYS_CONFIRM_LABELS = normalizeList(["always confirm it's me", 'always confirm it’s me']);
+const TRUST_DEVICE_LABELS = normalizeList(['trust this device', 'percayai perangkat ini']);
+const ALWAYS_CONFIRM_LABELS = normalizeList([
+  "always confirm it's me",
+  'always confirm it’s me',
+  'selalu konfirmasikan ini saya',
+  'selalu konfirmasi ini saya',
+]);
 const CODE_HINTS = normalizeList([
   'code',
   'kode',
   'otp',
   'security',
   'verification',
+  'verifikasi',
+  'keamanan',
   'authenticator',
+  'autentikasi',
   'approvals_code',
 ]);
 const AUTH_APP_LABELS = normalizeList([
@@ -93,21 +110,58 @@ const HUMAN_CONFIRM_HINTS = normalizeList([
   'confirm you are human',
   'human to use your account',
   'human to use this account',
+  'konfirmasikan anda manusia',
+  'konfirmasikan bahwa anda manusia',
+  'konfirmasikan bahwa anda adalah manusia',
+  'konfirmasikan bahwa anda adalah manusia untuk menggunakan akun anda',
+  'manusia untuk menggunakan akun anda',
+  'manusia untuk menggunakan akun ini',
+  'pastikan anda manusia',
+  'kami perlu memastikan anda manusia',
 ]);
 const CAPTCHA_TEXT_HINTS = normalizeList([
   'enter the text from the image',
+  'enter the code from the image',
   "can't read this text?",
   'hear this code',
   'confirm you\'re human',
   'confirm you’re human',
   'security check',
   'captcha',
+  'masukkan teks dari gambar',
+  'masukkan kode dari gambar',
+  'masukkan karakter dari gambar',
+  'tidak bisa membaca teks ini?',
+  'tak bisa membaca teks ini?',
+  'dengarkan kode ini',
+  'konfirmasikan anda manusia',
+  'konfirmasikan bahwa anda manusia',
+  'pemeriksaan keamanan',
+  'cek keamanan',
+]);
+const CAPTCHA_DESCRIPTION_HINTS = normalizeList([
+  'enter the text from the image',
+  'enter the code from the image',
+  'masukkan teks dari gambar',
+  'masukkan kode dari gambar',
+  'masukkan karakter dari gambar',
+]);
+const CAPTCHA_HELPER_HINTS = normalizeList([
+  "can't read this text?",
+  'hear this code',
+  'tidak bisa membaca teks ini?',
+  'tak bisa membaca teks ini?',
+  'dengarkan kode ini',
 ]);
 const CAPTCHA_MISMATCH_TEXT_HINTS = normalizeList([
   "the text you entered didn't match the security check. please try again.",
   'the text you entered didn’t match the security check. please try again.',
   "didn't match the security check",
   'didn’t match the security check',
+  'teks yang anda masukkan tidak cocok dengan pemeriksaan keamanan. silakan coba lagi.',
+  'teks yang anda masukkan tidak cocok dengan cek keamanan. silakan coba lagi.',
+  'tidak cocok dengan pemeriksaan keamanan',
+  'tidak cocok dengan cek keamanan',
 ]);
 const CAPTCHA_AUTO_SUBMIT_MAX_ATTEMPTS = 3;
 const NEED_NEW_COOKIES_TEXT_HINTS = normalizeList([
@@ -117,6 +171,48 @@ const NEED_NEW_COOKIES_TEXT_HINTS = normalizeList([
   "we need more info to make sure you're human",
   'we need more info to make sure you’re human',
   'start video selfie',
+  'konfirmasikan identitas anda',
+  'konfirmasi identitas anda',
+  'pastikan anda orang sungguhan dengan video selfie',
+  'kami memerlukan info lebih lanjut untuk memastikan anda manusia',
+  'mulai video selfie',
+]);
+const NEED_NEW_COOKIES_VIDEO_HINTS = normalizeList([
+  "confirm you're a real person with a video selfie",
+  'confirm you’re a real person with a video selfie',
+  'start video selfie',
+  'pastikan anda orang sungguhan dengan video selfie',
+  'mulai video selfie',
+]);
+const NEED_NEW_COOKIES_IDENTITY_HINTS = normalizeList([
+  'confirm your identity',
+  "we need more info to make sure you're human",
+  'we need more info to make sure you’re human',
+  'konfirmasikan identitas anda',
+  'konfirmasi identitas anda',
+  'kami memerlukan info lebih lanjut untuk memastikan anda manusia',
+]);
+const OPEN_WHATSAPP_MODAL_LABELS = normalizeList([
+  'send a message on whatsapp',
+  'kirim pesan di whatsapp',
+  'kirim pesan lewat whatsapp',
+]);
+const NEW_WHATSAPP_NUMBER_LABELS = normalizeList([
+  'new whatsapp number',
+  'nomor whatsapp baru',
+  'nomor baru whatsapp',
+]);
+const SEND_MESSAGE_LABELS = normalizeList([
+  'send message',
+  'kirim pesan',
+]);
+const REPLY_SEND_LABELS = normalizeList([
+  'send',
+  'submit',
+  'kirim',
+  'kirimkan',
+  'balas',
+  'kirim balasan',
 ]);
 
 async function dismissSaveLoginInfo(page, label = 'Automation') {
@@ -156,24 +252,20 @@ async function dismissInboxBlockingPrompts(page, label = 'Automation') {
 
     // "Connect to Instagram" card in inbox left pane.
     if (CONNECT_INSTAGRAM_HINTS.some((hint) => bodyText.includes(hint))) {
-      const notNowBtn = await findByText(page, {
-        text: 'Not now',
+      const dismissedConnectInstagram = await clickFirstMatchingText(page, NOT_NOW_LABELS, {
         selector: '[role="button"],button,a,[role="link"]',
       });
-      if (notNowBtn) {
-        await clickElement(page, notNowBtn, `${label}: dismiss connect instagram`);
+      if (dismissedConnectInstagram) {
         await sleep(350);
         dismissed = true;
       }
     }
 
     // Security notice at top of list that has a "Dismiss" link.
-    const dismissLink = await findByText(page, {
-      text: 'Dismiss',
+    const dismissedNotice = await clickFirstMatchingText(page, INBOX_DISMISS_LABELS, {
       selector: 'a,[role="link"],[role="button"],button',
     });
-    if (dismissLink) {
-      await clickElement(page, dismissLink, `${label}: dismiss notice`);
+    if (dismissedNotice) {
       await sleep(250);
       dismissed = true;
     }
@@ -244,9 +336,42 @@ function buildDebugImagePath(dirPath, label, cUser = 'unknown') {
   };
 }
 
+async function appendCaptchaDebugLog(entry) {
+  try {
+    await fs.mkdir(CAPTCHA_DIR, { recursive: true });
+    const logPath = path.join(CAPTCHA_DIR, '_debug.jsonl');
+    const payload = {
+      timestamp: new Date().toISOString(),
+      ...entry,
+    };
+    await fs.appendFile(logPath, `${JSON.stringify(payload)}\n`);
+  } catch {
+    // Ignore captcha debug log write failures
+  }
+}
+
+async function writeCaptchaArtifactMetadata(imagePath, metadata = {}) {
+  if (!imagePath) return null;
+  try {
+    const metaPath = `${imagePath}.json`;
+    await fs.writeFile(metaPath, JSON.stringify(metadata, null, 2));
+    await appendCaptchaDebugLog({
+      type: 'captcha_artifact',
+      imagePath,
+      metaPath,
+      ...metadata,
+    });
+    return metaPath;
+  } catch {
+    return null;
+  }
+}
+
 async function getCaptchaClip(page) {
   try {
-    return await page.evaluate((captchaHints, continueLabels) => {
+    return await page.evaluate((captchaHints, continueLabels, descriptionHints, helperHints) => {
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
       const isVisible = (el) => {
         if (!el) return false;
         const rect = el.getBoundingClientRect();
@@ -254,6 +379,17 @@ async function getCaptchaClip(page) {
         const style = window.getComputedStyle(el);
         if (!style) return false;
         return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+      };
+
+      const isTextEntryCandidate = (el) => {
+        if (!isVisible(el)) return false;
+        const tag = String(el.tagName || '').toLowerCase();
+        if (tag === 'textarea') return true;
+        if (tag === 'input') {
+          const type = String(el.getAttribute('type') || 'text').toLowerCase();
+          return ['text', 'search', 'tel', 'email', 'number', ''].includes(type);
+        }
+        return String(el.getAttribute('contenteditable') || '').toLowerCase() === 'true';
       };
 
       const rectOf = (el) => {
@@ -282,28 +418,82 @@ async function getCaptchaClip(page) {
         };
       };
 
-      const bodyText = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase();
-      const hasCaptchaHint = captchaHints.some((hint) => bodyText.includes(hint));
-      if (!hasCaptchaHint) return null;
+      const expandRect = (rect, padding = 8) => {
+        if (!rect) return null;
+        return {
+          x: Math.max(0, rect.x - padding),
+          y: Math.max(0, rect.y - padding),
+          width: Math.max(1, rect.width + padding * 2),
+          height: Math.max(1, rect.height + padding * 2),
+        };
+      };
 
-      const input = Array.from(document.querySelectorAll('input')).find((el) => {
-        const type = String(el.getAttribute('type') || 'text').toLowerCase();
-        return ['text', 'search', 'tel', ''].includes(type) && isVisible(el);
-      }) || null;
+      const areaOf = (rect) => {
+        if (!rect) return 0;
+        return rect.width * rect.height;
+      };
 
-      const findNearestVisibleImage = () => {
-        let current = input?.parentElement || null;
+      const containedIn = (rect, container, tolerance = 12) => {
+        if (!rect || !container) return false;
+        return (
+          rect.x >= container.x - tolerance &&
+          rect.y >= container.y - tolerance &&
+          rect.x + rect.width <= container.x + container.width + tolerance &&
+          rect.y + rect.height <= container.y + container.height + tolerance
+        );
+      };
+
+      const findVisibleTextElement = (hints, root = document) => {
+        const candidates = Array.from(root.querySelectorAll('h1,h2,h3,h4,p,div,span,label,a,button,strong,b'));
+        let best = null;
+        for (const el of candidates) {
+          if (!isVisible(el)) continue;
+          const text = normalize(el.textContent || el.innerText || '');
+          if (!text) continue;
+          if (!hints.some((hint) => text.includes(hint))) continue;
+          const rect = rectOf(el);
+          if (!rect) continue;
+          const area = areaOf(rect);
+          if (!best || area < best.area) {
+            best = { el, rect, area };
+          }
+        }
+        return best;
+      };
+
+      const findContainerFor = (seed, allSeeds) => {
+        let current = seed?.parentElement || null;
         while (current) {
-          const nestedImage = Array.from(current.querySelectorAll('img')).find((el) => isVisible(el));
-          if (nestedImage) {
-            return nestedImage;
+          const rect = rectOf(current);
+          if (rect && rect.width >= 220 && rect.height >= 120 && rect.width <= window.innerWidth * 0.95) {
+            const containedSeeds = allSeeds.filter((node) => node && current.contains(node)).length;
+            if (containedSeeds >= Math.min(2, allSeeds.length)) {
+              return { el: current, rect };
+            }
           }
           current = current.parentElement;
         }
-        return Array.from(document.querySelectorAll('img')).find((el) => isVisible(el)) || null;
+        return null;
       };
 
-      const challengeImage = findNearestVisibleImage();
+      const isVisualCaptchaCandidate = (el) => {
+        if (!isVisible(el)) return false;
+        const rect = rectOf(el);
+        if (!rect || rect.width < 60 || rect.height < 20) return false;
+        const tag = String(el.tagName || '').toLowerCase();
+        if (['img', 'canvas', 'svg', 'iframe'].includes(tag)) return true;
+        if (normalize(el.getAttribute('role') || '') === 'img') return true;
+        const style = window.getComputedStyle(el);
+        return Boolean(style?.backgroundImage && style.backgroundImage !== 'none');
+      };
+
+      const bodyText = normalize(document.body?.innerText || '');
+      const hasCaptchaHint = captchaHints.some((hint) => bodyText.includes(hint));
+
+      const input = Array.from(document.querySelectorAll('input,textarea,[contenteditable="true"]'))
+        .find((el) => isTextEntryCandidate(el)) || null;
+      const descriptionMatch = findVisibleTextElement(descriptionHints);
+      const helperMatch = findVisibleTextElement(helperHints);
 
       const continueButton = Array.from(document.querySelectorAll('[role="button"],button,a,[role="link"]')).find((el) => {
         if (!isVisible(el)) return false;
@@ -314,27 +504,183 @@ async function getCaptchaClip(page) {
         return continueLabels.some((continueLabel) => label === continueLabel || label.includes(continueLabel));
       }) || null;
 
-      let container = null;
-      let node = input?.parentElement || challengeImage?.parentElement || null;
-      while (node) {
-        const rect = rectOf(node);
-        if (rect && rect.width >= 220 && rect.height >= 120 && rect.width <= window.innerWidth * 0.95) {
-          const containsInput = !input || node.contains(input);
-          const containsImage = !challengeImage || node.contains(challengeImage);
-          if (containsInput && containsImage) {
-            container = node;
-            if (!continueButton || node.contains(continueButton)) {
-              break;
-            }
-          }
+      const seedNodes = [input, descriptionMatch?.el || null, helperMatch?.el || null, continueButton].filter(Boolean);
+      const container =
+        findContainerFor(input, seedNodes) ||
+        findContainerFor(descriptionMatch?.el || null, seedNodes) ||
+        findContainerFor(helperMatch?.el || null, seedNodes) ||
+        null;
+
+      const containerRect = container?.rect || null;
+      const inputRect = rectOf(input);
+      const descriptionRect = descriptionMatch?.rect || null;
+      const helperRect = helperMatch?.rect || null;
+      const continueRect = rectOf(continueButton);
+
+      const challengeVisual = Array.from((container?.el || document.body).querySelectorAll('img,canvas,svg,iframe,[role="img"],[style*="background-image"]'))
+        .filter((el) => isVisualCaptchaCandidate(el))
+        .map((el) => ({ el, rect: rectOf(el) }))
+        .filter(({ rect }) => rect)
+        .filter(({ rect }) => !containerRect || containedIn(rect, containerRect))
+        .filter(({ rect }) => !inputRect || rect.y + rect.height <= inputRect.y + 8)
+        .filter(({ rect }) => !descriptionRect || rect.y + rect.height >= descriptionRect.y + Math.min(descriptionRect.height, 24))
+        .sort((a, b) => areaOf(b.rect) - areaOf(a.rect))[0]?.rect || null;
+
+      let clip = challengeVisual ? expandRect(challengeVisual, 8) : null;
+
+      if (!clip) {
+        const fallbackTop = descriptionRect
+          ? descriptionRect.y + descriptionRect.height + 8
+          : containerRect
+            ? containerRect.y + 48
+            : null;
+        const fallbackBottom = helperRect
+          ? helperRect.y - 8
+          : inputRect
+            ? inputRect.y - 8
+            : continueRect
+              ? continueRect.y - 8
+              : null;
+        const fallbackLeft = containerRect
+          ? containerRect.x + 24
+          : inputRect
+            ? inputRect.x
+            : null;
+        const fallbackRight = containerRect
+          ? containerRect.x + containerRect.width - 24
+          : inputRect
+            ? inputRect.x + inputRect.width
+            : null;
+
+        if (
+          fallbackTop !== null &&
+          fallbackBottom !== null &&
+          fallbackLeft !== null &&
+          fallbackRight !== null &&
+          fallbackBottom > fallbackTop &&
+          fallbackRight > fallbackLeft
+        ) {
+          clip = {
+            x: Math.max(0, fallbackLeft),
+            y: Math.max(0, fallbackTop),
+            width: Math.max(1, fallbackRight - fallbackLeft),
+            height: Math.max(1, fallbackBottom - fallbackTop),
+          };
         }
-        node = node.parentElement;
       }
 
-      let clip = rectOf(container);
       if (!clip) {
-        clip = mergeRects([rectOf(challengeImage), rectOf(input), rectOf(continueButton)]);
+        const containerImageLike = container?.el
+          ? Array.from(container.el.querySelectorAll('img,canvas,svg,iframe,[role="img"],[style*="background-image"]'))
+            .filter((el) => isVisualCaptchaCandidate(el))
+            .map((el) => rectOf(el))
+          : [];
+        clip = mergeRects([
+          ...containerImageLike,
+          descriptionRect,
+          helperRect,
+          inputRect,
+        ]);
       }
+
+      if (!clip && inputRect) {
+        const inferredBottom = helperRect
+          ? helperRect.y - 6
+          : inputRect.y - 12;
+        const inferredHeight = helperRect
+          ? Math.max(56, Math.min(120, Math.round(inputRect.height * 1.6)))
+          : Math.max(72, Math.min(132, Math.round(inputRect.height * 2.2)));
+        const inferredTop = Math.max(0, inferredBottom - inferredHeight);
+        if (inferredBottom > inferredTop) {
+          clip = {
+            x: Math.max(0, inputRect.x),
+            y: inferredTop,
+            width: Math.max(1, inputRect.width),
+            height: Math.max(1, inferredBottom - inferredTop),
+          };
+        }
+      }
+
+      if (!clip && containerRect) {
+        const bandTop = Math.max(0, containerRect.y + Math.round(containerRect.height * 0.18));
+        const bandBottom = inputRect
+          ? Math.max(bandTop + 40, inputRect.y - 10)
+          : containerRect.y + Math.round(containerRect.height * 0.56);
+        const bandWidth = Math.max(180, Math.min(containerRect.width - 48, Math.round(containerRect.width * 0.72)));
+        if (bandBottom > bandTop && bandWidth > 0) {
+          clip = {
+            x: Math.max(0, containerRect.x + 24),
+            y: bandTop,
+            width: Math.max(1, bandWidth),
+            height: Math.max(1, bandBottom - bandTop),
+          };
+        }
+      }
+
+      if (!clip) {
+        const viewportCenterX = window.scrollX + window.innerWidth / 2;
+        const viewportCenterY = window.scrollY + window.innerHeight / 2;
+        const genericCard = Array.from(document.querySelectorAll('[role="dialog"],div,form,section,article,main'))
+          .filter((el) => isVisible(el))
+          .map((el) => {
+            const rect = rectOf(el);
+            if (!rect) return null;
+            if (rect.width < 240 || rect.height < 160) return null;
+            if (rect.width > Math.min(window.innerWidth * 0.94, 980)) return null;
+            if (rect.height > Math.min(window.innerHeight * 0.95, 900)) return null;
+            const textFields = Array.from(el.querySelectorAll('input,textarea,[contenteditable="true"]'))
+              .filter((node) => isTextEntryCandidate(node));
+            const buttons = Array.from(el.querySelectorAll('[role="button"],button,a,[role="link"]'))
+              .filter((node) => isVisible(node));
+            const textLength = normalize(el.innerText || '').length;
+            const style = window.getComputedStyle(el);
+            const hasSurface = Boolean(
+              style &&
+              (
+                (style.backgroundColor && style.backgroundColor !== 'rgba(0, 0, 0, 0)' && style.backgroundColor !== 'transparent') ||
+                style.boxShadow !== 'none' ||
+                parseFloat(style.borderWidth || '0') > 0
+              )
+            );
+            if (!hasCaptchaHint && textFields.length === 0 && buttons.length === 0) return null;
+            const centerX = rect.x + rect.width / 2;
+            const centerY = rect.y + rect.height / 2;
+            const centerDistance = Math.abs(centerX - viewportCenterX) + Math.abs(centerY - viewportCenterY);
+            const score =
+              (textFields.length ? 260 : 0) +
+              Math.min(buttons.length, 4) * 18 +
+              Math.min(textLength, 280) +
+              (hasSurface ? 100 : 0) -
+              centerDistance * 0.18 -
+              Math.abs(rect.width - 520) * 0.1;
+            return {
+              rect,
+              score,
+              fieldRect: rectOf(textFields[0] || null),
+            };
+          })
+          .filter(Boolean)
+          .sort((a, b) => b.score - a.score)[0] || null;
+
+        if (genericCard) {
+          const top = descriptionRect && containedIn(descriptionRect, genericCard.rect)
+            ? descriptionRect.y + descriptionRect.height + 8
+            : genericCard.rect.y + Math.max(28, Math.round(genericCard.rect.height * 0.18));
+          const bottom = genericCard.fieldRect && containedIn(genericCard.fieldRect, genericCard.rect)
+            ? genericCard.fieldRect.y - 8
+            : genericCard.rect.y + Math.round(genericCard.rect.height * 0.56);
+          const horizontalPadding = Math.max(18, Math.round(genericCard.rect.width * 0.06));
+          if (bottom > top && genericCard.rect.width - horizontalPadding * 2 > 80) {
+            clip = {
+              x: Math.max(0, genericCard.rect.x + horizontalPadding),
+              y: Math.max(0, top),
+              width: Math.max(1, genericCard.rect.width - horizontalPadding * 2),
+              height: Math.max(1, bottom - top),
+            };
+          }
+        }
+      }
+
       if (!clip) {
         return null;
       }
@@ -346,7 +692,370 @@ async function getCaptchaClip(page) {
         width: Math.max(1, clip.width + padding * 2),
         height: Math.max(1, clip.height + padding * 2),
       };
-    }, CAPTCHA_TEXT_HINTS, CONTINUE_LABELS);
+    }, CAPTCHA_TEXT_HINTS, CONTINUE_LABELS, CAPTCHA_DESCRIPTION_HINTS, CAPTCHA_HELPER_HINTS);
+  } catch {
+    return null;
+  }
+}
+
+async function getSimpleCaptchaClip(page) {
+  try {
+    return await page.evaluate((descriptionHints) => {
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+      const isVisible = (el) => {
+        if (!el) return false;
+        const rect = el.getBoundingClientRect();
+        if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+        const style = window.getComputedStyle(el);
+        if (!style) return false;
+        return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+      };
+
+      const isTextEntryCandidate = (el) => {
+        if (!isVisible(el)) return false;
+        const tag = String(el.tagName || '').toLowerCase();
+        if (tag === 'textarea') return true;
+        if (tag === 'input') {
+          const type = String(el.getAttribute('type') || 'text').toLowerCase();
+          return ['text', 'search', 'tel', 'email', 'number', ''].includes(type);
+        }
+        return String(el.getAttribute('contenteditable') || '').toLowerCase() === 'true';
+      };
+
+      const rectOf = (el) => {
+        if (!isVisible(el)) return null;
+        const rect = el.getBoundingClientRect();
+        return {
+          x: rect.left + window.scrollX,
+          y: rect.top + window.scrollY,
+          width: rect.width,
+          height: rect.height,
+        };
+      };
+
+      const field = Array.from(document.querySelectorAll('input,textarea,[contenteditable="true"]'))
+        .find((el) => isTextEntryCandidate(el));
+      if (!field) return null;
+
+      const fieldRect = rectOf(field);
+      if (!fieldRect) return null;
+
+      const findDescriptionRect = (root) => {
+        const candidates = Array.from((root || document).querySelectorAll('h1,h2,h3,h4,p,div,span,label,strong,b'));
+        for (const el of candidates) {
+          if (!isVisible(el)) continue;
+          const text = normalize(el.textContent || el.innerText || '');
+          if (!text) continue;
+          if (!descriptionHints.some((hint) => text.includes(hint))) continue;
+          const rect = rectOf(el);
+          if (rect) return rect;
+        }
+        return null;
+      };
+
+      let containerRect = null;
+      let containerEl = null;
+      let current = field.parentElement;
+      while (current) {
+        const rect = rectOf(current);
+        if (
+          rect &&
+          rect.width >= 240 &&
+          rect.height >= 160 &&
+          rect.width <= Math.min(window.innerWidth * 0.95, 980) &&
+          rect.height <= Math.min(window.innerHeight * 0.95, 900)
+        ) {
+          const text = normalize(current.innerText || '');
+          const buttons = Array.from(current.querySelectorAll('[role="button"],button,a,[role="link"]')).filter((el) => isVisible(el)).length;
+          if (text.length >= 20 || buttons > 0) {
+            containerRect = rect;
+            containerEl = current;
+            break;
+          }
+        }
+        current = current.parentElement;
+      }
+
+      if (!containerRect) {
+        containerRect = {
+          x: Math.max(0, fieldRect.x - 20),
+          y: Math.max(0, fieldRect.y - 170),
+          width: Math.min(window.innerWidth - Math.max(0, fieldRect.x - 20), fieldRect.width + 40),
+          height: Math.min(window.innerHeight - Math.max(0, fieldRect.y - 170), fieldRect.height + 240),
+        };
+      }
+
+      const descriptionRect = findDescriptionRect(containerEl);
+      const horizontalPadding = Math.max(18, Math.round(containerRect.width * 0.04));
+      let top = descriptionRect
+        ? descriptionRect.y + descriptionRect.height + 8
+        : containerRect.y + Math.max(42, Math.round(containerRect.height * 0.16));
+      let bottom = fieldRect.y - 10;
+
+      if (bottom <= top) {
+        top = Math.max(0, fieldRect.y - Math.max(80, Math.min(180, Math.round(containerRect.height * 0.32))));
+        bottom = fieldRect.y - 8;
+      }
+
+      if (bottom <= top) return null;
+
+      return {
+        x: Math.max(0, containerRect.x + horizontalPadding - 12),
+        y: Math.max(0, top - 12),
+        width: Math.max(1, containerRect.width - horizontalPadding * 2 + 24),
+        height: Math.max(1, bottom - top + 24),
+      };
+    }, CAPTCHA_DESCRIPTION_HINTS);
+  } catch {
+    return null;
+  }
+}
+
+async function findCaptchaChallengeElement(page) {
+  try {
+    const handle = await page.evaluateHandle((descriptionHints, helperHints, continueLabels) => {
+      const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+
+      const isVisible = (el) => {
+        if (!el) return false;
+        const rect = el.getBoundingClientRect();
+        if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+        const style = window.getComputedStyle(el);
+        if (!style) return false;
+        return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+      };
+
+      const rectOf = (el) => {
+        if (!isVisible(el)) return null;
+        const rect = el.getBoundingClientRect();
+        return {
+          x: rect.left + window.scrollX,
+          y: rect.top + window.scrollY,
+          width: rect.width,
+          height: rect.height,
+        };
+      };
+
+      const areaOf = (rect) => {
+        if (!rect) return 0;
+        return rect.width * rect.height;
+      };
+
+      const containedIn = (rect, container, tolerance = 12) => {
+        if (!rect || !container) return false;
+        return (
+          rect.x >= container.x - tolerance &&
+          rect.y >= container.y - tolerance &&
+          rect.x + rect.width <= container.x + container.width + tolerance &&
+          rect.y + rect.height <= container.y + container.height + tolerance
+        );
+      };
+
+      const isTextEntryCandidate = (el) => {
+        if (!isVisible(el)) return false;
+        const tag = String(el.tagName || '').toLowerCase();
+        if (tag === 'textarea') return true;
+        if (tag === 'input') {
+          const type = String(el.getAttribute('type') || 'text').toLowerCase();
+          return ['text', 'search', 'tel', 'email', 'number', ''].includes(type);
+        }
+        return String(el.getAttribute('contenteditable') || '').toLowerCase() === 'true';
+      };
+
+      const findVisibleTextElement = (hints, root = document) => {
+        const candidates = Array.from(root.querySelectorAll('h1,h2,h3,h4,p,div,span,label,a,button,strong,b'));
+        let best = null;
+        for (const el of candidates) {
+          if (!isVisible(el)) continue;
+          const text = normalize(el.textContent || el.innerText || '');
+          if (!text) continue;
+          if (!hints.some((hint) => text.includes(hint))) continue;
+          const rect = rectOf(el);
+          if (!rect) continue;
+          const area = areaOf(rect);
+          if (!best || area < best.area) {
+            best = { el, rect, area };
+          }
+        }
+        return best;
+      };
+
+      const findContainerFor = (seed, allSeeds) => {
+        let current = seed?.parentElement || null;
+        while (current) {
+          const rect = rectOf(current);
+          if (rect && rect.width >= 220 && rect.height >= 120 && rect.width <= window.innerWidth * 0.95) {
+            const containedSeeds = allSeeds.filter((node) => node && current.contains(node)).length;
+            if (containedSeeds >= Math.min(2, allSeeds.length)) {
+              return { el: current, rect };
+            }
+          }
+          current = current.parentElement;
+        }
+        return null;
+      };
+
+      const input = Array.from(document.querySelectorAll('input,textarea,[contenteditable="true"]'))
+        .find((el) => isTextEntryCandidate(el)) || null;
+      const descriptionMatch = findVisibleTextElement(descriptionHints);
+      const helperMatch = findVisibleTextElement(helperHints);
+      const continueButton = Array.from(document.querySelectorAll('[role="button"],button,a,[role="link"]')).find((el) => {
+        if (!isVisible(el)) return false;
+        const label = `${el.textContent || ''} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''}`
+          .replace(/\s+/g, ' ')
+          .trim()
+          .toLowerCase();
+        return continueLabels.some((continueLabel) => label === continueLabel || label.includes(continueLabel));
+      }) || null;
+
+      const seedNodes = [input, descriptionMatch?.el || null, helperMatch?.el || null, continueButton].filter(Boolean);
+      const container =
+        findContainerFor(input, seedNodes) ||
+        findContainerFor(descriptionMatch?.el || null, seedNodes) ||
+        findContainerFor(helperMatch?.el || null, seedNodes) ||
+        null;
+
+      const containerRect = container?.rect || null;
+      const inputRect = rectOf(input);
+      const descriptionRect = descriptionMatch?.rect || null;
+
+      const candidates = Array.from((container?.el || document).querySelectorAll('img,canvas,svg,iframe,[role="img"],[style*="background-image"]'))
+        .filter((el) => isVisible(el))
+        .map((el) => ({ el, rect: rectOf(el) }))
+        .filter(({ rect }) => rect && rect.width >= 60 && rect.height >= 20)
+        .filter(({ rect }) => !containerRect || containedIn(rect, containerRect))
+        .filter(({ rect }) => !inputRect || rect.y + rect.height <= inputRect.y + 12)
+        .filter(({ rect }) => !descriptionRect || rect.y + rect.height >= descriptionRect.y + Math.min(descriptionRect.height, 24))
+        .sort((a, b) => areaOf(b.rect) - areaOf(a.rect));
+
+      return candidates[0]?.el || null;
+    }, CAPTCHA_DESCRIPTION_HINTS, CAPTCHA_HELPER_HINTS, CONTINUE_LABELS);
+
+    return handle.asElement();
+  } catch {
+    return null;
+  }
+}
+
+async function getFixedCaptchaClip(page) {
+  try {
+    return await page.evaluate(() => {
+      const baseViewportWidth = 1600;
+      const baseViewportHeight = 900;
+      const baseClip = {
+        x: 524,
+        y: 202,
+        width: 308,
+        height: 76,
+      };
+
+      const viewportWidth = window.innerWidth || document.documentElement?.clientWidth || baseViewportWidth;
+      const viewportHeight = window.innerHeight || document.documentElement?.clientHeight || baseViewportHeight;
+      const scaleX = viewportWidth / baseViewportWidth;
+      const scaleY = viewportHeight / baseViewportHeight;
+
+      return {
+        x: Math.max(0, Math.round(baseClip.x * scaleX)),
+        y: Math.max(0, Math.round(baseClip.y * scaleY)),
+        width: Math.max(1, Math.round(baseClip.width * scaleX)),
+        height: Math.max(1, Math.round(baseClip.height * scaleY)),
+      };
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function getAnchoredCaptchaClip(page) {
+  try {
+    return await page.evaluate(() => {
+      const isVisible = (el) => {
+        if (!el) return false;
+        const rect = el.getBoundingClientRect();
+        if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+        const style = window.getComputedStyle(el);
+        if (!style) return false;
+        return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+      };
+
+      const isTextEntryCandidate = (el) => {
+        if (!isVisible(el)) return false;
+        const tag = String(el.tagName || '').toLowerCase();
+        if (tag === 'textarea') return true;
+        if (tag === 'input') {
+          const type = String(el.getAttribute('type') || 'text').toLowerCase();
+          return ['text', 'search', 'tel', 'email', 'number', ''].includes(type);
+        }
+        return String(el.getAttribute('contenteditable') || '').toLowerCase() === 'true';
+      };
+
+      const rectOf = (el) => {
+        if (!isVisible(el)) return null;
+        const rect = el.getBoundingClientRect();
+        return {
+          x: rect.left + window.scrollX,
+          y: rect.top + window.scrollY,
+          width: rect.width,
+          height: rect.height,
+        };
+      };
+
+      const input = Array.from(document.querySelectorAll('input,textarea,[contenteditable="true"]'))
+        .find((el) => isTextEntryCandidate(el));
+      if (!input) return null;
+
+      const inputRect = rectOf(input);
+      if (!inputRect) return null;
+
+      let containerRect = null;
+      let current = input.parentElement;
+      while (current) {
+        const rect = rectOf(current);
+        if (
+          rect &&
+          rect.width >= 240 &&
+          rect.height >= 160 &&
+          rect.width <= Math.min(window.innerWidth * 0.95, 980) &&
+          rect.height <= Math.min(window.innerHeight * 0.95, 900)
+        ) {
+          containerRect = rect;
+          break;
+        }
+        current = current.parentElement;
+      }
+
+      const width = Math.max(
+        280,
+        Math.min(
+          340,
+          Math.round(inputRect.width * 0.58),
+          containerRect ? Math.max(240, containerRect.width - 56) : 340
+        )
+      );
+      const height = Math.max(72, Math.min(90, Math.round(inputRect.height * 1.45)));
+      const topGap = Math.max(118, Math.min(150, Math.round(inputRect.height * 2.38)));
+
+      let x = Math.round(inputRect.x - 8);
+      let y = Math.round(inputRect.y - topGap);
+
+      if (containerRect) {
+        x = Math.max(containerRect.x + 16, x);
+        y = Math.max(containerRect.y + 54, y);
+      }
+
+      const maxBottom = Math.round(inputRect.y - 34);
+      if (y + height > maxBottom) {
+        y = Math.max(0, maxBottom - height);
+      }
+
+      return {
+        x: Math.max(0, x - 10),
+        y: Math.max(0, y),
+        width: Math.max(1, width),
+        height: Math.max(1, height),
+      };
+    });
   } catch {
     return null;
   }
@@ -356,38 +1065,226 @@ async function captureCaptchaImage(page, cUser = 'unknown') {
   try {
     await prepareDebugCapture(page, { hideRails: false });
     await fs.mkdir(CAPTCHA_DIR, { recursive: true });
-    const clip = await getCaptchaClip(page);
+
+    let clip = await getAnchoredCaptchaClip(page);
+    if (clip) {
+      const method = 'anchored';
+      const { filename, filePath } = buildDebugImagePath(CAPTCHA_DIR, `captcha-${method}`, cUser);
+      console.log('[Automation] Captcha crop anchored clip:', JSON.stringify({
+        url: page.url(),
+        cUser,
+        clip,
+      }));
+      await page.screenshot({ path: filePath, clip });
+      console.log('[Automation] Captcha crop saved:', JSON.stringify({
+        path: filePath,
+        filename,
+        method,
+        clip,
+        url: page.url(),
+      }));
+      await writeCaptchaArtifactMetadata(filePath, {
+        filename,
+        artifactType: 'captcha_crop',
+        method,
+        clip,
+        url: page.url(),
+        cUser,
+      });
+      return { path: filePath, filename, url: page.url(), clip, method };
+    }
+
+    let method = null;
     if (!clip) {
+      clip = await getFixedCaptchaClip(page);
+      if (clip) {
+        method = 'fixed';
+        console.log('[Automation] Captcha crop fixed clip:', JSON.stringify({
+          url: page.url(),
+          cUser,
+          clip,
+        }));
+      }
+    }
+    if (!clip) {
+      clip = await getCaptchaClip(page);
+      if (clip) {
+        method = 'dynamic';
+        console.log('[Automation] Captcha crop dynamic clip:', JSON.stringify({
+          url: page.url(),
+          cUser,
+          clip,
+        }));
+      }
+    }
+    if (!clip) {
+      clip = await getSimpleCaptchaClip(page);
+      if (clip) {
+        method = 'simple';
+        console.log('[Automation] Captcha crop fallback clip:', JSON.stringify({
+          url: page.url(),
+          cUser,
+          clip,
+        }));
+      }
+    }
+    if (!clip) {
+      const challengeElement = await findCaptchaChallengeElement(page);
+      if (challengeElement) {
+        try {
+          method = 'element';
+          const { filename, filePath } = buildDebugImagePath(CAPTCHA_DIR, `captcha-${method}`, cUser);
+          await challengeElement.scrollIntoViewIfNeeded().catch(() => null);
+          await challengeElement.screenshot({ path: filePath });
+          console.log('[Automation] Captcha element screenshot saved:', JSON.stringify({
+            path: filePath,
+            filename,
+            method,
+            url: page.url(),
+          }));
+          await writeCaptchaArtifactMetadata(filePath, {
+            filename,
+            artifactType: 'captcha_crop',
+            method,
+            clip: null,
+            url: page.url(),
+            cUser,
+          });
+          return { path: filePath, filename, url: page.url(), clip: null, method };
+        } catch (elementError) {
+          console.warn('[Automation] Captcha element screenshot failed:', JSON.stringify({
+            url: page.url(),
+            cUser,
+            error: elementError?.message || String(elementError),
+          }));
+        }
+      }
+    }
+    if (!clip) {
+      const diagnostics = await page.evaluate((captchaHints) => {
+        const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        const isVisible = (el) => {
+          if (!el) return false;
+          const rect = el.getBoundingClientRect();
+          if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+          const style = window.getComputedStyle(el);
+          if (!style) return false;
+          return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+        };
+        const rectSummary = (el) => {
+          if (!isVisible(el)) return null;
+          const rect = el.getBoundingClientRect();
+          return {
+            x: Math.round(rect.left + window.scrollX),
+            y: Math.round(rect.top + window.scrollY),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+          };
+        };
+        const bodyText = normalize(document.body?.innerText || '');
+        const cardCandidates = Array.from(document.querySelectorAll('[role="dialog"],div,form,section,article,main'))
+          .filter((el) => isVisible(el))
+          .map((el) => {
+            const rect = rectSummary(el);
+            if (!rect) return null;
+            if (rect.width < 240 || rect.height < 160) return null;
+            if (rect.width > Math.min(window.innerWidth * 0.94, 980)) return null;
+            if (rect.height > Math.min(window.innerHeight * 0.95, 900)) return null;
+            const textFields = Array.from(el.querySelectorAll('input,textarea,[contenteditable="true"]')).filter((node) => isVisible(node)).length;
+            const images = Array.from(el.querySelectorAll('img,canvas,svg,iframe,[role="img"],[style*="background-image"]')).filter((node) => isVisible(node)).length;
+            const buttons = Array.from(el.querySelectorAll('[role="button"],button,a,[role="link"]')).filter((node) => isVisible(node)).length;
+            const text = normalize(el.innerText || '').slice(0, 160);
+            return { rect, textFields, images, buttons, text };
+          })
+          .filter(Boolean)
+          .slice(0, 5);
+        return {
+          bodyTextSample: bodyText.slice(0, 280),
+          hasCaptchaHint: captchaHints.some((hint) => bodyText.includes(hint)),
+          counts: {
+            inputs: Array.from(document.querySelectorAll('input')).filter((el) => isVisible(el)).length,
+            textareas: Array.from(document.querySelectorAll('textarea')).filter((el) => isVisible(el)).length,
+            contenteditables: Array.from(document.querySelectorAll('[contenteditable="true"]')).filter((el) => isVisible(el)).length,
+            images: Array.from(document.querySelectorAll('img')).filter((el) => isVisible(el)).length,
+            canvases: Array.from(document.querySelectorAll('canvas')).filter((el) => isVisible(el)).length,
+            svgs: Array.from(document.querySelectorAll('svg')).filter((el) => isVisible(el)).length,
+            iframes: Array.from(document.querySelectorAll('iframe')).filter((el) => isVisible(el)).length,
+          },
+          firstVisibleTextField:
+            rectSummary(Array.from(document.querySelectorAll('input,textarea,[contenteditable="true"]')).find((el) => isVisible(el))) || null,
+          cardCandidates,
+        };
+      }, CAPTCHA_TEXT_HINTS).catch(() => null);
       console.warn('[Automation] Captcha crop not found:', JSON.stringify({
         url: page.url(),
         cUser,
       }));
+      if (diagnostics) {
+        console.warn('[Automation] Captcha crop diagnostics:', JSON.stringify({
+          url: page.url(),
+          cUser,
+          diagnostics,
+        }));
+      }
+      await appendCaptchaDebugLog({
+        type: 'captcha_no_clip',
+        url: page.url(),
+        cUser,
+        diagnostics,
+      });
       return { path: null, url: page.url(), clip: null };
     }
-    const { filename, filePath } = buildDebugImagePath(CAPTCHA_DIR, 'captcha', cUser);
+    const { filename, filePath } = buildDebugImagePath(CAPTCHA_DIR, `captcha-${method || 'clip'}`, cUser);
     await page.screenshot({ path: filePath, clip });
     console.log('[Automation] Captcha crop saved:', JSON.stringify({
       path: filePath,
       filename,
+      method: method || 'clip',
       clip,
       url: page.url(),
     }));
-    return { path: filePath, filename, url: page.url(), clip };
+    await writeCaptchaArtifactMetadata(filePath, {
+      filename,
+      artifactType: 'captcha_crop',
+      method: method || 'clip',
+      clip,
+      url: page.url(),
+      cUser,
+    });
+    return { path: filePath, filename, url: page.url(), clip, method: method || 'clip' };
   } catch (error) {
     console.warn('[Automation] Captcha crop failed:', JSON.stringify({
       url: page?.url?.() || null,
       cUser,
       error: error?.message || String(error),
     }));
+    await appendCaptchaDebugLog({
+      type: 'captcha_crop_failed',
+      url: page?.url?.() || null,
+      cUser,
+      error: error?.message || String(error),
+    });
     return { path: null, url: page?.url?.() || null, error: error?.message || String(error), clip: null };
   }
 }
 
-export async function captureDebugScreenshot(page, label, cUser = 'unknown') {
+export async function captureDebugScreenshot(page, label, cUser = 'unknown', dirPath = DEBUG_DIR) {
   try {
     await prepareDebugCapture(page, { hideRails: true });
-    const { filePath } = buildDebugImagePath(DEBUG_DIR, label, cUser);
+    await fs.mkdir(dirPath, { recursive: true });
+    const { filename, filePath } = buildDebugImagePath(dirPath, label, cUser);
     await page.screenshot({ path: filePath, fullPage: true });
+    if (dirPath === CAPTCHA_DIR) {
+      await writeCaptchaArtifactMetadata(filePath, {
+        filename,
+        artifactType: 'checkpoint_fullpage',
+        label,
+        method: 'fullpage',
+        clip: null,
+        url: page.url(),
+        cUser,
+      });
+    }
     return { path: filePath, url: page.url() };
   } catch (error) {
     return { path: null, url: page?.url?.() || null, error: error?.message || String(error) };
@@ -436,6 +1333,7 @@ function getCaptchaLogDetails(details) {
     captcha: {
       imagePath: details?.captchaImagePath || null,
       imageFilename: details?.captchaImageFilename || null,
+      imageMethod: details?.captchaImageMethod || null,
       imageClip: details?.captchaImageClip || null,
       ocrText: details?.captchaOcrText || null,
       ocrProvider: details?.captchaOcrProvider || null,
@@ -538,11 +1436,17 @@ async function findTwoFactorCodeInput(page) {
     'input[id*="code" i]',
     'input[inputmode="numeric"]',
     'input[aria-label*="code" i]',
+    'input[aria-label*="kode" i]',
     'input[aria-label*="security" i]',
+    'input[aria-label*="keamanan" i]',
     'input[aria-label*="verification" i]',
+    'input[aria-label*="verifikasi" i]',
     'input[placeholder*="code" i]',
+    'input[placeholder*="kode" i]',
     'input[placeholder*="security" i]',
+    'input[placeholder*="keamanan" i]',
     'input[placeholder*="verification" i]',
+    'input[placeholder*="verifikasi" i]',
   ];
 
   for (const selector of directSelectors) {
@@ -768,30 +1672,27 @@ async function hasCaptchaMismatchMessage(page) {
 
 async function detectNeedNewCookiesPage(page) {
   try {
-    return await page.evaluate((hints) => {
+    return await page.evaluate(({ hints, videoHints, identityHints }) => {
       const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase();
       const matchedHints = hints.filter((hint) => text.includes(hint));
-      const hasStrongVideoHint =
-        text.includes("confirm you're a real person with a video selfie") ||
-        text.includes('confirm you’re a real person with a video selfie') ||
-        text.includes('start video selfie');
-      const hasIdentityHint =
-        text.includes('confirm your identity') ||
-        text.includes("we need more info to make sure you're human") ||
-        text.includes('we need more info to make sure you’re human');
+      const hasStrongVideoHint = videoHints.some((hint) => text.includes(hint));
+      const hasIdentityHint = identityHints.some((hint) => text.includes(hint));
       return {
         detected: hasStrongVideoHint && hasIdentityHint,
         matchedHints,
       };
-    }, NEED_NEW_COOKIES_TEXT_HINTS);
+    }, {
+      hints: NEED_NEW_COOKIES_TEXT_HINTS,
+      videoHints: NEED_NEW_COOKIES_VIDEO_HINTS,
+      identityHints: NEED_NEW_COOKIES_IDENTITY_HINTS,
+    });
   } catch {
     return { detected: false, matchedHints: [] };
   }
 }
 
-async function collectCaptchaCheckpointDetails(page, label = 'Automation') {
-  const debug = await captureDebugScreenshot(page, 'captcha-checkpoint').catch(() => null);
-  const captchaImage = await captureCaptchaImage(page).catch(() => null);
+async function collectCaptchaCheckpointDetails(page, label = 'Automation', cUser = 'unknown') {
+  const captchaImage = await captureCaptchaImage(page, cUser).catch(() => null);
   const diag = await getAuthPageDiagnostics(page);
   const ocrConfigured = isOcrConfigured();
   let captchaOcrText = null;
@@ -802,8 +1703,9 @@ async function collectCaptchaCheckpointDetails(page, label = 'Automation') {
     JSON.stringify({
       url: diag.url || page.url(),
       title: diag.title,
-      screenshotPath: debug?.path || null,
+      screenshotPath: null,
       captchaImagePath: captchaImage?.path || null,
+      captchaImageMethod: captchaImage?.method || null,
       ocrConfigured,
     })
   );
@@ -826,44 +1728,77 @@ async function collectCaptchaCheckpointDetails(page, label = 'Automation') {
     }
   }
 
+  await appendCaptchaDebugLog({
+    type: 'captcha_checkpoint',
+    label,
+    cUser,
+    url: diag.url || page.url(),
+    title: diag.title,
+    screenshotPath: null,
+    captchaImagePath: captchaImage?.path || null,
+    captchaImageFilename: captchaImage?.filename || null,
+    captchaImageMethod: captchaImage?.method || null,
+    captchaImageClip: captchaImage?.clip || null,
+    ocrConfigured,
+    captchaOcrText: captchaOcrText || null,
+    captchaOcrError: captchaOcrError || null,
+  });
+
   return {
     type: 'captcha_required',
     url: diag.url || page.url(),
     title: diag.title,
     text: diag.text,
-    screenshotPath: debug?.path || null,
+    screenshotPath: null,
     captchaImagePath: captchaImage?.path || null,
     captchaImageFilename: captchaImage?.filename || null,
     captchaImageClip: captchaImage?.clip || null,
+    captchaImageMethod: captchaImage?.method || null,
     captchaOcrText: captchaOcrText || null,
     captchaOcrProvider: ocrConfigured ? 'easyOCR' : null,
     captchaOcrError,
   };
 }
 
-async function collectRestrictedIdentityDetails(page, label = 'Automation', extraDetails = {}) {
-  const debug = await captureDebugScreenshot(page, 'account-restricted-identity').catch(() => null);
+async function collectAccountRestrictedDetails(page, label = 'Automation', extraDetails = {}) {
+  const { cUser = 'unknown', ...restDetails } = extraDetails || {};
+  const debug = await captureDebugScreenshot(page, 'account-restricted', cUser).catch(() => null);
   const diag = await getAuthPageDiagnostics(page);
-  const detected = await detectNeedNewCookiesPage(page);
   console.warn(
-    `[${label}] Account restricted identity verification detected`,
+    `[${label}] Account restricted detected`,
     JSON.stringify({
       url: diag.url || page.url(),
       title: diag.title,
-      matchedHints: detected?.matchedHints || [],
+      indicator: restDetails?.indicator || null,
       debugPath: debug?.path || null,
     })
   );
   return {
     type: 'account_restricted',
-    indicator: 'identity_verification_video_selfie',
     url: diag.url || page.url(),
     title: diag.title,
     text: diag.text,
     screenshotPath: debug?.path || null,
+    screenshotFilename: debug?.filename || null,
+    ...restDetails,
+  };
+}
+
+async function collectRestrictedIdentityDetails(page, label = 'Automation', extraDetails = {}) {
+  const detected = await detectNeedNewCookiesPage(page);
+  return collectAccountRestrictedDetails(page, label, {
+    indicator: 'identity_verification_video_selfie',
     matchedHints: detected?.matchedHints || [],
     ...extraDetails,
-  };
+  });
+}
+
+async function getRestrictedIdentityDetailsIfPresent(page, label = 'Automation', extraDetails = {}) {
+  const detected = await detectNeedNewCookiesPage(page);
+  if (!detected?.detected) {
+    return null;
+  }
+  return collectRestrictedIdentityDetails(page, label, extraDetails);
 }
 
 async function findCaptchaInput(page) {
@@ -884,12 +1819,12 @@ async function findCaptchaInput(page) {
   return null;
 }
 
-async function tryResolveCaptchaCheckpoint(page, label = 'Automation') {
+async function tryResolveCaptchaCheckpoint(page, label = 'Automation', cUser = 'unknown') {
   let lastFailure = null;
 
   for (let attempt = 1; attempt <= CAPTCHA_AUTO_SUBMIT_MAX_ATTEMPTS; attempt += 1) {
     console.log(`[${label}] Captcha auto-resolve attempt ${attempt}/${CAPTCHA_AUTO_SUBMIT_MAX_ATTEMPTS}`);
-    const details = await collectCaptchaCheckpointDetails(page, label);
+    const details = await collectCaptchaCheckpointDetails(page, label, cUser);
     const captchaText = String(details?.captchaOcrText || '').trim();
 
     if (!captchaText) {
@@ -1004,7 +1939,7 @@ async function tryResolveCaptchaCheckpoint(page, label = 'Automation') {
       })
     );
 
-    const latestDetails = await collectCaptchaCheckpointDetails(page, label);
+    const latestDetails = await collectCaptchaCheckpointDetails(page, label, cUser);
     lastFailure = {
       resolved: false,
       details: {
@@ -1045,12 +1980,12 @@ async function tryResolveCaptchaCheckpoint(page, label = 'Automation') {
   };
 }
 
-async function resolveCaptchaCheckpointIfPresent(page, label = 'Automation') {
+async function resolveCaptchaCheckpointIfPresent(page, label = 'Automation', cUser = 'unknown') {
   if (!(await detectCaptchaCheckpoint(page))) {
     return false;
   }
 
-  const result = await tryResolveCaptchaCheckpoint(page, label);
+  const result = await tryResolveCaptchaCheckpoint(page, label, cUser);
   if (result?.resolved) {
     console.log(`[${label}] Captcha checkpoint resolved via OCR`);
     return true;
@@ -1064,15 +1999,36 @@ async function resolveCaptchaCheckpointIfPresent(page, label = 'Automation') {
   throw new AutomationError(`${label}: Captcha checkpoint detected`, result?.details || null);
 }
 
-async function resolveTwoFactorChallenge(page, { twofaSecret = null, label = 'Automation' } = {}) {
+async function resolveTwoFactorChallenge(page, { twofaSecret = null, label = 'Automation', cUser = 'unknown' } = {}) {
   const challengeDetected = await hasTwoFactorChallenge(page);
   if (!challengeDetected) return false;
 
   console.log(`[${label}] Two-factor challenge detected, resolving via TOTP...`);
 
+  const initialRestricted = await getRestrictedIdentityDetailsIfPresent(page, label, {
+    authStage: 'twofactor_initial',
+  });
+  if (initialRestricted) {
+    throw new AutomationError(`${label}: Account restricted detected`, initialRestricted);
+  }
+
   await advanceHumanConfirmation(page, label).catch(() => false);
 
-  await resolveCaptchaCheckpointIfPresent(page, label);
+  const postHumanRestricted = await getRestrictedIdentityDetailsIfPresent(page, label, {
+    authStage: 'twofactor_post_human_confirmation',
+  });
+  if (postHumanRestricted) {
+    throw new AutomationError(`${label}: Account restricted detected`, postHumanRestricted);
+  }
+
+  await resolveCaptchaCheckpointIfPresent(page, label, cUser);
+
+  const postCaptchaRestricted = await getRestrictedIdentityDetailsIfPresent(page, label, {
+    authStage: 'twofactor_post_captcha',
+  });
+  if (postCaptchaRestricted) {
+    throw new AutomationError(`${label}: Account restricted detected`, postCaptchaRestricted);
+  }
 
   if (!isTwoFactorUrl(page.url())) {
     if (!page.url().includes('business.facebook.com') || (!page.url().includes('inbox') && !page.url().includes('messages'))) {
@@ -1094,7 +2050,14 @@ async function resolveTwoFactorChallenge(page, { twofaSecret = null, label = 'Au
   await selectAuthenticationAppMethod(page).catch(() => false);
   await advanceHumanConfirmation(page, label).catch(() => false);
 
-  await resolveCaptchaCheckpointIfPresent(page, label);
+  await resolveCaptchaCheckpointIfPresent(page, label, cUser);
+
+  const postMethodRestricted = await getRestrictedIdentityDetailsIfPresent(page, label, {
+    authStage: 'twofactor_post_method_selection',
+  });
+  if (postMethodRestricted) {
+    throw new AutomationError(`${label}: Account restricted detected`, postMethodRestricted);
+  }
 
   if (!isTwoFactorUrl(page.url())) {
     if (!page.url().includes('business.facebook.com') || (!page.url().includes('inbox') && !page.url().includes('messages'))) {
@@ -1120,6 +2083,11 @@ async function resolveTwoFactorChallenge(page, { twofaSecret = null, label = 'Au
         return 'captcha';
       }
 
+      const restricted = await detectNeedNewCookiesPage(page);
+      if (restricted?.detected) {
+        return 'restricted';
+      }
+
       if (!isTwoFactorUrl(page.url())) {
         return 'resolved';
       }
@@ -1139,23 +2107,41 @@ async function resolveTwoFactorChallenge(page, { twofaSecret = null, label = 'Au
   }
 
   if (input === 'captcha') {
-    await resolveCaptchaCheckpointIfPresent(page, label);
-    return resolveTwoFactorChallenge(page, { twofaSecret, label });
+    await resolveCaptchaCheckpointIfPresent(page, label, cUser);
+    return resolveTwoFactorChallenge(page, { twofaSecret, label, cUser });
+  }
+
+  if (input === 'restricted') {
+    const restrictedDetails = await collectRestrictedIdentityDetails(page, label, {
+      authStage: 'twofactor_wait_for_input',
+    });
+    throw new AutomationError(`${label}: Account restricted detected`, restrictedDetails);
   }
 
   if (!input) {
-    const debug = await captureDebugScreenshot(page, 'twofa-input-not-found').catch(() => null);
+    const restrictedDetails = await getRestrictedIdentityDetailsIfPresent(page, label, {
+      authStage: 'twofactor_input_missing',
+    });
+    if (restrictedDetails) {
+      throw new AutomationError(`${label}: Account restricted detected`, restrictedDetails);
+    }
+
+    const debug = await captureDebugScreenshot(page, 'twofa-input-not-found', cUser).catch(() => null);
     const diag = await getAuthPageDiagnostics(page);
+    const details = {
+      type: 'twofa_input_not_found',
+      url: diag.url || page.url(),
+      title: diag.title,
+      text: diag.text,
+      screenshotPath: debug?.path || null,
+      debugPath: debug?.path || null,
+      cUser: cUser || null,
+    };
     console.warn(
       `[${label}] Two-factor code input not found`,
-      JSON.stringify({
-        url: diag.url || page.url(),
-        title: diag.title,
-        text: diag.text,
-        debugPath: debug?.path || null,
-      })
+      JSON.stringify(details)
     );
-    throw new AutomationError(`${label}: Two-factor code input not found`);
+    throw new AutomationError(`${label}: Two-factor code input not found`, details);
   }
 
   const normalizedSecret = String(twofaSecret || '').trim();
@@ -1198,7 +2184,7 @@ async function resolveTwoFactorChallenge(page, { twofaSecret = null, label = 'Au
         return (
           !!document.querySelector('span[data-surface="/bizweb:all/thread_row"]') ||
           !!document.querySelector('[data-pagelet*="BizInbox"]') ||
-          !!document.querySelector('[aria-label="Inbox"]')
+          !!document.querySelector('[aria-label="Inbox"], [aria-label="Kotak Masuk"], [aria-label*="Inbox" i], [aria-label*="Kotak Masuk" i]')
         );
       });
     },
@@ -1222,7 +2208,7 @@ export async function resolveTwoFactorIfNeeded(page, options = {}) {
   return resolveTwoFactorChallenge(page, options);
 }
 
-async function detectAccountRestricted(page, label = 'Automation') {
+async function detectAccountRestricted(page, label = 'Automation', cUser = 'unknown') {
   try {
     const text = await page.evaluate(() => (document.body?.innerText || '').toLowerCase());
     const indicators = [
@@ -1233,10 +2219,19 @@ async function detectAccountRestricted(page, label = 'Automation') {
       "your account's messaging",
       'does not comply with whatsapp',
       'request a review',
+      'akun dibatasi',
+      'pesan dibatasi',
+      'anda tidak dapat mengirim atau menerima pesan',
+      'tidak dapat mengirim atau menerima pesan',
+      'fitur pesan akun anda',
+      'tidak mematuhi whatsapp',
+      'minta peninjauan',
+      'ajukan peninjauan',
     ];
     const hit = indicators.find((entry) => text.includes(entry));
     if (hit) {
-      throw new AutomationError(`${label}: Account restricted detected`, { indicator: hit });
+      const details = await collectAccountRestrictedDetails(page, label, { cUser, indicator: hit });
+      throw new AutomationError(`${label}: Account restricted detected`, details);
     }
   } catch (error) {
     if (error instanceof AutomationError) {
@@ -1246,10 +2241,10 @@ async function detectAccountRestricted(page, label = 'Automation') {
   }
 }
 
-async function ensureOnInbox(page, label = 'Automation', { twofaSecret = null } = {}) {
+async function ensureOnInbox(page, label = 'Automation', { twofaSecret = null, cUser = 'unknown' } = {}) {
   let url = page.url();
   if (isBadAuthUrl(url)) {
-    const resolved = await resolveTwoFactorChallenge(page, { twofaSecret, label });
+    const resolved = await resolveTwoFactorChallenge(page, { twofaSecret, label, cUser });
     if (!resolved) {
       throw new AutomationError(
         `${label}: Redirected to auth/checkpoint URL: ${url}`,
@@ -1269,7 +2264,7 @@ async function ensureOnInbox(page, label = 'Automation', { twofaSecret = null } 
     }
     let nextUrl = page.url();
     if (isBadAuthUrl(nextUrl)) {
-      const resolved = await resolveTwoFactorChallenge(page, { twofaSecret, label });
+      const resolved = await resolveTwoFactorChallenge(page, { twofaSecret, label, cUser });
       if (!resolved) {
         throw new AutomationError(
           `${label}: Redirected to auth/checkpoint URL: ${nextUrl}`,
@@ -1284,7 +2279,7 @@ async function ensureOnInbox(page, label = 'Automation', { twofaSecret = null } 
   }
   await dismissSaveLoginInfo(page, label);
   await dismissInboxBlockingPrompts(page, label);
-  await detectAccountRestricted(page, label);
+  await detectAccountRestricted(page, label, cUser);
 }
 
 async function waitForMainSpinner(page, { timeoutMs = 30000 } = {}) {
@@ -1292,7 +2287,7 @@ async function waitForMainSpinner(page, { timeoutMs = 30000 } = {}) {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       const visible = await page.evaluate(() => {
-        const spinner = document.querySelector('[role="progressbar"], [data-testid*="spinner"], [aria-label*="Loading"]');
+        const spinner = document.querySelector('[role="progressbar"], [data-testid*="spinner"], [aria-label*="Loading" i], [aria-label*="Memuat" i]');
         if (!spinner) return false;
         const style = window.getComputedStyle(spinner);
         return style && style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
@@ -1540,18 +2535,27 @@ async function fillReplyMessage(page, message) {
 
 async function findScopedReplyButton(page, replyBox) {
   if (!replyBox) return null;
-  const handle = await replyBox.evaluateHandle((el) => {
+  const handle = await replyBox.evaluateHandle((el, replySendLabels) => {
     let node = el.parentElement;
     for (let i = 0; i < 6 && node; i += 1) {
       const btn =
         node.querySelector('div[role="button"][aria-label="Send"]') ||
         node.querySelector('div[role="button"][aria-label="Submit"]') ||
-        node.querySelector('div[role="button"][aria-label*="Send"]');
+        node.querySelector('div[role="button"][aria-label*="Send"]') ||
+        node.querySelector('div[role="button"][aria-label*="Kirim" i]') ||
+        node.querySelector('div[role="button"][aria-label*="Balas" i]') ||
+        Array.from(node.querySelectorAll('div[role="button"],button')).find((candidate) => {
+          const bag = `${candidate.textContent || ''} ${candidate.getAttribute('aria-label') || ''} ${candidate.getAttribute('title') || ''}`
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+          return replySendLabels.some((label) => bag === label || bag.includes(label));
+        });
       if (btn) return btn;
       node = node.parentElement;
     }
     return null;
-  });
+  }, REPLY_SEND_LABELS);
   return handle.asElement();
 }
 
@@ -1712,14 +2716,17 @@ async function openWhatsappModal(page) {
   // Fallback to exact text search
   if (!btn) {
     console.log('[Automation] Step 1: Button not found by data-surface, trying exact text...');
-    btn = await findByText(page, {
-      text: 'Send a Message on WhatsApp',
-      selector: '[role="button"],button,div[role],a',
-    });
+    for (const label of OPEN_WHATSAPP_MODAL_LABELS) {
+      btn = await findByText(page, {
+        text: label,
+        selector: '[role="button"],button,div[role],a',
+      });
+      if (btn) break;
+    }
   }
 
   if (!btn) {
-    throw new AutomationError('Step 1: Could not find "Send a Message on WhatsApp" button');
+    throw new AutomationError('Step 1: Could not find WhatsApp modal trigger button');
   }
 
   console.log('[Automation] Step 1: Found button, clicking...');
@@ -1736,6 +2743,32 @@ async function openWhatsappModal(page) {
     { timeoutMs: 15000 }
   );
   console.log('[Automation] Step 1: ✓ WhatsApp modal opened successfully');
+}
+
+async function isDirectComposeFormVisible(page, dialog = null) {
+  const currentDialog = dialog || await findFirstVisible(page, '[role="dialog"]');
+  if (!currentDialog) return false;
+
+  const comboBoxes = await currentDialog.$$('[role="combobox"][aria-haspopup="listbox"]');
+  let hasExtensionCombo = false;
+  for (const combo of comboBoxes) {
+    if (!(await isVisible(page, combo))) continue;
+
+    const text = await combo.evaluate((el) => (el.textContent || el.innerText || '').trim());
+    if (text.includes('+')) {
+      hasExtensionCombo = true;
+      break;
+    }
+  }
+
+  const phoneInput = await findFirstVisible(
+    page,
+    '[role="dialog"] input[type="tel"], [role="dialog"] input[inputmode="tel"]'
+  );
+  const textarea = await findFirstVisible(page, '[role="dialog"] textarea');
+  const editable = await findFirstVisible(page, '[role="dialog"] [contenteditable="true"]');
+
+  return hasExtensionCombo && phoneInput !== null && (textarea !== null || editable !== null);
 }
 
 /**
@@ -1772,6 +2805,11 @@ async function clickNewWhatsappNumber(page) {
 
   console.log('[Automation] Step 2: Dialog content loaded, searching for button...');
 
+  if (await isDirectComposeFormVisible(page, dialog)) {
+    console.log('[Automation] Step 2: Compose form already visible, skipping "New WhatsApp number" click');
+    return { skipped: true, reason: 'compose_form_visible' };
+  }
+
   // Strategy 1: Use data-surface attribute (most reliable)
   let target = await findFirstVisible(
     page,
@@ -1785,10 +2823,13 @@ async function clickNewWhatsappNumber(page) {
   // Strategy 2: Find by exact text match
   if (!target) {
     console.log('[Automation] Step 2: Trying exact text...');
-    target = await findByText(page, {
-      text: 'New WhatsApp number',
-      selector: '[role="button"],button,div[role="button"]',
-    });
+    for (const label of NEW_WHATSAPP_NUMBER_LABELS) {
+      target = await findByText(page, {
+        text: label,
+        selector: '[role="button"],button,div[role="button"]',
+      });
+      if (target) break;
+    }
   }
 
   // Debug: Log what buttons we can see
@@ -1863,6 +2904,7 @@ async function clickNewWhatsappNumber(page) {
   await clickElement(page, target, 'Step 2: New WhatsApp number');
   await sleep(1000); // Wait longer for form to appear
   console.log('[Automation] Step 2: ✓ "New WhatsApp number" clicked successfully');
+  return { skipped: false, reason: 'clicked_new_whatsapp_number' };
 }
 
 /**
@@ -2145,11 +3187,15 @@ async function clickSendMessage(page) {
   }
 
   // Find button with exact text
-  const btn = await findByText(page, {
-    root: dialog,
-    text: 'Send Message',
-    selector: '[role="button"],button,div[role="button"]',
-  });
+  let btn = null;
+  for (const label of SEND_MESSAGE_LABELS) {
+    btn = await findByText(page, {
+      root: dialog,
+      text: label,
+      selector: '[role="button"],button,div[role="button"]',
+    });
+    if (btn) break;
+  }
 
   // If we matched the inner label div, climb to its button container
   if (btn) {
@@ -2260,8 +3306,8 @@ export async function sendMessage(
     logStep('send:open_modal');
 
     // Step 2: Click "New WhatsApp number"
-    await clickNewWhatsappNumber(page);
-    logStep('send:new_number');
+    const newNumberResult = await clickNewWhatsappNumber(page);
+    logStep('send:new_number', newNumberResult);
 
     // Step 3: Select extension
     await selectExtension(page, extension);
@@ -2436,8 +3482,8 @@ export async function checkSessionFlow(page, { sessionId = null, cUser = null, t
     logStep('check:open_modal');
 
     // Step 2: Click "New WhatsApp number"
-    await clickNewWhatsappNumber(page);
-    logStep('check:new_number');
+    const newNumberResult = await clickNewWhatsappNumber(page);
+    logStep('check:new_number', newNumberResult);
 
     // Step 3: Ensure extension combobox exists
     const dialog = await waitFor(

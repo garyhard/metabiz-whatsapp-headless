@@ -79,6 +79,9 @@ PROXY_PASSWORD=your-proxy-password
 - `PORT` (optional): Server port (default: 3000)
 - `DEV_MODE` (optional): Set to `true` to preserve sessions across server restarts (default: `false`)
 - `HEADLESS` (optional): Set to `false` to run browser in visible mode for debugging (default: `true`)
+- `IDLE_TIMEOUT_MINUTES` (optional): Suspend browser session yang idle setelah N menit. Session tetap tersimpan di store dan akan dihidupkan lagi saat dipakai (default config: `0`, contoh env production saat ini: `120`)
+- `MAX_ACTIVE_BROWSERS` (optional): Batas jumlah browser live sekaligus. `0` berarti unlimited. Saat limit penuh, service akan suspend session aktif yang paling lama idle sebelum membuka browser baru (default: `0`)
+- `BROWSER_POOL_WAIT_MS` (optional): Waktu tunggu maksimum saat limit browser aktif penuh dan belum ada session idle yang bisa dievict (default: `30000`)
 - `PROXY_SERVER` (optional): Proxy server URL. Formats:
   - `http://proxy.example.com:8080` - HTTP proxy (most common)
   - `https://proxy.example.com:8080` - HTTP proxy with TLS encryption
@@ -88,10 +91,12 @@ PROXY_PASSWORD=your-proxy-password
 - `PROXY_PASSWORD` (optional): Proxy password (required if proxy requires authentication)
 - `MESSAGE_QUEUE_POLL_INTERVAL_MS` (optional): Polling interval worker queue (default: `1500`)
 - `MESSAGE_QUEUE_BATCH_SIZE` (optional): Max jobs per pump (default: `5`)
-- `SEND_CONCURRENCY` (optional): Batas paralel kirim lintas session. `10` untuk fixed 10 paralel, `0`/`all` untuk semua browser aktif (default: `1`)
+- `SEND_CONCURRENCY` (optional): Batas paralel kirim lintas session. `10` untuk fixed 10 paralel, `0`/`all` untuk semua browser aktif (default: `1`). Queue hanya akan mengaktifkan maksimal satu job `processing` per `session_id`, jadi job dalam session yang sama tetap antri.
 - `MESSAGE_QUEUE_MAX_ATTEMPTS` (optional): Retry attempts per job (default: `5`)
 - `MESSAGE_QUEUE_RETRY_BASE_MS` (optional): Base retry delay (default: `30000`)
 - `MESSAGE_QUEUE_RETRY_MAX_MS` (optional): Max retry delay (default: `300000`)
+- `FLOW_RECOVERABLE_RETRY_ATTEMPTS` (optional): Retry internal untuk flow recoverable seperti browser closed/crash dan flow timeout, per eksekusi send/check, di luar retry queue (default: `2`)
+- `FLOW_RECOVERABLE_RETRY_DELAY_MS` (optional): Delay antar retry internal flow recoverable (default: `1500`)
 - `MESSAGE_QUEUE_PROCESSING_TIMEOUT_MS` (optional): Timeout untuk requeue job `processing` setelah restart/crash (default: `180000`)
 - `META_BLAST_WEBHOOK_URL` (optional): URL webhook Rails penerima status blast (contoh: `https://your-app.com/webhooks/meta_blast_status`)
 - `META_BLAST_WEBHOOK_TIMEOUT_MS` (optional): Timeout HTTP webhook (default: `15000`)

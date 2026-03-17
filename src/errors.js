@@ -35,6 +35,14 @@ export class BrowserCrashError extends Error {
   }
 }
 
+export class FlowTimeoutError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'FlowTimeoutError';
+    this.statusCode = 504;
+  }
+}
+
 export class SessionAlreadyExistsError extends Error {
   constructor(cUser, sessionId = null) {
     const suffix = sessionId ? ` (session_id=${sessionId})` : '';

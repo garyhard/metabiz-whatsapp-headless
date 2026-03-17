@@ -8,8 +8,10 @@ import { apiKeyAuth } from './middleware/auth.js';
 import sessionsRouter from './routes/sessions.js';
 import messagesRouter from './routes/messages.js';
 import cookiesRouter from './routes/cookies.js';
+import sessionJobsRouter from './routes/sessionJobs.js';
 import { destroyAllSessions, restoreSessions, getProgressByCUser } from './services/sessionManager.js';
 import { startMessageQueueWorker, stopMessageQueueWorker } from './services/messageQueue.js';
+import { startSessionFlowQueueWorker, stopSessionFlowQueueWorker } from './services/sessionFlowQueue.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
@@ -18,13 +20,15 @@ import {
   InvalidInputError,
   AutomationError,
   BrowserCrashError,
+  FlowTimeoutError,
 } from './errors.js';
 import { readRequestLog } from './services/automation.js';
+import { buildJsonErrorBody } from './utils/apiErrors.js';
 
 function getAutomationErrorCode(error) {
   const message = String(error?.message || '').toLowerCase();
   const type = String(error?.details?.type || '').toLowerCase();
-  if (message.includes('account restricted')) return 'account_restricted';
+  if (type === 'account_restricted' || message.includes('account restricted')) return 'account_restricted';
   if (type === 'captcha_required' || message.includes('captcha checkpoint')) return 'captcha_required';
   if (type === 'need_new_cookies' || message.includes('need new cookies')) return 'need_new_cookies';
   return 'automation_error';
@@ -36,6 +40,7 @@ const __dirname = path.dirname(__filename);
 const DEBUG_DIR = path.join(__dirname, '../profiles/debug');
 
 // Middleware
+app.disable('x-powered-by');
 app.use(express.json());
 
 // Health check endpoint (no auth required)
@@ -50,6 +55,8 @@ app.use('/api/sessions', apiKeyAuth, sessionsRouter);
 app.use('/api/sessions', apiKeyAuth, messagesRouter);
 // Cookies validation
 app.use('/api/cookies', apiKeyAuth, cookiesRouter);
+// Async session jobs
+app.use('/api/session-jobs', apiKeyAuth, sessionJobsRouter);
 // Debug screenshot download
 app.get('/api/debug/screenshot', apiKeyAuth, async (req, res) => {
   try {
@@ -96,41 +103,44 @@ app.use((err, req, res, next) => {
     console.error('[Server] Stack trace:', err.stack);
   }
 
-  if (err instanceof SessionNotFoundError) {
-    return res.status(404).json({
+  if (err instanceof SyntaxError && err.status === 400 && Object.prototype.hasOwnProperty.call(err, 'body')) {
+    return res.status(400).json({
       ok: false,
-      error: err.message,
+      error: 'Invalid JSON request body',
+      errorCode: 'invalid_json',
     });
+  }
+
+  if (err instanceof SessionNotFoundError) {
+    return res.status(404).json(buildJsonErrorBody(err, 'Session not found'));
   }
 
   if (err instanceof InvalidInputError) {
-    return res.status(400).json({
-      ok: false,
-      error: err.message,
-    });
+    return res.status(400).json(buildJsonErrorBody(err, 'Invalid input'));
   }
 
   if (err instanceof AutomationError) {
-    return res.status(500).json({
-      ok: false,
-      error: err.message,
-      errorCode: getAutomationErrorCode(err),
-      details: err.details,
-    });
+    return res.status(500).json(
+      buildJsonErrorBody(err, 'Automation failed', {
+        errorCode: getAutomationErrorCode(err),
+        details: err.details,
+      })
+    );
   }
 
   if (err instanceof BrowserCrashError) {
-    return res.status(500).json({
-      ok: false,
-      error: err.message,
-    });
+    return res.status(500).json(buildJsonErrorBody(err, 'Browser crashed'));
+  }
+
+  if (err instanceof FlowTimeoutError) {
+    return res.status(504).json(buildJsonErrorBody(err, 'Flow timed out'));
   }
 
   // Generic error handler
+  const errorBody = buildJsonErrorBody(err, 'Internal server error');
   res.status(500).json({
-    ok: false,
-    error: 'Internal server error',
-    message: err.message,
+    ...errorBody,
+    message: errorBody.error,
   });
 });
 
@@ -164,6 +174,7 @@ async function gracefulShutdown(signal) {
 
   // Close all browser sessions (skip in dev mode to preserve sessions across restarts)
   stopMessageQueueWorker();
+  stopSessionFlowQueueWorker();
   if (config.devMode) {
     console.log('[Server] Dev mode: Preserving browser sessions across restart');
     console.log('[Server] Sessions will remain active. Use DELETE /api/sessions/:id to manually destroy them.');
@@ -190,6 +201,7 @@ server = app.listen(config.port, async () => {
   console.log(`[Server] API key authentication enabled`);
   console.log(`[Server] Health check: http://localhost:${config.port}/health`);
   startMessageQueueWorker();
+  startSessionFlowQueueWorker();
   if (config.devMode) {
     console.log(`[Server] 🛠️  Dev mode: Sessions will be preserved across restarts`);
   } else {

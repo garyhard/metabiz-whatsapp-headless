@@ -42,6 +42,9 @@ db.exec(`
     proxy TEXT,
     twofa_secret TEXT,
     status TEXT,
+    restricted INTEGER NOT NULL DEFAULT 0,
+    restriction_details_json TEXT,
+    restriction_detected_at INTEGER,
     last_activity INTEGER,
     created_at INTEGER,
     updated_at INTEGER
@@ -80,10 +83,55 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_message_jobs_status_next_retry
     ON message_jobs(status, next_retry_at, created_at);
+  CREATE TABLE IF NOT EXISTS session_flow_jobs (
+    id TEXT PRIMARY KEY,
+    request_id TEXT UNIQUE,
+    job_type TEXT NOT NULL,
+    target_session_id TEXT,
+    c_user TEXT,
+    payload_json TEXT,
+    webhook_url TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 3,
+    error_message TEXT,
+    error_code TEXT,
+    result_json TEXT,
+    next_retry_at INTEGER NOT NULL DEFAULT 0,
+    webhook_notified INTEGER NOT NULL DEFAULT 0,
+    webhook_attempts INTEGER NOT NULL DEFAULT 0,
+    webhook_next_retry_at INTEGER NOT NULL DEFAULT 0,
+    webhook_last_error TEXT,
+    webhook_delivered_at INTEGER,
+    started_at INTEGER,
+    finished_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_session_flow_jobs_status_next_retry
+    ON session_flow_jobs(status, next_retry_at, created_at);
 `);
 
 try {
   db.exec('ALTER TABLE sessions ADD COLUMN twofa_secret TEXT');
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE sessions ADD COLUMN restricted INTEGER NOT NULL DEFAULT 0');
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE sessions ADD COLUMN restriction_details_json TEXT');
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE sessions ADD COLUMN restriction_detected_at INTEGER');
 } catch {
   // Column already exists.
 }
@@ -124,6 +172,66 @@ try {
   // Column already exists.
 }
 
+try {
+  db.exec('ALTER TABLE session_flow_jobs ADD COLUMN error_code TEXT');
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE session_flow_jobs ADD COLUMN payload_json TEXT');
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE session_flow_jobs ADD COLUMN webhook_url TEXT');
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE session_flow_jobs ADD COLUMN webhook_notified INTEGER NOT NULL DEFAULT 0');
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE session_flow_jobs ADD COLUMN webhook_attempts INTEGER NOT NULL DEFAULT 0');
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE session_flow_jobs ADD COLUMN webhook_next_retry_at INTEGER NOT NULL DEFAULT 0');
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE session_flow_jobs ADD COLUMN webhook_last_error TEXT');
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE session_flow_jobs ADD COLUMN webhook_delivered_at INTEGER');
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE session_flow_jobs ADD COLUMN target_session_id TEXT');
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE session_flow_jobs ADD COLUMN c_user TEXT');
+} catch {
+  // Column already exists.
+}
+
 function getSessionsTableSql() {
   const stmt = db.prepare(`
     SELECT sql
@@ -158,15 +266,22 @@ function migrateSessionsTableDropCUserUnique() {
         proxy TEXT,
         twofa_secret TEXT,
         status TEXT,
+        restricted INTEGER NOT NULL DEFAULT 0,
+        restriction_details_json TEXT,
+        restriction_detected_at INTEGER,
         last_activity INTEGER,
         created_at INTEGER,
         updated_at INTEGER
       );
       INSERT INTO sessions_new (
-        session_id, c_user, cookie_format, cookies, fingerprint, proxy, twofa_secret, status, last_activity, created_at, updated_at
+        session_id, c_user, cookie_format, cookies, fingerprint, proxy, twofa_secret, status,
+        restricted, restriction_details_json, restriction_detected_at,
+        last_activity, created_at, updated_at
       )
       SELECT
-        session_id, c_user, cookie_format, cookies, fingerprint, proxy, twofa_secret, status, last_activity, created_at, updated_at
+        session_id, c_user, cookie_format, cookies, fingerprint, proxy, twofa_secret, status,
+        0, NULL, NULL,
+        last_activity, created_at, updated_at
       FROM sessions;
       DROP TABLE sessions;
       ALTER TABLE sessions_new RENAME TO sessions;
@@ -218,6 +333,34 @@ function deserializeCookies(format, raw) {
     return JSON.parse(raw || '[]');
   }
   return raw || '';
+}
+
+function getNextRunnableMessageJobRow(now = Date.now()) {
+  return getRow(`
+    SELECT q.id
+    FROM message_jobs q
+    WHERE q.status = 'queued'
+      AND q.next_retry_at <= :now
+      AND NOT EXISTS (
+        SELECT 1
+        FROM message_jobs p
+        WHERE p.session_id = q.session_id
+          AND p.status = 'processing'
+      )
+    ORDER BY q.created_at ASC
+    LIMIT 1
+  `, { ':now': now });
+}
+
+function getNextRunnableSessionFlowJobRow(now = Date.now()) {
+  return getRow(`
+    SELECT id
+    FROM session_flow_jobs
+    WHERE status = 'queued'
+      AND next_retry_at <= :now
+    ORDER BY created_at ASC
+    LIMIT 1
+  `, { ':now': now });
 }
 
 function runStatement(sql, params) {
@@ -280,6 +423,9 @@ function normalizeRow(row) {
     proxy: deserialize(row.proxy),
     twofaSecret: row.twofa_secret || null,
     status: row.status,
+    restricted: Number(row.restricted || 0) === 1,
+    restrictionDetails: deserializeSafe(row.restriction_details_json),
+    restrictionDetectedAt: row.restriction_detected_at ? Number(row.restriction_detected_at) : null,
     lastActivity: row.last_activity,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -302,6 +448,35 @@ function normalizeMessageJobRow(row) {
     attempts: Number(row.attempts || 0),
     maxAttempts: Number(row.max_attempts || 0),
     errorMessage: row.error_message || null,
+    result: deserializeSafe(row.result_json),
+    nextRetryAt: Number(row.next_retry_at || 0),
+    webhookNotified: Number(row.webhook_notified || 0) === 1,
+    webhookAttempts: Number(row.webhook_attempts || 0),
+    webhookNextRetryAt: Number(row.webhook_next_retry_at || 0),
+    webhookLastError: row.webhook_last_error || null,
+    webhookDeliveredAt: row.webhook_delivered_at ? Number(row.webhook_delivered_at) : null,
+    startedAt: row.started_at ? Number(row.started_at) : null,
+    finishedAt: row.finished_at ? Number(row.finished_at) : null,
+    createdAt: Number(row.created_at || 0),
+    updatedAt: Number(row.updated_at || 0),
+  };
+}
+
+function normalizeSessionFlowJobRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    requestId: row.request_id || null,
+    jobType: row.job_type,
+    targetSessionId: row.target_session_id || null,
+    cUser: row.c_user || null,
+    payload: deserializeSafe(row.payload_json),
+    webhookUrl: row.webhook_url || null,
+    status: row.status,
+    attempts: Number(row.attempts || 0),
+    maxAttempts: Number(row.max_attempts || 0),
+    errorMessage: row.error_message || null,
+    errorCode: row.error_code || null,
     result: deserializeSafe(row.result_json),
     nextRetryAt: Number(row.next_retry_at || 0),
     webhookNotified: Number(row.webhook_notified || 0) === 1,
@@ -410,6 +585,41 @@ export const sessionStore = {
     });
   },
 
+  markSessionRestricted(sessionId, details, detectedAt = Date.now()) {
+    const now = Date.now();
+    runStatement(`
+      UPDATE sessions
+      SET status = 'restricted',
+          restricted = 1,
+          restriction_details_json = :restriction_details_json,
+          restriction_detected_at = :restriction_detected_at,
+          last_activity = :last_activity,
+          updated_at = :updated_at
+      WHERE session_id = :session_id
+    `, {
+      ':session_id': sessionId,
+      ':restriction_details_json': serialize(details || {}),
+      ':restriction_detected_at': detectedAt || now,
+      ':last_activity': detectedAt || now,
+      ':updated_at': now,
+    });
+  },
+
+  clearSessionRestricted(sessionId) {
+    const now = Date.now();
+    runStatement(`
+      UPDATE sessions
+      SET restricted = 0,
+          restriction_details_json = NULL,
+          restriction_detected_at = NULL,
+          updated_at = :updated_at
+      WHERE session_id = :session_id
+    `, {
+      ':session_id': sessionId,
+      ':updated_at': now,
+    });
+  },
+
   updateCookies(sessionId, cookieFormat, cookies, twofaSecret = undefined) {
     const now = Date.now();
     if (twofaSecret !== undefined) {
@@ -501,24 +711,12 @@ export const sessionStore = {
   },
 
   hasRunnableMessageJob(now = Date.now()) {
-    const row = getRow(`
-      SELECT id
-      FROM message_jobs
-      WHERE status = 'queued' AND next_retry_at <= :now
-      ORDER BY created_at ASC
-      LIMIT 1
-    `, { ':now': now });
+    const row = getNextRunnableMessageJobRow(now);
     return !!row;
   },
 
   claimNextMessageJob(now = Date.now()) {
-    const row = getRow(`
-      SELECT id
-      FROM message_jobs
-      WHERE status = 'queued' AND next_retry_at <= :now
-      ORDER BY created_at ASC
-      LIMIT 1
-    `, { ':now': now });
+    const row = getNextRunnableMessageJobRow(now);
     if (!row || !row.id) return null;
 
     const changes = runStatementWithChanges(`
@@ -710,9 +908,265 @@ export const sessionStore = {
     return this.getMessageJob(jobId);
   },
 
+  enqueueSessionFlowJob({
+    id,
+    requestId = null,
+    jobType,
+    targetSessionId = null,
+    cUser = null,
+    payload = {},
+    webhookUrl = null,
+    maxAttempts = 3,
+  }) {
+    const now = Date.now();
+    runStatement(`
+      INSERT INTO session_flow_jobs (
+        id, request_id, job_type, target_session_id, c_user, payload_json, webhook_url,
+        status, attempts, max_attempts, next_retry_at,
+        webhook_notified, webhook_attempts, webhook_next_retry_at,
+        created_at, updated_at
+      ) VALUES (
+        :id, :request_id, :job_type, :target_session_id, :c_user, :payload_json, :webhook_url,
+        'queued', 0, :max_attempts, 0,
+        0, 0, 0,
+        :created_at, :updated_at
+      )
+    `, {
+      ':id': id,
+      ':request_id': requestId || null,
+      ':job_type': jobType,
+      ':target_session_id': targetSessionId || null,
+      ':c_user': cUser || null,
+      ':payload_json': serialize(payload || {}),
+      ':webhook_url': webhookUrl || null,
+      ':max_attempts': maxAttempts,
+      ':created_at': now,
+      ':updated_at': now,
+    });
+    return this.getSessionFlowJob(id);
+  },
+
+  getSessionFlowJob(jobId) {
+    const row = getRow('SELECT * FROM session_flow_jobs WHERE id = :id', { ':id': jobId });
+    return normalizeSessionFlowJobRow(row);
+  },
+
+  getSessionFlowJobByRequestId(requestId) {
+    if (!requestId) return null;
+    const row = getRow(`
+      SELECT *
+      FROM session_flow_jobs
+      WHERE request_id = :request_id
+      ORDER BY created_at DESC
+      LIMIT 1
+    `, { ':request_id': requestId });
+    return normalizeSessionFlowJobRow(row);
+  },
+
+  hasRunnableSessionFlowJob(now = Date.now()) {
+    const row = getNextRunnableSessionFlowJobRow(now);
+    return !!row;
+  },
+
+  claimNextSessionFlowJob(now = Date.now()) {
+    const row = getNextRunnableSessionFlowJobRow(now);
+    if (!row || !row.id) return null;
+
+    const changes = runStatementWithChanges(`
+      UPDATE session_flow_jobs
+      SET status = 'processing',
+          attempts = attempts + 1,
+          started_at = COALESCE(started_at, :now),
+          updated_at = :now
+      WHERE id = :id AND status = 'queued' AND next_retry_at <= :now
+    `, {
+      ':id': row.id,
+      ':now': now,
+    });
+    if (changes <= 0) return null;
+    return this.getSessionFlowJob(row.id);
+  },
+
+  markSessionFlowJobCompleted(jobId, result) {
+    const now = Date.now();
+    runStatement(`
+      UPDATE session_flow_jobs
+      SET status = 'completed',
+          error_message = NULL,
+          error_code = NULL,
+          result_json = :result_json,
+          webhook_notified = 0,
+          webhook_attempts = 0,
+          webhook_next_retry_at = 0,
+          webhook_last_error = NULL,
+          webhook_delivered_at = NULL,
+          finished_at = :finished_at,
+          updated_at = :updated_at
+      WHERE id = :id
+    `, {
+      ':id': jobId,
+      ':result_json': serialize(result || {}),
+      ':finished_at': now,
+      ':updated_at': now,
+    });
+    return this.getSessionFlowJob(jobId);
+  },
+
+  markSessionFlowJobRetry(jobId, errorMessage, errorCode, nextRetryAt, result = null) {
+    const now = Date.now();
+    runStatement(`
+      UPDATE session_flow_jobs
+      SET status = 'queued',
+          error_message = :error_message,
+          error_code = :error_code,
+          result_json = COALESCE(:result_json, result_json),
+          next_retry_at = :next_retry_at,
+          updated_at = :updated_at
+      WHERE id = :id
+    `, {
+      ':id': jobId,
+      ':error_message': errorMessage || null,
+      ':error_code': errorCode || null,
+      ':result_json': result ? serialize(result) : null,
+      ':next_retry_at': nextRetryAt || now,
+      ':updated_at': now,
+    });
+    return this.getSessionFlowJob(jobId);
+  },
+
+  markSessionFlowJobError(jobId, errorMessage, errorCode, result = null) {
+    const now = Date.now();
+    runStatement(`
+      UPDATE session_flow_jobs
+      SET status = 'error',
+          error_message = :error_message,
+          error_code = :error_code,
+          result_json = :result_json,
+          webhook_notified = 0,
+          webhook_attempts = 0,
+          webhook_next_retry_at = 0,
+          webhook_last_error = NULL,
+          webhook_delivered_at = NULL,
+          finished_at = :finished_at,
+          updated_at = :updated_at
+      WHERE id = :id
+    `, {
+      ':id': jobId,
+      ':error_message': errorMessage || null,
+      ':error_code': errorCode || null,
+      ':result_json': serialize(result),
+      ':finished_at': now,
+      ':updated_at': now,
+    });
+    return this.getSessionFlowJob(jobId);
+  },
+
+  requeueStaleProcessingSessionFlowJobs(timeoutMs = 240000) {
+    const now = Date.now();
+    const threshold = now - Math.max(1000, Number(timeoutMs) || 240000);
+    runStatement(`
+      UPDATE session_flow_jobs
+      SET status = 'queued',
+          next_retry_at = :now,
+          updated_at = :now
+      WHERE status = 'processing' AND updated_at < :threshold
+    `, {
+      ':now': now,
+      ':threshold': threshold,
+    });
+  },
+
+  hasPendingSessionFlowWebhook(now = Date.now(), requireWebhookUrl = false) {
+    const row = getRow(`
+      SELECT id
+      FROM session_flow_jobs
+      WHERE webhook_notified = 0
+        AND status IN ('completed', 'error')
+        AND webhook_next_retry_at <= :now
+        AND (:require_webhook_url = 0 OR COALESCE(webhook_url, '') <> '')
+      ORDER BY updated_at ASC
+      LIMIT 1
+    `, {
+      ':now': now,
+      ':require_webhook_url': requireWebhookUrl ? 1 : 0,
+    });
+    return !!row;
+  },
+
+  claimPendingSessionFlowWebhook(now = Date.now(), requireWebhookUrl = false) {
+    const row = getRow(`
+      SELECT id
+      FROM session_flow_jobs
+      WHERE webhook_notified = 0
+        AND status IN ('completed', 'error')
+        AND webhook_next_retry_at <= :now
+        AND (:require_webhook_url = 0 OR COALESCE(webhook_url, '') <> '')
+      ORDER BY updated_at ASC
+      LIMIT 1
+    `, {
+      ':now': now,
+      ':require_webhook_url': requireWebhookUrl ? 1 : 0,
+    });
+    if (!row || !row.id) return null;
+
+    const changes = runStatementWithChanges(`
+      UPDATE session_flow_jobs
+      SET webhook_attempts = webhook_attempts + 1,
+          updated_at = :updated_at
+      WHERE id = :id
+        AND webhook_notified = 0
+        AND status IN ('completed', 'error')
+        AND webhook_next_retry_at <= :now
+        AND (:require_webhook_url = 0 OR COALESCE(webhook_url, '') <> '')
+    `, {
+      ':id': row.id,
+      ':now': now,
+      ':require_webhook_url': requireWebhookUrl ? 1 : 0,
+      ':updated_at': now,
+    });
+    if (changes <= 0) return null;
+    return this.getSessionFlowJob(row.id);
+  },
+
+  markSessionFlowWebhookDelivered(jobId) {
+    const now = Date.now();
+    runStatement(`
+      UPDATE session_flow_jobs
+      SET webhook_notified = 1,
+          webhook_last_error = NULL,
+          webhook_delivered_at = :webhook_delivered_at,
+          updated_at = :updated_at
+      WHERE id = :id
+    `, {
+      ':id': jobId,
+      ':webhook_delivered_at': now,
+      ':updated_at': now,
+    });
+    return this.getSessionFlowJob(jobId);
+  },
+
+  markSessionFlowWebhookRetry(jobId, errorMessage, nextRetryAt) {
+    const now = Date.now();
+    runStatement(`
+      UPDATE session_flow_jobs
+      SET webhook_notified = 0,
+          webhook_last_error = :webhook_last_error,
+          webhook_next_retry_at = :webhook_next_retry_at,
+          updated_at = :updated_at
+      WHERE id = :id
+    `, {
+      ':id': jobId,
+      ':webhook_last_error': errorMessage || null,
+      ':webhook_next_retry_at': nextRetryAt || now,
+      ':updated_at': now,
+    });
+    return this.getSessionFlowJob(jobId);
+  },
+
   clearAll() {
     runStatement('DELETE FROM sessions', {});
     runStatement('DELETE FROM fingerprints', {});
     runStatement('DELETE FROM message_jobs', {});
+    runStatement('DELETE FROM session_flow_jobs', {});
   },
 };

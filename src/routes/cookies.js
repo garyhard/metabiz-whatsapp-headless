@@ -4,9 +4,18 @@
 
 import express from 'express';
 import { validateCookies, validateProxy } from '../services/sessionManager.js';
+import { normalizeRequestId } from '../services/automation.js';
+import { enqueueSessionFlowJob, serializeSessionFlowJob } from '../services/sessionFlowQueue.js';
 import { InvalidInputError } from '../errors.js';
+import { buildJsonErrorBody } from '../utils/apiErrors.js';
 
 const router = express.Router();
+
+function toBoolean(value) {
+  if (value === true) return true;
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes';
+}
 
 /**
  * POST /api/cookies/validate
@@ -14,7 +23,7 @@ const router = express.Router();
  */
 router.post('/validate', async (req, res, next) => {
   try {
-    const { cookies, proxy, persist, twofaSecret } = req.body || {};
+    const { cookies, proxy, persist, twofaSecret, async, requestId, context, checkAfterSuccess, webhookUrl } = req.body || {};
 
     const cookiesIsString = typeof cookies === 'string';
     const cookiesIsArray = Array.isArray(cookies);
@@ -46,6 +55,30 @@ router.post('/validate', async (req, res, next) => {
       );
     }
 
+    const asyncMode = toBoolean(req.query?.async) || toBoolean(async);
+    const normalizedRequestId = normalizeRequestId('validate-cookies', requestId);
+    if (asyncMode) {
+      const { job, created } = enqueueSessionFlowJob({
+        requestId: normalizedRequestId,
+        jobType: 'validate_cookies',
+        payload: {
+          cookies,
+          proxy: proxyConfig,
+          persist: persist === true,
+          twofaSecret,
+          context: context && typeof context === 'object' && !Array.isArray(context) ? context : null,
+          checkAfterSuccess: toBoolean(checkAfterSuccess),
+        },
+        webhookUrl: webhookUrl ? String(webhookUrl).trim() : null,
+      });
+      return res.status(202).json({
+        ok: true,
+        accepted: true,
+        created,
+        job: serializeSessionFlowJob(job),
+      });
+    }
+
     const result = await validateCookies(cookies, proxyConfig, {
       persist: persist === true,
       twofaSecret,
@@ -60,11 +93,11 @@ router.post('/validate', async (req, res, next) => {
     });
   } catch (error) {
     if (error instanceof InvalidInputError) {
-      return res.status(400).json({
-        ok: false,
-        error: error.message,
-        errorCode: 'invalid_input',
-      });
+      return res.status(400).json(
+        buildJsonErrorBody(error, 'Invalid input', {
+          errorCode: 'invalid_input',
+        })
+      );
     }
     next(error);
   }
@@ -103,11 +136,11 @@ router.post('/validate-proxy', async (req, res, next) => {
     });
   } catch (error) {
     if (error instanceof InvalidInputError) {
-      return res.status(400).json({
-        ok: false,
-        error: error.message,
-        errorCode: 'invalid_input',
-      });
+      return res.status(400).json(
+        buildJsonErrorBody(error, 'Invalid input', {
+          errorCode: 'invalid_input',
+        })
+      );
     }
     next(error);
   }

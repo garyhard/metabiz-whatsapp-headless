@@ -13,10 +13,16 @@ const DEV_MODE = process.env.DEV_MODE === 'true' || process.env.NODE_ENV === 'de
 const FLOW_TIMEOUT_MS = parseInt(process.env.FLOW_TIMEOUT_MS || '60000', 10);
 const IDLE_TIMEOUT_MINUTES = parseInt(process.env.IDLE_TIMEOUT_MINUTES || '0', 10);
 const SEND_RELOAD_IDLE_MINUTES = parseInt(process.env.SEND_RELOAD_IDLE_MINUTES || '10', 10);
+const BROWSER_POOL_WAIT_MS = parseInt(process.env.BROWSER_POOL_WAIT_MS || '30000', 10);
 
 function parsePositiveInt(value, fallback) {
   const parsed = parseInt(String(value || ''), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseNonNegativeInt(value, fallback) {
+  const parsed = parseInt(String(value || ''), 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 function parseConcurrency(value, fallback) {
@@ -54,6 +60,12 @@ export const config = {
   port: PORT,
   devMode: DEV_MODE,
   flowTimeoutMs: Number.isFinite(FLOW_TIMEOUT_MS) && FLOW_TIMEOUT_MS > 0 ? FLOW_TIMEOUT_MS : 60000,
+  flowRecoverableRetryAttempts: parseNonNegativeInt(process.env.FLOW_RECOVERABLE_RETRY_ATTEMPTS, 2),
+  flowRecoverableRetryDelayMs: parsePositiveInt(process.env.FLOW_RECOVERABLE_RETRY_DELAY_MS, 1500),
+  maxActiveBrowsers: parseNonNegativeInt(process.env.MAX_ACTIVE_BROWSERS, 0),
+  browserPoolWaitMs: Number.isFinite(BROWSER_POOL_WAIT_MS) && BROWSER_POOL_WAIT_MS >= 0
+    ? BROWSER_POOL_WAIT_MS
+    : 30000,
   idleTimeoutMs: Number.isFinite(IDLE_TIMEOUT_MINUTES) && IDLE_TIMEOUT_MINUTES > 0
     ? IDLE_TIMEOUT_MINUTES * 60 * 1000
     : 0,
@@ -72,6 +84,18 @@ export const config = {
     webhookTimeoutMs: parsePositiveInt(process.env.META_BLAST_WEBHOOK_TIMEOUT_MS, 15000),
     webhookRetryBaseMs: parsePositiveInt(process.env.META_BLAST_WEBHOOK_RETRY_BASE_MS, 10000),
     webhookRetryMaxMs: parsePositiveInt(process.env.META_BLAST_WEBHOOK_RETRY_MAX_MS, 300000),
+  },
+  sessionQueue: {
+    pollIntervalMs: parsePositiveInt(process.env.META_SESSION_QUEUE_POLL_INTERVAL_MS, 1500),
+    batchSize: parsePositiveInt(process.env.META_SESSION_QUEUE_BATCH_SIZE, 1),
+    maxAttempts: parsePositiveInt(process.env.META_SESSION_QUEUE_MAX_ATTEMPTS, 3),
+    retryBaseMs: parsePositiveInt(process.env.META_SESSION_QUEUE_RETRY_BASE_MS, 30000),
+    retryMaxMs: parsePositiveInt(process.env.META_SESSION_QUEUE_RETRY_MAX_MS, 300000),
+    processingTimeoutMs: parsePositiveInt(process.env.META_SESSION_QUEUE_PROCESSING_TIMEOUT_MS, 240000),
+    webhookUrl: String(process.env.META_SESSION_WEBHOOK_URL || '').trim(),
+    webhookTimeoutMs: parsePositiveInt(process.env.META_SESSION_WEBHOOK_TIMEOUT_MS, 15000),
+    webhookRetryBaseMs: parsePositiveInt(process.env.META_SESSION_WEBHOOK_RETRY_BASE_MS, 10000),
+    webhookRetryMaxMs: parsePositiveInt(process.env.META_SESSION_WEBHOOK_RETRY_MAX_MS, 300000),
   },
   proxy: defaultProxy,
   texts: {

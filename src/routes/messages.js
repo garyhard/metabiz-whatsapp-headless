@@ -15,13 +15,14 @@ import {
   SessionNotFoundError,
   AutomationError,
 } from '../errors.js';
+import { buildJsonErrorBody } from '../utils/apiErrors.js';
 
 const router = express.Router();
 
 function getAutomationErrorCode(error) {
   const message = String(error?.message || '').toLowerCase();
   const type = String(error?.details?.type || '').toLowerCase();
-  if (message.includes('account restricted')) return 'account_restricted';
+  if (type === 'account_restricted' || message.includes('account restricted')) return 'account_restricted';
   if (type === 'captcha_required' || message.includes('captcha checkpoint')) return 'captcha_required';
   if (type === 'need_new_cookies' || message.includes('need new cookies')) return 'need_new_cookies';
   return 'automation_error';
@@ -144,32 +145,32 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
         });
       } catch (restoreError) {
         if (restoreError instanceof InvalidInputError) {
-          return res.status(400).json({
-            ok: false,
-            error: restoreError.message,
-            errorCode: 'invalid_input',
-          });
+          return res.status(400).json(
+            buildJsonErrorBody(restoreError, 'Invalid input', {
+              errorCode: 'invalid_input',
+            })
+          );
         }
         if (restoreError instanceof AutomationError) {
           return res.status(500).json(await buildAutomationErrorBody(restoreError, getAutomationErrorCode, normalizedRequestId));
         }
         if (restoreError instanceof SessionNotFoundError) {
-          return res.status(404).json({
-            ok: false,
-            error: restoreError.message,
-            errorCode: 'session_not_found',
-            sessionId,
-          });
+          return res.status(404).json(
+            buildJsonErrorBody(restoreError, 'Session not found', {
+              errorCode: 'session_not_found',
+              sessionId,
+            })
+          );
         }
         throw restoreError;
       }
     }
     if (error instanceof InvalidInputError) {
-      return res.status(400).json({
-        ok: false,
-        error: error.message,
-        errorCode: 'invalid_input',
-      });
+      return res.status(400).json(
+        buildJsonErrorBody(error, 'Invalid input', {
+          errorCode: 'invalid_input',
+        })
+      );
     }
     if (error instanceof AutomationError) {
       return res.status(500).json(await buildAutomationErrorBody(error, getAutomationErrorCode, normalizedRequestId));
@@ -264,32 +265,32 @@ router.post('/:sessionId/send-message-blast', async (req, res, next) => {
         });
       } catch (restoreError) {
         if (restoreError instanceof InvalidInputError) {
-          return res.status(400).json({
-            ok: false,
-            error: restoreError.message,
-            errorCode: 'invalid_input',
-          });
+          return res.status(400).json(
+            buildJsonErrorBody(restoreError, 'Invalid input', {
+              errorCode: 'invalid_input',
+            })
+          );
         }
         if (restoreError instanceof AutomationError) {
           return res.status(500).json(await buildAutomationErrorBody(restoreError, getAutomationErrorCode, normalizedRequestId));
         }
         if (restoreError instanceof SessionNotFoundError) {
-          return res.status(404).json({
-            ok: false,
-            error: restoreError.message,
-            errorCode: 'session_not_found',
-            sessionId,
-          });
+          return res.status(404).json(
+            buildJsonErrorBody(restoreError, 'Session not found', {
+              errorCode: 'session_not_found',
+              sessionId,
+            })
+          );
         }
         throw restoreError;
       }
     }
     if (error instanceof InvalidInputError) {
-      return res.status(400).json({
-        ok: false,
-        error: error.message,
-        errorCode: 'invalid_input',
-      });
+      return res.status(400).json(
+        buildJsonErrorBody(error, 'Invalid input', {
+          errorCode: 'invalid_input',
+        })
+      );
     }
     if (error instanceof AutomationError) {
       return res.status(500).json(await buildAutomationErrorBody(error, getAutomationErrorCode, normalizedRequestId));

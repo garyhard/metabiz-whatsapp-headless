@@ -1,6 +1,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { readRequestLog } from './automation.js';
+import { buildApiErrorMeta, sanitizeApiErrorMessage } from '../utils/apiErrors.js';
 
 export async function buildScreenshotDataUrlFromPath(filePath) {
   try {
@@ -47,10 +48,14 @@ export async function enrichAutomationDetails(details, fallbackRequestId = null)
 
 export async function buildAutomationErrorBody(error, getAutomationErrorCode, fallbackRequestId = null) {
   const details = await enrichAutomationDetails(error?.details, fallbackRequestId);
+  const sanitizedMessage = sanitizeApiErrorMessage(error?.message || 'Automation failed', 'Automation failed');
+  const errorMeta = buildApiErrorMeta(error?.message || '');
+  const hasDetails = Boolean(details) || Object.keys(errorMeta).length > 0;
+  const mergedDetails = hasDetails ? { ...(details || {}), ...errorMeta } : null;
   return {
     ok: false,
-    error: error?.message || 'Automation failed',
+    error: sanitizedMessage,
     errorCode: getAutomationErrorCode(error),
-    details,
+    details: mergedDetails,
   };
 }

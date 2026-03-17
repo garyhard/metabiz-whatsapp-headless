@@ -69,6 +69,10 @@ function buildErrorResult(error, fallbackMessage) {
   };
 }
 
+function isRetryableMessageJobError(errorResult) {
+  return String(errorResult?.errorCode || '').toLowerCase() !== 'account_restricted';
+}
+
 async function processJob(job) {
   try {
     const result = await sendMessageForSession(job.sessionId, {
@@ -83,11 +87,15 @@ async function processJob(job) {
     return;
   } catch (error) {
     const message = error?.message ? String(error.message) : String(error);
+    const errorResult = buildErrorResult(error, message);
     const maxAttempts = Math.max(1, Number(job.maxAttempts) || config.queue.maxAttempts);
     const attempts = Math.max(1, Number(job.attempts) || 1);
-    if (attempts >= maxAttempts) {
-      sessionStore.markMessageJobError(job.id, message, buildErrorResult(error, message));
-      console.warn(`[MessageQueue] job failed id=${job.id} attempts=${attempts}/${maxAttempts}`);
+    const retryable = isRetryableMessageJobError(errorResult);
+    if (!retryable || attempts >= maxAttempts) {
+      sessionStore.markMessageJobError(job.id, message, errorResult);
+      console.warn(
+        `[MessageQueue] job failed id=${job.id} attempts=${attempts}/${maxAttempts} retryable=${retryable}`
+      );
       return;
     }
 
