@@ -3,6 +3,7 @@
  */
 
 import { AutomationError } from '../errors.js';
+import { config } from '../config.js';
 import { generateTotpCode } from '../utils/totp.js';
 import { easyOCR, isOcrConfigured } from '../utils/ocr.js';
 import path from 'path';
@@ -192,17 +193,22 @@ const NEED_NEW_COOKIES_IDENTITY_HINTS = normalizeList([
   'konfirmasi identitas anda',
   'kami memerlukan info lebih lanjut untuk memastikan anda manusia',
 ]);
-const OPEN_WHATSAPP_MODAL_LABELS = normalizeList([
+const OPEN_WHATSAPP_MODAL_LABELS = uniqueNormalizedList([
+  ...(config?.texts?.openWhatsappModal || []),
   'send a message on whatsapp',
+  'send message on whatsapp',
   'kirim pesan di whatsapp',
   'kirim pesan lewat whatsapp',
 ]);
-const NEW_WHATSAPP_NUMBER_LABELS = normalizeList([
+const NEW_WHATSAPP_NUMBER_LABELS = uniqueNormalizedList([
+  ...(config?.texts?.newWhatsappNumber || []),
   'new whatsapp number',
+  'new whatsapp',
   'nomor whatsapp baru',
   'nomor baru whatsapp',
 ]);
-const SEND_MESSAGE_LABELS = normalizeList([
+const SEND_MESSAGE_LABELS = uniqueNormalizedList([
+  ...(config?.texts?.sendMessage || []),
   'send message',
   'kirim pesan',
 ]);
@@ -213,6 +219,12 @@ const REPLY_SEND_LABELS = normalizeList([
   'kirimkan',
   'balas',
   'kirim balasan',
+]);
+const REPLY_INPUT_HINTS = normalizeList([
+  'reply on whatsapp',
+  'reply',
+  'balas',
+  'whatsapp',
 ]);
 
 async function dismissSaveLoginInfo(page, label = 'Automation') {
@@ -1372,6 +1384,10 @@ function normalizeList(list) {
   return Array.isArray(list) ? list.map(normalizeText).filter(Boolean) : [];
 }
 
+function uniqueNormalizedList(list) {
+  return Array.from(new Set(normalizeList(list)));
+}
+
 function normalizeDigits(value) {
   return String(value || '').replace(/[^\d]/g, '');
 }
@@ -2364,6 +2380,17 @@ async function findFirstVisible(page, selector) {
   return null;
 }
 
+async function findFirstVisibleInRoot(page, root, selector) {
+  if (!root || !root.$$) return null;
+  const elements = await root.$$(selector);
+  for (const el of elements) {
+    if (await isVisible(page, el)) {
+      return el;
+    }
+  }
+  return null;
+}
+
 /**
  * Find element by text content
  */
@@ -2462,6 +2489,7 @@ async function ensureSearchEmpty(page) {
 async function findThreadRowByNumber(page, digits) {
   const rows = await page.$$('span[data-surface="/bizweb:all/thread_row"]');
   for (const row of rows) {
+    if (!(await isVisible(page, row))) continue;
     const text = await page.evaluate((el) => el.textContent || '', row);
     if (normalizeDigits(text).includes(digits)) {
       return row;
@@ -2475,8 +2503,18 @@ async function isPeopleSectionItem(page, itemHandle) {
     return await itemHandle.evaluate((el) => {
       let node = el.parentElement;
       for (let i = 0; i < 6 && node; i += 1) {
-        const heading = node.querySelector('div._ohe');
-        if (heading && heading.textContent.trim().toUpperCase() === 'PEOPLE') {
+        const heading =
+          node.querySelector('[role="heading"]') ||
+          node.querySelector('h1,h2,h3,h4,h5,h6') ||
+          node.querySelector('div._ohe');
+        if (heading && (heading.textContent || '').replace(/\s+/g, ' ').trim().toUpperCase() === 'PEOPLE') {
+          return true;
+        }
+        const previousText = (node.previousElementSibling?.textContent || '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .toUpperCase();
+        if (previousText === 'PEOPLE') {
           return true;
         }
         node = node.parentElement;
@@ -2488,9 +2526,54 @@ async function isPeopleSectionItem(page, itemHandle) {
   }
 }
 
-async function findPeopleResultByNumber(page, digits) {
+async function findSearchResultByNumber(page, searchInput, digits) {
+  const roots = [];
+
+  if (searchInput) {
+    const controlsId = await searchInput.evaluate((el) => el.getAttribute('aria-controls') || '');
+    if (controlsId) {
+      const controlled = await page.$(`#${controlsId}`);
+      if (controlled && await isVisible(page, controlled)) {
+        roots.push(controlled);
+      }
+    }
+  }
+
+  const fallbackRoots = await page.$$('[role="listbox"], [data-testid="ContextualLayerRoot"]');
+  for (const root of fallbackRoots) {
+    if (await isVisible(page, root)) {
+      roots.push(root);
+    }
+  }
+
+  let firstMatch = null;
+  for (const root of roots) {
+    const candidates = await root.$$('[role="option"], li, [role="row"], [role="button"], a');
+    for (const candidate of candidates) {
+      if (!(await isVisible(page, candidate))) continue;
+      const text = await candidate.evaluate((el) => (el.textContent || el.innerText || '').trim());
+      if (!normalizeDigits(text).includes(digits)) continue;
+      if (await isPeopleSectionItem(page, candidate)) {
+        return candidate;
+      }
+      if (!firstMatch) {
+        firstMatch = candidate;
+      }
+    }
+  }
+
+  return firstMatch;
+}
+
+async function findPeopleResultByNumber(page, digits, searchInput = null) {
+  const genericResult = await findSearchResultByNumber(page, searchInput, digits);
+  if (genericResult) {
+    return genericResult;
+  }
+
   const items = await page.$$('li._7znk');
   for (const item of items) {
+    if (!(await isVisible(page, item))) continue;
     const text = await page.evaluate((el) => el.textContent || '', item);
     if (normalizeDigits(text).includes(digits) && (await isPeopleSectionItem(page, item))) {
       return item;
@@ -2499,15 +2582,37 @@ async function findPeopleResultByNumber(page, digits) {
   return null;
 }
 
+async function findReplyInput(page) {
+  const candidates = await page.$$('[contenteditable="true"][role="textbox"], textarea');
+  let fallback = null;
+
+  for (const candidate of candidates) {
+    if (!(await isVisible(page, candidate))) continue;
+    const bag = await candidate.evaluate((el) => {
+      return [
+        el.getAttribute('aria-placeholder') || '',
+        el.getAttribute('placeholder') || '',
+        el.getAttribute('aria-label') || '',
+        el.getAttribute('title') || '',
+      ].join(' ');
+    });
+    const normalizedBag = normalizeText(bag);
+    if (REPLY_INPUT_HINTS.some((hint) => normalizedBag.includes(hint))) {
+      return candidate;
+    }
+    if (!fallback) {
+      fallback = candidate;
+    }
+  }
+
+  return fallback;
+}
+
 async function fillReplyMessage(page, message) {
   console.log('[Automation] Reply flow: waiting for reply box');
   const replyBox = await waitFor(
     page,
-    async () =>
-      findFirstVisible(
-        page,
-        'div[contenteditable="true"][role="textbox"][aria-placeholder*="Reply on WhatsApp"]'
-      ),
+    async () => findReplyInput(page),
     { timeoutMs: 8000 }
   );
 
@@ -2563,7 +2668,13 @@ async function clickReplySend(page, replyBox) {
   console.log('[Automation] Reply flow: waiting for submit button');
   const button = await waitFor(
     page,
-    async () => findScopedReplyButton(page, replyBox),
+    async () => {
+      const candidate = await findScopedReplyButton(page, replyBox);
+      if (!candidate) return null;
+      if (!(await isVisible(page, candidate))) return null;
+      if (!(await isElementEnabled(candidate))) return null;
+      return candidate;
+    },
     { timeoutMs: 15000 }
   ).catch(() => null);
   if (!button) {
@@ -2612,7 +2723,7 @@ async function tryReplyFlow(page, { phoneDigits, message, twofaSecret = null }) 
 
     const peopleItem = await waitFor(
       page,
-      async () => findPeopleResultByNumber(page, phoneDigits),
+      async () => findPeopleResultByNumber(page, phoneDigits, searchInput),
       { timeoutMs: 3000 }
     ).catch(() => null);
 
@@ -2701,31 +2812,177 @@ async function clickElement(page, elementHandle, stepName = 'click') {
   }
 }
 
+async function isElementEnabled(elementHandle) {
+  if (!elementHandle) return false;
+  try {
+    return await elementHandle.evaluate((el) => {
+      if (el.hasAttribute('disabled')) return false;
+      if (el.getAttribute('aria-disabled') === 'true') return false;
+      if (el.getAttribute('data-disabled') === 'true') return false;
+      return true;
+    });
+  } catch {
+    return false;
+  }
+}
+
+async function findVisibleThreadRow(page) {
+  const rows = await page.$$('span[data-surface="/bizweb:all/thread_row"]');
+  for (const row of rows) {
+    if (await isVisible(page, row)) {
+      return row;
+    }
+  }
+  return null;
+}
+
+async function findDialogPhoneInput(page, dialog) {
+  if (!dialog) return null;
+  return findFirstVisibleInRoot(page, dialog, 'input[type="tel"], input[inputmode="tel"]');
+}
+
+async function findDialogMessageInput(page, dialog) {
+  if (!dialog) {
+    return { textarea: null, editable: null };
+  }
+  const textarea = await findFirstVisibleInRoot(page, dialog, 'textarea');
+  if (textarea) {
+    return { textarea, editable: null };
+  }
+  const editable = await findFirstVisibleInRoot(page, dialog, '[contenteditable="true"]');
+  return { textarea: null, editable };
+}
+
+async function findDialogSendButton(page, dialog, { requireEnabled = false } = {}) {
+  if (!dialog) return null;
+
+  let btn = null;
+  for (const label of SEND_MESSAGE_LABELS) {
+    btn = await findByText(page, {
+      root: dialog,
+      text: label,
+      selector: '[role="button"],button,div[role="button"]',
+    });
+    if (btn) break;
+  }
+
+  if (!btn) return null;
+
+  const role = await btn.evaluate((el) => el.getAttribute('role'));
+  if (role !== 'button') {
+    const parentBtnHandle = await btn.evaluateHandle((el) => el.closest('[role="button"],button'));
+    const parentBtn = await parentBtnHandle.asElement();
+    if (parentBtn) {
+      btn = parentBtn;
+    }
+  }
+
+  if (!(await isVisible(page, btn))) {
+    return null;
+  }
+  if (requireEnabled && !(await isElementEnabled(btn))) {
+    return null;
+  }
+  return btn;
+}
+
+async function findWhatsappModalTrigger(page) {
+  let btn = await findFirstVisible(
+    page,
+    'div[role="button"][data-surface*="whatsapp_biz_init_thread_header_button"]'
+  );
+  if (btn) {
+    return btn;
+  }
+
+  for (const label of OPEN_WHATSAPP_MODAL_LABELS) {
+    btn = await findByText(page, {
+      text: label,
+      selector: '[role="button"],button,div[role],a',
+    });
+    if (btn) {
+      return btn;
+    }
+  }
+
+  return null;
+}
+
+async function logWhatsappModalTriggerDebug(page) {
+  try {
+    const pageState = await page.evaluate(() => {
+      const visibleButtons = Array.from(document.querySelectorAll('[role="button"],button,a'))
+        .map((el) => {
+          const style = window.getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          return {
+            text: (el.textContent || el.innerText || '').replace(/\s+/g, ' ').trim(),
+            ariaLabel: el.getAttribute('aria-label') || '',
+            title: el.getAttribute('title') || '',
+            dataSurface: el.getAttribute('data-surface') || '',
+            role: el.getAttribute('role') || '',
+            tagName: el.tagName || '',
+            visible:
+              rect.width > 0 &&
+              rect.height > 0 &&
+              style.display !== 'none' &&
+              style.visibility !== 'hidden' &&
+              style.opacity !== '0',
+          };
+        })
+        .filter((item) => item.visible && (item.text || item.ariaLabel || item.dataSurface))
+        .slice(0, 25);
+
+      return {
+        title: document.title,
+        url: window.location.href,
+        dialogCount: document.querySelectorAll('[role="dialog"]').length,
+        threadRowCount: document.querySelectorAll('span[data-surface="/bizweb:all/thread_row"]').length,
+        headerTriggerCount: document.querySelectorAll('div[role="button"][data-surface*="whatsapp_biz_init_thread_header_button"]').length,
+        visibleButtons,
+      };
+    });
+    console.error('[Automation] Step 1: Debug page state:', JSON.stringify(pageState, null, 2));
+  } catch (error) {
+    console.error('[Automation] Step 1: Failed to capture debug state:', error.message);
+  }
+}
+
 /**
  * Open WhatsApp modal
  */
 async function openWhatsappModal(page) {
   console.log('[Automation] Step 1: Opening WhatsApp modal...');
-  
-  // Try data-surface attribute first
-  let btn = await findFirstVisible(
-    page,
-    'div[role="button"][data-surface*="whatsapp_biz_init_thread_header_button"]'
-  );
 
-  // Fallback to exact text search
+  let btn = await waitFor(
+    page,
+    async () => findWhatsappModalTrigger(page),
+    { timeoutMs: 5000, intervalMs: 200 }
+  ).catch(() => null);
+
   if (!btn) {
-    console.log('[Automation] Step 1: Button not found by data-surface, trying exact text...');
-    for (const label of OPEN_WHATSAPP_MODAL_LABELS) {
-      btn = await findByText(page, {
-        text: label,
-        selector: '[role="button"],button,div[role],a',
-      });
-      if (btn) break;
+    console.log('[Automation] Step 1: Trigger button not ready, trying to activate thread header...');
+    const firstRow = await waitFor(
+      page,
+      async () => findVisibleThreadRow(page),
+      { timeoutMs: 3000, intervalMs: 200 }
+    ).catch(() => null);
+
+    if (firstRow) {
+      await clickElement(page, firstRow, 'Step 1: Activate thread row');
+      await sleep(500);
+      btn = await waitFor(
+        page,
+        async () => findWhatsappModalTrigger(page),
+        { timeoutMs: 8000, intervalMs: 200 }
+      ).catch(() => null);
+    } else {
+      console.log('[Automation] Step 1: No visible thread row available for fallback');
     }
   }
 
   if (!btn) {
+    await logWhatsappModalTriggerDebug(page);
     throw new AutomationError('Step 1: Could not find WhatsApp modal trigger button');
   }
 
@@ -2761,12 +3018,8 @@ async function isDirectComposeFormVisible(page, dialog = null) {
     }
   }
 
-  const phoneInput = await findFirstVisible(
-    page,
-    '[role="dialog"] input[type="tel"], [role="dialog"] input[inputmode="tel"]'
-  );
-  const textarea = await findFirstVisible(page, '[role="dialog"] textarea');
-  const editable = await findFirstVisible(page, '[role="dialog"] [contenteditable="true"]');
+  const phoneInput = await findDialogPhoneInput(page, currentDialog);
+  const { textarea, editable } = await findDialogMessageInput(page, currentDialog);
 
   return hasExtensionCombo && phoneInput !== null && (textarea !== null || editable !== null);
 }
@@ -2811,8 +3064,9 @@ async function clickNewWhatsappNumber(page) {
   }
 
   // Strategy 1: Use data-surface attribute (most reliable)
-  let target = await findFirstVisible(
+  let target = await findFirstVisibleInRoot(
     page,
+    dialog,
     'div[role="button"][data-surface*="business-initiate-thread-search-contacts-button"]'
   );
 
@@ -2825,6 +3079,7 @@ async function clickNewWhatsappNumber(page) {
     console.log('[Automation] Step 2: Trying exact text...');
     for (const label of NEW_WHATSAPP_NUMBER_LABELS) {
       target = await findByText(page, {
+        root: dialog,
         text: label,
         selector: '[role="button"],button,div[role="button"]',
       });
@@ -3047,9 +3302,29 @@ async function selectExtension(page, extension) {
     throw new AutomationError('Step 3: No options found in listbox after filtering');
   }
 
-  await options[0].scrollIntoViewIfNeeded();
+  let selectedOption = null;
+  for (const option of options) {
+    if (!(await isVisible(page, option))) continue;
+    const optionText = await option.evaluate((el) => (el.textContent || el.innerText || '').trim());
+    const optionDigits = normalizeDigits(optionText);
+    const normalizedOptionText = normalizeText(optionText);
+    if (
+      normalizedOptionText.includes(`+${wantDigits}`) ||
+      optionDigits === wantDigits ||
+      optionDigits.startsWith(wantDigits)
+    ) {
+      selectedOption = option;
+      break;
+    }
+  }
+
+  if (!selectedOption) {
+    throw new AutomationError(`Step 3: No matching option found for extension "${wantDigits}"`);
+  }
+
+  await selectedOption.scrollIntoViewIfNeeded();
   await sleep(200);
-  await clickElement(page, options[0], 'Step 3: Select extension option');
+  await clickElement(page, selectedOption, 'Step 3: Select extension option');
   await sleep(400);
 }
 
@@ -3073,37 +3348,16 @@ async function fillPhoneNumber(page, phone) {
   await waitFor(
     page,
     async () => {
-      const inputs = await dialog.$$('input');
-      const visibleInputs = [];
-      for (const input of inputs) {
-        if (await isVisible(page, input)) {
-          visibleInputs.push(input);
-        }
-      }
-      return visibleInputs.length > 0;
+      const input = await findDialogPhoneInput(page, dialog);
+      return input !== null;
     },
     { timeoutMs: 10000 }
   );
 
-  // Find phone input - most precise: any visible tel-type input in dialog
-  let input = await findFirstVisible(page, 'input[type="tel"],input[inputmode="tel"]');
-
-  // Fallback: last visible input in page (phone usually comes after extension)
-  if (!input) {
-    const allInputs = await page.$$('input');
-    const visibleInputs = [];
-    for (const inp of allInputs) {
-      if (await isVisible(page, inp)) {
-        visibleInputs.push(inp);
-      }
-    }
-    if (visibleInputs.length > 0) {
-      input = visibleInputs[visibleInputs.length - 1];
-    }
-  }
+  const input = await findDialogPhoneInput(page, dialog);
 
   if (!input) {
-    throw new AutomationError('Could not find phone input in dialog');
+    throw new AutomationError('Step 4: Could not find phone input in dialog');
   }
 
   await setNativeValue(page, input, phone);
@@ -3131,15 +3385,14 @@ async function fillMessage(page, message) {
   await waitFor(
     page,
     async () => {
-      const textarea = await findFirstVisible(page, 'textarea');
-      const editable = await findFirstVisible(page, '[contenteditable="true"]');
+      const { textarea, editable } = await findDialogMessageInput(page, dialog);
       return textarea !== null || editable !== null;
     },
     { timeoutMs: 10000 }
   );
 
   // Try textarea first
-  const textarea = await findFirstVisible(page, 'textarea');
+  const { textarea, editable } = await findDialogMessageInput(page, dialog);
   if (textarea) {
     console.log('[Automation] Step 5: Found textarea, filling...');
     await setNativeValue(page, textarea, message);
@@ -3149,7 +3402,6 @@ async function fillMessage(page, message) {
   }
 
   // Some Meta inputs use contenteditable divs
-  const editable = await findFirstVisible(page, '[contenteditable="true"]');
   if (!editable) {
     throw new AutomationError('Step 5: Could not find message input (textarea or contenteditable)');
   }
@@ -3186,33 +3438,14 @@ async function clickSendMessage(page) {
     throw new AutomationError('Step 6: Dialog not found');
   }
 
-  // Find button with exact text
-  let btn = null;
-  for (const label of SEND_MESSAGE_LABELS) {
-    btn = await findByText(page, {
-      root: dialog,
-      text: label,
-      selector: '[role="button"],button,div[role="button"]',
-    });
-    if (btn) break;
-  }
-
-  // If we matched the inner label div, climb to its button container
-  if (btn) {
-    const role = await page.evaluate((el) => el.getAttribute('role'), btn);
-    if (role !== 'button') {
-      const parentBtnHandle = await page.evaluateHandle((el) => {
-        return el.closest('[role="button"]');
-      }, btn);
-      const parentBtn = await parentBtnHandle.asElement();
-      if (parentBtn) {
-        btn = parentBtn;
-      }
-    }
-  }
+  const btn = await waitFor(
+    page,
+    async () => findDialogSendButton(page, dialog, { requireEnabled: true }),
+    { timeoutMs: 10000, intervalMs: 200 }
+  ).catch(() => null);
 
   if (!btn) {
-    throw new AutomationError('Step 6: Could not find "Send message" button');
+    throw new AutomationError('Step 6: Could not find enabled "Send message" button');
   }
 
   console.log('[Automation] Step 6: Found button, clicking...');
@@ -3496,22 +3729,21 @@ export async function checkSessionFlow(page, { sessionId = null, cUser = null, t
     }
     logStep('check:dialog_ok');
 
-    const combo = await findFirstVisible(page, '[role="dialog"] [role="combobox"][aria-haspopup="listbox"]');
+    const combo = await findFirstVisibleInRoot(page, dialog, '[role="combobox"][aria-haspopup="listbox"]');
     if (!combo) {
       throw new AutomationError('Check: Extension dropdown not found');
     }
     logStep('check:combo_ok');
 
     // Step 4: Ensure phone input exists
-    const phoneInput = await findFirstVisible(page, 'input[type="tel"],input[inputmode="tel"]');
+    const phoneInput = await findDialogPhoneInput(page, dialog);
     if (!phoneInput) {
       throw new AutomationError('Check: Phone input not found');
     }
     logStep('check:phone_ok');
 
     // Step 5: Ensure message input exists
-    const textarea = await findFirstVisible(page, 'textarea');
-    const editable = await findFirstVisible(page, '[contenteditable="true"]');
+    const { textarea, editable } = await findDialogMessageInput(page, dialog);
     if (!textarea && !editable) {
       throw new AutomationError('Check: Message input not found');
     }

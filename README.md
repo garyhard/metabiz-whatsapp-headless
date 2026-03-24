@@ -91,6 +91,7 @@ PROXY_PASSWORD=your-proxy-password
 - `PROXY_PASSWORD` (optional): Proxy password (required if proxy requires authentication)
 - `MESSAGE_QUEUE_POLL_INTERVAL_MS` (optional): Polling interval worker queue (default: `1500`)
 - `MESSAGE_QUEUE_BATCH_SIZE` (optional): Max jobs per pump (default: `5`)
+- `MESSAGE_QUEUE_SESSION_BURST_SIZE` (optional): Prioritas sticky per session untuk reuse browser. `5` berarti satu session diprioritaskan sampai 5 job sebelum pindah ke session lain (default: `5`)
 - `SEND_CONCURRENCY` (optional): Batas paralel kirim lintas session. `10` untuk fixed 10 paralel, `0`/`all` untuk semua browser aktif (default: `1`). Queue hanya akan mengaktifkan maksimal satu job `processing` per `session_id`, jadi job dalam session yang sama tetap antri.
 - `MESSAGE_QUEUE_MAX_ATTEMPTS` (optional): Retry attempts per job (default: `5`)
 - `MESSAGE_QUEUE_RETRY_BASE_MS` (optional): Base retry delay (default: `30000`)
@@ -99,6 +100,7 @@ PROXY_PASSWORD=your-proxy-password
 - `FLOW_RECOVERABLE_RETRY_DELAY_MS` (optional): Delay antar retry internal flow recoverable (default: `1500`)
 - `MESSAGE_QUEUE_PROCESSING_TIMEOUT_MS` (optional): Timeout untuk requeue job `processing` setelah restart/crash (default: `180000`)
 - `META_BLAST_WEBHOOK_URL` (optional): URL webhook Rails penerima status blast (contoh: `https://your-app.com/webhooks/meta_blast_status`)
+- `META_BLAST_WEBHOOK_PRIVATE_URL` (optional): Jika diisi, blast status webhook akan dikirim ke URL private ini lebih dulu, fallback ke `META_BLAST_WEBHOOK_URL`
 - `META_BLAST_WEBHOOK_TIMEOUT_MS` (optional): Timeout HTTP webhook (default: `15000`)
 - `META_BLAST_WEBHOOK_RETRY_BASE_MS` (optional): Base delay retry webhook (default: `10000`)
 - `META_BLAST_WEBHOOK_RETRY_MAX_MS` (optional): Max delay retry webhook (default: `300000`)

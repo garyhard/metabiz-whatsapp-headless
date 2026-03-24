@@ -60,6 +60,7 @@ db.exec(`
     request_id TEXT UNIQUE,
     meta_blast_message_id TEXT,
     session_id TEXT NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'normal',
     extension TEXT NOT NULL,
     phone_number TEXT NOT NULL,
     message TEXT NOT NULL,
@@ -83,6 +84,8 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_message_jobs_status_next_retry
     ON message_jobs(status, next_retry_at, created_at);
+  CREATE INDEX IF NOT EXISTS idx_message_jobs_status_retry_priority_created
+    ON message_jobs(status, next_retry_at, priority, created_at);
   CREATE TABLE IF NOT EXISTS session_flow_jobs (
     id TEXT PRIMARY KEY,
     request_id TEXT UNIQUE,
@@ -170,6 +173,21 @@ try {
   db.exec('ALTER TABLE message_jobs ADD COLUMN meta_blast_message_id TEXT');
 } catch {
   // Column already exists.
+}
+
+try {
+  db.exec("ALTER TABLE message_jobs ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'");
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_message_jobs_status_retry_priority_created
+      ON message_jobs(status, next_retry_at, priority, created_at)
+  `);
+} catch {
+  // Index already exists.
 }
 
 try {
@@ -335,7 +353,47 @@ function deserializeCookies(format, raw) {
   return raw || '';
 }
 
-function getNextRunnableMessageJobRow(now = Date.now()) {
+function normalizeMessageJobPriority(priority, fallback = 'normal') {
+  const normalized = String(priority || '').trim().toLowerCase();
+  if (normalized === 'high' || normalized === 'low') {
+    return normalized;
+  }
+  return fallback;
+}
+
+function messageJobPriorityOrderSql(columnName = 'q.priority') {
+  return `CASE ${columnName} WHEN 'high' THEN 0 WHEN 'normal' THEN 1 WHEN 'low' THEN 2 ELSE 1 END`;
+}
+
+function getNextRunnableMessageJobRow(now = Date.now(), preferredSessionId = null, onlyPreferredSession = false) {
+  const preferredSession = preferredSessionId ? String(preferredSessionId) : null;
+  if (preferredSession) {
+    const preferredRow = getRow(`
+      SELECT q.id
+      FROM message_jobs q
+      WHERE q.session_id = :session_id
+        AND q.status = 'queued'
+        AND q.next_retry_at <= :now
+        AND NOT EXISTS (
+          SELECT 1
+          FROM message_jobs p
+          WHERE p.session_id = q.session_id
+            AND p.status = 'processing'
+        )
+      ORDER BY ${messageJobPriorityOrderSql('q.priority')} ASC, q.created_at ASC
+      LIMIT 1
+    `, {
+      ':session_id': preferredSession,
+      ':now': now,
+    });
+    if (preferredRow?.id) {
+      return preferredRow;
+    }
+    if (onlyPreferredSession) {
+      return null;
+    }
+  }
+
   return getRow(`
     SELECT q.id
     FROM message_jobs q
@@ -347,7 +405,7 @@ function getNextRunnableMessageJobRow(now = Date.now()) {
         WHERE p.session_id = q.session_id
           AND p.status = 'processing'
       )
-    ORDER BY q.created_at ASC
+    ORDER BY ${messageJobPriorityOrderSql('q.priority')} ASC, q.created_at ASC
     LIMIT 1
   `, { ':now': now });
 }
@@ -361,6 +419,37 @@ function getNextRunnableSessionFlowJobRow(now = Date.now()) {
     ORDER BY created_at ASC
     LIMIT 1
   `, { ':now': now });
+}
+
+function buildMessageJobFilterClause({ sessionId = null, jobIds = [] } = {}) {
+  const conditions = [];
+  const params = {};
+
+  const normalizedSessionId = String(sessionId || '').trim();
+  if (normalizedSessionId) {
+    conditions.push('session_id = :filter_session_id');
+    params[':filter_session_id'] = normalizedSessionId;
+  }
+
+  const normalizedJobIds = Array.isArray(jobIds)
+    ? jobIds.map((value) => String(value || '').trim()).filter((value) => value.length > 0)
+    : [];
+  if (normalizedJobIds.length > 0) {
+    const placeholders = normalizedJobIds.map((_, index) => `:filter_job_id_${index}`);
+    conditions.push(`id IN (${placeholders.join(', ')})`);
+    normalizedJobIds.forEach((value, index) => {
+      params[`:filter_job_id_${index}`] = value;
+    });
+  }
+
+  if (conditions.length === 0) {
+    return { clause: null, params: {} };
+  }
+
+  return {
+    clause: conditions.length === 1 ? conditions[0] : `(${conditions.join(' OR ')})`,
+    params,
+  };
 }
 
 function runStatement(sql, params) {
@@ -439,6 +528,7 @@ function normalizeMessageJobRow(row) {
     requestId: row.request_id || null,
     metaBlastMessageId: row.meta_blast_message_id || null,
     sessionId: row.session_id,
+    priority: normalizeMessageJobPriority(row.priority, 'normal'),
     extension: row.extension,
     phoneNumber: row.phone_number,
     message: row.message,
@@ -657,6 +747,7 @@ export const sessionStore = {
     requestId = null,
     metaBlastMessageId = null,
     sessionId,
+    priority = 'normal',
     extension,
     phoneNumber,
     message,
@@ -667,12 +758,12 @@ export const sessionStore = {
     const now = Date.now();
     runStatement(`
       INSERT INTO message_jobs (
-        id, request_id, meta_blast_message_id, session_id, extension, phone_number, message,
+        id, request_id, meta_blast_message_id, session_id, priority, extension, phone_number, message,
         use_reply_flow, include_success_screenshot, status, attempts, max_attempts,
         next_retry_at, webhook_notified, webhook_attempts, webhook_next_retry_at,
         created_at, updated_at
       ) VALUES (
-        :id, :request_id, :meta_blast_message_id, :session_id, :extension, :phone_number, :message,
+        :id, :request_id, :meta_blast_message_id, :session_id, :priority, :extension, :phone_number, :message,
         :use_reply_flow, :include_success_screenshot, 'queued', 0, :max_attempts,
         0, 0, 0, 0, :created_at, :updated_at
       )
@@ -681,6 +772,7 @@ export const sessionStore = {
       ':request_id': requestId || null,
       ':meta_blast_message_id': metaBlastMessageId || null,
       ':session_id': sessionId,
+      ':priority': normalizeMessageJobPriority(priority, useReplyFlow ? 'high' : 'normal'),
       ':extension': extension,
       ':phone_number': phoneNumber,
       ':message': message,
@@ -710,13 +802,13 @@ export const sessionStore = {
     return normalizeMessageJobRow(row);
   },
 
-  hasRunnableMessageJob(now = Date.now()) {
-    const row = getNextRunnableMessageJobRow(now);
+  hasRunnableMessageJob(now = Date.now(), preferredSessionId = null, onlyPreferredSession = false) {
+    const row = getNextRunnableMessageJobRow(now, preferredSessionId, onlyPreferredSession);
     return !!row;
   },
 
-  claimNextMessageJob(now = Date.now()) {
-    const row = getNextRunnableMessageJobRow(now);
+  claimNextMessageJob(now = Date.now(), preferredSessionId = null, onlyPreferredSession = false) {
+    const row = getNextRunnableMessageJobRow(now, preferredSessionId, onlyPreferredSession);
     if (!row || !row.id) return null;
 
     const changes = runStatementWithChanges(`
@@ -732,6 +824,23 @@ export const sessionStore = {
     });
     if (changes <= 0) return null;
     return this.getMessageJob(row.id);
+  },
+
+  hasQueuedMessageJobForSession(sessionId, now = Date.now()) {
+    if (!sessionId) return false;
+    const row = getRow(`
+      SELECT id
+      FROM message_jobs
+      WHERE session_id = :session_id
+        AND status = 'queued'
+        AND next_retry_at <= :now
+      ORDER BY created_at ASC
+      LIMIT 1
+    `, {
+      ':session_id': String(sessionId),
+      ':now': now,
+    });
+    return !!row;
   },
 
   markMessageJobSent(jobId, result) {
@@ -799,6 +908,86 @@ export const sessionStore = {
       ':updated_at': now,
     });
     return this.getMessageJob(jobId);
+  },
+
+  failQueuedMessageJobsForSession(sessionId, errorMessage, result = null) {
+    if (!sessionId) return 0;
+
+    const now = Date.now();
+    return runStatementWithChanges(`
+      UPDATE message_jobs
+      SET status = 'error',
+          error_message = :error_message,
+          result_json = :result_json,
+          webhook_notified = 0,
+          webhook_attempts = 0,
+          webhook_next_retry_at = 0,
+          webhook_last_error = NULL,
+          webhook_delivered_at = NULL,
+          finished_at = :finished_at,
+          updated_at = :updated_at
+      WHERE session_id = :session_id
+        AND status = 'queued'
+    `, {
+      ':session_id': String(sessionId),
+      ':error_message': errorMessage || null,
+      ':result_json': serialize(result),
+      ':finished_at': now,
+      ':updated_at': now,
+    });
+  },
+
+  summarizeMessageJobs({ sessionId = null, jobIds = [] } = {}) {
+    const filter = buildMessageJobFilterClause({ sessionId, jobIds });
+    if (!filter.clause) {
+      return { matched: 0, queued: 0, processing: 0 };
+    }
+
+    const rows = getRows(`
+      SELECT status, COUNT(*) AS count
+      FROM message_jobs
+      WHERE ${filter.clause}
+        AND status IN ('queued', 'processing')
+      GROUP BY status
+    `, filter.params);
+
+    return rows.reduce((memo, row) => {
+      const count = Number(row.count || 0);
+      const status = String(row.status || '').trim().toLowerCase();
+      memo.matched += count;
+      if (status === 'queued') memo.queued += count;
+      if (status === 'processing') memo.processing += count;
+      return memo;
+    }, { matched: 0, queued: 0, processing: 0 });
+  },
+
+  cancelQueuedMessageJobs({ sessionId = null, jobIds = [], errorMessage = 'canceled', result = null, suppressWebhook = true } = {}) {
+    const filter = buildMessageJobFilterClause({ sessionId, jobIds });
+    if (!filter.clause) return 0;
+
+    const now = Date.now();
+    return runStatementWithChanges(`
+      UPDATE message_jobs
+      SET status = 'error',
+          error_message = :error_message,
+          result_json = :result_json,
+          webhook_notified = :webhook_notified,
+          webhook_attempts = 0,
+          webhook_next_retry_at = 0,
+          webhook_last_error = NULL,
+          webhook_delivered_at = CASE WHEN :webhook_notified = 1 THEN :finished_at ELSE NULL END,
+          finished_at = :finished_at,
+          updated_at = :updated_at
+      WHERE ${filter.clause}
+        AND status = 'queued'
+    `, {
+      ...filter.params,
+      ':error_message': errorMessage || null,
+      ':result_json': serialize(result),
+      ':webhook_notified': suppressWebhook ? 1 : 0,
+      ':finished_at': now,
+      ':updated_at': now,
+    });
   },
 
   requeueStaleProcessingMessageJobs(timeoutMs = 180000) {

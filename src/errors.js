@@ -11,10 +11,11 @@ export class SessionNotFoundError extends Error {
 }
 
 export class InvalidInputError extends Error {
-  constructor(message) {
+  constructor(message, details = null) {
     super(message);
     this.name = 'InvalidInputError';
     this.statusCode = 400;
+    this.details = details;
   }
 }
 

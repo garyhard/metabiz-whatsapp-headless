@@ -5,6 +5,7 @@
 import express from 'express';
 import { sendMessageForSession, restoreSessionFromStore } from '../services/sessionManager.js';
 import { enqueueMessageJob, getMessageJob } from '../services/messageQueue.js';
+import { sessionStore } from '../services/sessionStore.js';
 import {
   buildAutomationErrorBody,
   buildScreenshotDataUrl,
@@ -41,6 +42,7 @@ function serializeJob(job) {
     requestId: job.requestId,
     metaBlastMessageId: job.metaBlastMessageId || null,
     sessionId: job.sessionId,
+    priority: job.priority || 'normal',
     status: job.status,
     attempts: job.attempts,
     maxAttempts: job.maxAttempts,
@@ -80,6 +82,57 @@ router.get('/jobs/:jobId', async (req, res) => {
 });
 
 /**
+ * POST /api/sessions/jobs/cancel
+ * Cancel queued async message jobs by session or job IDs
+ */
+router.post('/jobs/cancel', async (req, res) => {
+  const { sessionId, jobIds, reason, suppressWebhook } = req.body || {};
+  const normalizedSessionId = String(sessionId || '').trim();
+  const normalizedJobIds = Array.isArray(jobIds)
+    ? jobIds.map((value) => String(value || '').trim()).filter((value) => value.length > 0)
+    : [];
+
+  if (!normalizedSessionId && normalizedJobIds.length === 0) {
+    return res.status(400).json({
+      ok: false,
+      error: 'sessionId or jobIds is required',
+      errorCode: 'cancel_filter_required',
+    });
+  }
+
+  const summaryBefore = sessionStore.summarizeMessageJobs({
+    sessionId: normalizedSessionId,
+    jobIds: normalizedJobIds,
+  });
+
+  const canceled = sessionStore.cancelQueuedMessageJobs({
+    sessionId: normalizedSessionId,
+    jobIds: normalizedJobIds,
+    errorMessage: String(reason || 'canceled'),
+    result: {
+      ok: false,
+      error: String(reason || 'canceled'),
+      errorCode: 'canceled',
+      details: {
+        sessionId: normalizedSessionId || null,
+        requestedJobIds: normalizedJobIds,
+      },
+    },
+    suppressWebhook: suppressWebhook !== false,
+  });
+
+  return res.json({
+    ok: true,
+    summary: {
+      matched: summaryBefore.matched,
+      canceled,
+      claimed: summaryBefore.processing,
+      queued: summaryBefore.queued,
+    },
+  });
+});
+
+/**
  * POST /api/sessions/:sessionId/send-message
  * Send a WhatsApp message
  */
@@ -87,6 +140,7 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
   const { sessionId } = req.params;
   const { extension, phoneNumber, message, includeSuccessScreenshot, requestId } = req.body || {};
   const normalizedRequestId = normalizeRequestId(sessionId, requestId);
+  const normalizedPriority = 'high';
   try {
     console.log(`[Routes] send-message request session=${sessionId}`);
 
@@ -112,6 +166,7 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
       useReplyFlow: true,
       includeSuccessScreenshot: includeSuccessScreenshot === true,
       requestId: normalizedRequestId,
+      priority: normalizedPriority,
     });
     const screenshotDataUrl = await buildScreenshotDataUrl(result?.screenshot || null);
 
@@ -131,8 +186,10 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
           extension,
           phoneNumber,
           message,
+          useReplyFlow: true,
           includeSuccessScreenshot: includeSuccessScreenshot === true,
           requestId: normalizedRequestId,
+          priority: normalizedPriority,
         });
         const screenshotDataUrl = await buildScreenshotDataUrl(result?.screenshot || null);
         return res.json({
@@ -187,6 +244,7 @@ router.post('/:sessionId/send-message-blast', async (req, res, next) => {
   const { sessionId } = req.params;
   const { extension, phoneNumber, message, includeSuccessScreenshot, requestId, metaBlastMessageId, async } = req.body || {};
   const normalizedRequestId = normalizeRequestId(sessionId, requestId);
+  const normalizedPriority = 'normal';
   try {
     console.log(`[Routes] send-message-blast request session=${sessionId}`);
 
@@ -210,6 +268,7 @@ router.post('/:sessionId/send-message-blast', async (req, res, next) => {
         requestId: normalizedRequestId,
         metaBlastMessageId,
         sessionId,
+        priority: normalizedPriority,
         extension,
         phoneNumber,
         message,
@@ -231,6 +290,7 @@ router.post('/:sessionId/send-message-blast', async (req, res, next) => {
       useReplyFlow: false,
       includeSuccessScreenshot: includeSuccessScreenshot === true,
       requestId: normalizedRequestId,
+      priority: normalizedPriority,
     });
     const screenshotDataUrl = await buildScreenshotDataUrl(result?.screenshot || null);
 
@@ -253,6 +313,7 @@ router.post('/:sessionId/send-message-blast', async (req, res, next) => {
           useReplyFlow: false,
           includeSuccessScreenshot: includeSuccessScreenshot === true,
           requestId: normalizedRequestId,
+          priority: normalizedPriority,
         });
         const screenshotDataUrl = await buildScreenshotDataUrl(result?.screenshot || null);
         return res.json({

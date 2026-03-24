@@ -16,7 +16,7 @@ import {
   clearAllSessions,
   getSessionCaptchaImageInfo,
 } from '../services/sessionManager.js';
-import { buildAutomationErrorBody } from '../services/debugArtifacts.js';
+import { buildAutomationErrorBody, enrichAutomationDetails } from '../services/debugArtifacts.js';
 import { normalizeRequestId } from '../services/automation.js';
 import { enqueueSessionFlowJob, serializeSessionFlowJob } from '../services/sessionFlowQueue.js';
 import { InvalidInputError, SessionNotFoundError, AutomationError } from '../errors.js';
@@ -37,6 +37,14 @@ function toBoolean(value) {
   if (value === true) return true;
   const normalized = String(value || '').trim().toLowerCase();
   return normalized === '1' || normalized === 'true' || normalized === 'yes';
+}
+
+async function buildInvalidInputErrorBody(error, fallbackRequestId = null) {
+  const details = await enrichAutomationDetails(error?.details, fallbackRequestId);
+  return buildJsonErrorBody(error, 'Invalid input', {
+    errorCode: 'invalid_input',
+    ...(details ? { details } : {}),
+  });
 }
 
 /**
@@ -133,6 +141,7 @@ router.get('/:sessionId/captcha-image', async (req, res, next) => {
  * Create a new session
  */
 router.post('/', async (req, res, next) => {
+  let normalizedRequestId = null;
   try {
     const { cookies, proxy, twofaSecret, async, requestId, context, webhookUrl } = req.body || {};
 
@@ -165,7 +174,7 @@ router.post('/', async (req, res, next) => {
     }
 
     const asyncMode = toBoolean(req.query?.async) || toBoolean(async);
-    const normalizedRequestId = normalizeRequestId('create-session', requestId);
+    normalizedRequestId = normalizeRequestId('create-session', requestId);
     if (asyncMode) {
       const { job, created } = enqueueSessionFlowJob({
         requestId: normalizedRequestId,
@@ -197,11 +206,7 @@ router.post('/', async (req, res, next) => {
     });
   } catch (error) {
     if (error instanceof InvalidInputError) {
-      return res.status(400).json(
-        buildJsonErrorBody(error, 'Invalid input', {
-          errorCode: 'invalid_input',
-        })
-      );
+      return res.status(400).json(await buildInvalidInputErrorBody(error, normalizedRequestId));
     }
     if (error instanceof AutomationError) {
       return res.status(500).json(await buildAutomationErrorBody(error, getAutomationErrorCode));
@@ -281,11 +286,7 @@ router.post('/:sessionId/check', async (req, res, next) => {
       );
     }
     if (error instanceof InvalidInputError) {
-      return res.status(400).json(
-        buildJsonErrorBody(error, 'Invalid input', {
-          errorCode: 'invalid_input',
-        })
-      );
+      return res.status(400).json(await buildInvalidInputErrorBody(error, requestId));
     }
     if (error instanceof AutomationError) {
       return res.status(500).json(await buildAutomationErrorBody(error, getAutomationErrorCode, requestId));
@@ -342,11 +343,7 @@ router.post('/:sessionId/resume-check', async (req, res, next) => {
       );
     }
     if (error instanceof InvalidInputError) {
-      return res.status(400).json(
-        buildJsonErrorBody(error, 'Invalid input', {
-          errorCode: 'invalid_input',
-        })
-      );
+      return res.status(400).json(await buildInvalidInputErrorBody(error, requestId));
     }
     if (error instanceof AutomationError) {
       return res.status(500).json(await buildAutomationErrorBody(error, getAutomationErrorCode, requestId));
@@ -435,11 +432,7 @@ router.put('/:sessionId/cookies', async (req, res, next) => {
       );
     }
     if (error instanceof InvalidInputError) {
-      return res.status(400).json(
-        buildJsonErrorBody(error, 'Invalid input', {
-          errorCode: 'invalid_input',
-        })
-      );
+      return res.status(400).json(await buildInvalidInputErrorBody(error));
     }
     if (error instanceof AutomationError) {
       return res.status(500).json(await buildAutomationErrorBody(error, getAutomationErrorCode));
@@ -488,11 +481,7 @@ router.put('/:sessionId/proxy', async (req, res, next) => {
       );
     }
     if (error instanceof InvalidInputError) {
-      return res.status(400).json(
-        buildJsonErrorBody(error, 'Invalid input', {
-          errorCode: 'invalid_input',
-        })
-      );
+      return res.status(400).json(await buildInvalidInputErrorBody(error));
     }
     next(error);
   }

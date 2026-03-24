@@ -73,14 +73,16 @@ export const config = {
     ? SEND_RELOAD_IDLE_MINUTES * 60 * 1000
     : 0,
   sendConcurrency: parseConcurrency(process.env.SEND_CONCURRENCY, 1),
+  priorityHighStreakLimit: parsePositiveInt(process.env.MESSAGE_PRIORITY_HIGH_STREAK_LIMIT, 3),
   queue: {
     pollIntervalMs: parsePositiveInt(process.env.MESSAGE_QUEUE_POLL_INTERVAL_MS, 1500),
     batchSize: parsePositiveInt(process.env.MESSAGE_QUEUE_BATCH_SIZE, 5),
+    sessionBurstSize: parsePositiveInt(process.env.MESSAGE_QUEUE_SESSION_BURST_SIZE, 5),
     maxAttempts: parsePositiveInt(process.env.MESSAGE_QUEUE_MAX_ATTEMPTS, 5),
     retryBaseMs: parsePositiveInt(process.env.MESSAGE_QUEUE_RETRY_BASE_MS, 30000),
     retryMaxMs: parsePositiveInt(process.env.MESSAGE_QUEUE_RETRY_MAX_MS, 300000),
     processingTimeoutMs: parsePositiveInt(process.env.MESSAGE_QUEUE_PROCESSING_TIMEOUT_MS, 180000),
-    webhookUrl: String(process.env.META_BLAST_WEBHOOK_URL || '').trim(),
+    webhookUrl: String(process.env.META_BLAST_WEBHOOK_PRIVATE_URL || process.env.META_BLAST_WEBHOOK_URL || '').trim(),
     webhookTimeoutMs: parsePositiveInt(process.env.META_BLAST_WEBHOOK_TIMEOUT_MS, 15000),
     webhookRetryBaseMs: parsePositiveInt(process.env.META_BLAST_WEBHOOK_RETRY_BASE_MS, 10000),
     webhookRetryMaxMs: parsePositiveInt(process.env.META_BLAST_WEBHOOK_RETRY_MAX_MS, 300000),

@@ -47,15 +47,12 @@ async function applyResolutionCookies(context, viewport) {
 
 // In-memory session registry
 const sessions = new Map();
-// Simple per-session mutex to serialize UI automation
+// Priority-aware per-session mutex to serialize UI automation.
 const sessionLocks = new Map();
 const sessionBusyCounts = new Map();
 // Simple per-c_user mutex to serialize creation/check flow for the same account
 const cUserLocks = new Map();
 const pendingBrowserReservations = new Set();
-// Global limiter for concurrent automation across sessions.
-let globalSendActive = 0;
-const globalSendWaiters = [];
 let browserPoolLock = Promise.resolve();
 
 const BROWSER_POOL_POLL_MS = 500;
@@ -93,6 +90,99 @@ function unmarkSessionBusy(sessionId) {
 
 function isSessionBusy(sessionId) {
   return getSessionBusyCount(sessionId) > 0;
+}
+
+function normalizeLockPriority(priority, fallback = 'normal') {
+  const normalized = String(priority || '').trim().toLowerCase();
+  if (normalized === 'high' || normalized === 'low') {
+    return normalized;
+  }
+  return fallback;
+}
+
+function lockPriorityRank(priority) {
+  switch (normalizeLockPriority(priority)) {
+    case 'high':
+      return 0;
+    case 'low':
+      return 2;
+    default:
+      return 1;
+  }
+}
+
+function selectNextWaiterIndex(queue, predicate = null) {
+  if (!Array.isArray(queue) || queue.length === 0) return null;
+
+  let nextIndex = null;
+  for (let index = 0; index < queue.length; index += 1) {
+    const candidate = queue[index];
+    if (predicate && !predicate(candidate)) {
+      continue;
+    }
+    if (nextIndex === null) {
+      nextIndex = index;
+      continue;
+    }
+
+    const current = queue[nextIndex];
+    if (candidate.priorityRank < current.priorityRank) {
+      nextIndex = index;
+      continue;
+    }
+    if (candidate.priorityRank === current.priorityRank && candidate.seq < current.seq) {
+      nextIndex = index;
+    }
+  }
+
+  return nextIndex;
+}
+
+function dequeueNextWaiter(queue, { highStreak = 0, maxHighStreak = 0 } = {}) {
+  if (!Array.isArray(queue) || queue.length === 0) return null;
+
+  let nextIndex = selectNextWaiterIndex(queue);
+  if (nextIndex === null) return null;
+
+  if (maxHighStreak > 0 && highStreak >= maxHighStreak) {
+    const fallbackIndex = selectNextWaiterIndex(queue, (candidate) => candidate.priorityRank > 0);
+    if (fallbackIndex !== null) {
+      nextIndex = fallbackIndex;
+    }
+  }
+
+  const [next] = queue.splice(nextIndex, 1);
+  return next || null;
+}
+
+function ensureSessionLockState(sessionId) {
+  const key = String(sessionId);
+  let state = sessionLocks.get(key);
+  if (!state) {
+    state = { active: false, queue: [], seq: 0, highStreak: 0 };
+    sessionLocks.set(key, state);
+  }
+  return state;
+}
+
+function dispatchNextSessionWaiter(sessionId) {
+  const key = String(sessionId);
+  const state = sessionLocks.get(key);
+  if (!state || state.active) return;
+
+  const next = dequeueNextWaiter(state.queue, {
+    highStreak: state.highStreak,
+    maxHighStreak: Math.max(1, Number(config.priorityHighStreakLimit) || 3),
+  });
+  if (!next) {
+    state.highStreak = 0;
+    sessionLocks.delete(key);
+    return;
+  }
+
+  state.highStreak = next.priorityRank === 0 ? state.highStreak + 1 : 0;
+  state.active = true;
+  next.resolve();
 }
 
 async function withBrowserPoolLock(task) {
@@ -271,6 +361,30 @@ function normalizeText(text) {
     .toLowerCase();
 }
 
+async function buildInvalidInputDetails(page, label, cUser = 'unknown', details = null) {
+  const normalized = details && typeof details === 'object' ? { ...details } : {};
+  if (!page) {
+    return Object.keys(normalized).length > 0 ? normalized : null;
+  }
+
+  try {
+    const debug = await captureDebugScreenshot(page, label, cUser || 'unknown');
+    if (debug?.path && !normalized.screenshotPath) {
+      normalized.screenshotPath = debug.path;
+    }
+    if (debug?.filename && !normalized.screenshotFilename) {
+      normalized.screenshotFilename = debug.filename;
+    }
+    if (debug?.url && !normalized.url) {
+      normalized.url = debug.url;
+    }
+  } catch (error) {
+    console.warn(`[SessionManager] Failed to capture ${label} screenshot: ${error.message}`);
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
 async function dismissSaveLoginInfo(page) {
   try {
     const dialog = await page.$('[role="dialog"], [aria-modal="true"]');
@@ -400,24 +514,29 @@ function withTimeout(promise, ms, label) {
   ]);
 }
 
-async function withSessionLock(sessionId, task) {
-  const previous = sessionLocks.get(sessionId) || Promise.resolve();
+async function withSessionLock(sessionId, task, { priority = 'normal' } = {}) {
+  const key = String(sessionId);
+  const state = ensureSessionLockState(key);
   let release;
   const current = new Promise((resolve) => {
     release = resolve;
   });
-  const queued = previous.then(() => current);
-  sessionLocks.set(sessionId, queued);
-
+  state.queue.push({
+    priorityRank: lockPriorityRank(priority),
+    seq: state.seq++,
+    resolve: release,
+  });
+  dispatchNextSessionWaiter(key);
   try {
-    await previous;
-    markSessionBusy(sessionId);
+    await current;
+    markSessionBusy(key);
     return await task();
   } finally {
-    unmarkSessionBusy(sessionId);
-    release();
-    if (sessionLocks.get(sessionId) === queued) {
-      sessionLocks.delete(sessionId);
+    unmarkSessionBusy(key);
+    const currentState = sessionLocks.get(key);
+    if (currentState === state) {
+      state.active = false;
+      dispatchNextSessionWaiter(key);
     }
   }
 }
@@ -442,28 +561,6 @@ async function withCUserLock(cUser, task) {
     if (cUserLocks.get(cUser) === queued) {
       cUserLocks.delete(cUser);
     }
-  }
-}
-
-async function withGlobalSendLock(task) {
-  const maxConcurrent = Number(config.sendConcurrency) || 0;
-  if (maxConcurrent <= 0) {
-    return task();
-  }
-
-  while (globalSendActive >= maxConcurrent) {
-    await new Promise((resolve) => {
-      globalSendWaiters.push(resolve);
-    });
-  }
-
-  globalSendActive += 1;
-  try {
-    return await task();
-  } finally {
-    globalSendActive = Math.max(0, globalSendActive - 1);
-    const next = globalSendWaiters.shift();
-    if (next) next();
   }
 }
 
@@ -617,10 +714,26 @@ function markSessionRestricted(sessionId, error, flow = 'unknown') {
   }
 
   sessionStore.markSessionRestricted(sessionId, manualAction.details, detectedAtMs);
+  const cancelledJobs = sessionStore.failQueuedMessageJobsForSession(
+    sessionId,
+    manualAction.message,
+    {
+      ok: false,
+      error: manualAction.message,
+      errorCode: 'account_restricted',
+      name: error?.name ? String(error.name) : null,
+      details: {
+        ...(manualAction.details || {}),
+        flow,
+        sessionId,
+      },
+    }
+  );
   sessionStore.updateStatus(sessionId, 'restricted', detectedAtMs);
   logStep('session:restricted', {
     sessionId,
     flow,
+    cancelledJobs,
     screenshotPath: manualAction.details?.screenshotPath || null,
     message: manualAction.message,
   });
@@ -1180,7 +1293,7 @@ export async function createSession(
             markSessionRestricted(sessionId, error, 'create_session');
             throw error;
           }
-          throw new InvalidInputError(error.message);
+          throw new InvalidInputError(error.message, error?.details || null);
         }
         authCheck = await detectLoginOrCheckpoint(page);
         if (!authCheck.blocked) break;
@@ -1198,7 +1311,14 @@ export async function createSession(
       if (authCheck && authCheck.blocked) {
         logStep('createSession:auth:blocked', { sessionId, cUser: finalCUser, reason: authCheck.reason });
         setProgress(finalCUser, 'create:auth:blocked', { sessionId, reason: authCheck.reason });
-        throw new InvalidInputError(`Session not authenticated: ${authCheck.reason}`);
+        throw new InvalidInputError(
+          `Session not authenticated: ${authCheck.reason}`,
+          await buildInvalidInputDetails(page, 'create-auth-blocked', finalCUser, {
+            type: 'need_new_cookies',
+            reason: authCheck.reason,
+            stage: 'create_session.auth_check',
+          })
+        );
       }
       logStep('createSession:auth:ok', { sessionId, cUser: finalCUser });
       setProgress(finalCUser, 'create:auth:ok', { sessionId });
@@ -1410,14 +1530,21 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
         cUser,
       });
     } catch (error) {
-      throw new InvalidInputError(error.message);
+      throw new InvalidInputError(error.message, error?.details || null);
     }
 
     const authCheck = await detectLoginOrCheckpoint(page);
     if (authCheck.blocked) {
       logStep('validateCookies:blocked', { cUser, reason: authCheck.reason });
       setProgress(cUser, 'validate:blocked', { reason: authCheck.reason });
-      throw new InvalidInputError(`Session not authenticated: ${authCheck.reason}`);
+      throw new InvalidInputError(
+        `Session not authenticated: ${authCheck.reason}`,
+        await buildInvalidInputDetails(page, 'validate-auth-blocked', cUser, {
+          type: 'need_new_cookies',
+          reason: authCheck.reason,
+          stage: 'validate_cookies.auth_check',
+        })
+      );
     }
 
     logStep('validateCookies:ok', { cUser });
@@ -1624,11 +1751,19 @@ export async function updateSessionCookies(sessionId, cookieInput, options = {})
           markSessionRestricted(sessionId, error, 'update_cookies');
           throw error;
         }
-        throw new InvalidInputError(error.message);
+        throw new InvalidInputError(error.message, error?.details || null);
       }
       const authCheck = await detectLoginOrCheckpoint(session.page);
       if (authCheck.blocked) {
-        throw new InvalidInputError(`Session not authenticated: ${authCheck.reason}`);
+        throw new InvalidInputError(
+          `Session not authenticated: ${authCheck.reason}`,
+          await buildInvalidInputDetails(session.page, 'update-cookies-auth-blocked', cUser, {
+            type: 'need_new_cookies',
+            reason: authCheck.reason,
+            stage: 'update_session_cookies.auth_check',
+            sessionId,
+          })
+        );
       }
       try {
         await checkSessionFlow(session.page, {
@@ -1644,7 +1779,7 @@ export async function updateSessionCookies(sessionId, cookieInput, options = {})
         if (error instanceof InvalidInputError) {
           throw error;
         }
-        throw new InvalidInputError(error.message);
+        throw new InvalidInputError(error.message, error?.details || null);
       }
     }
     logStep('updateSessionCookies:done', { sessionId, cUser });
@@ -1850,92 +1985,97 @@ export async function destroySession(sessionId, options = {}) {
  */
 export async function sendMessageForSession(
   sessionId,
-  { extension, phoneNumber, message, useReplyFlow = true, includeSuccessScreenshot = false, requestId = null }
+  {
+    extension,
+    phoneNumber,
+    message,
+    useReplyFlow = true,
+    includeSuccessScreenshot = false,
+    requestId = null,
+    priority = null,
+  }
 ) {
-  return withGlobalSendLock(() =>
-    withSessionLock(sessionId, async () => {
-      throwIfSessionRestricted(sessionId, 'send_cached');
-      const session = await ensureSessionActive(sessionId);
-      const now = Date.now();
-      const lastActivity = session.lastActivity || 0;
-      const forceInitialRefresh =
-        config.sendReloadIdleMs > 0 &&
-        lastActivity > 0 &&
-        now - lastActivity > config.sendReloadIdleMs;
+  const sendPriority = normalizeLockPriority(priority, useReplyFlow ? 'high' : 'normal');
+  return withSessionLock(sessionId, async () => {
+    throwIfSessionRestricted(sessionId, 'send_cached');
+    const session = await ensureSessionActive(sessionId);
+    const now = Date.now();
+    const lastActivity = session.lastActivity || 0;
+    const forceInitialRefresh =
+      config.sendReloadIdleMs > 0 &&
+      lastActivity > 0 &&
+      now - lastActivity > config.sendReloadIdleMs;
 
-      const executeSendFlow = async (label, forceRefresh) => {
-        const activeSession = await ensureSessionActive(sessionId);
-        touchSession(sessionId);
-        const result = await withTimeout(
-          sendMessage(activeSession.page, {
-            extension,
-            phoneNumber,
-            message,
-            sessionId,
-            cUser: activeSession.cUser || null,
-            twofaSecret: activeSession.twofaSecret || null,
-            forceInitialRefresh: forceRefresh,
-            useReplyFlow,
-            includeSuccessScreenshot,
-            requestId,
-          }),
-          config.flowTimeoutMs,
-          label
-        );
-        return result || {};
-      };
+    const executeSendFlow = async (label, forceRefresh) => {
+      const activeSession = await ensureSessionActive(sessionId);
+      touchSession(sessionId);
+      const result = await withTimeout(
+        sendMessage(activeSession.page, {
+          extension,
+          phoneNumber,
+          message,
+          sessionId,
+          cUser: activeSession.cUser || null,
+          twofaSecret: activeSession.twofaSecret || null,
+          forceInitialRefresh: forceRefresh,
+          useReplyFlow,
+          includeSuccessScreenshot,
+          requestId,
+        }),
+        config.flowTimeoutMs,
+        label
+      );
+      return result || {};
+    };
 
-      const result = await runRecoverableSessionFlow({
-        sessionId,
-        flowName: 'send',
-        manualActionFlow: 'send',
-        restrictedFlow: 'send',
-        failureSuspendReason: 'send_flow_failed',
-        retryFailureSuspendReason: 'send_retry_failed',
-        initialTask: () => executeSendFlow('Send flow', forceInitialRefresh),
-        retryTask: (attempt) => executeSendFlow(`Send flow (recovery ${attempt})`, true),
-      });
-      markSessionActive(sessionId);
-      return { ok: true, ...(result || {}) };
-    })
-  );
+    const result = await runRecoverableSessionFlow({
+      sessionId,
+      flowName: 'send',
+      manualActionFlow: 'send',
+      restrictedFlow: 'send',
+      failureSuspendReason: 'send_flow_failed',
+      retryFailureSuspendReason: 'send_retry_failed',
+      initialTask: () => executeSendFlow('Send flow', forceInitialRefresh),
+      retryTask: (attempt) => executeSendFlow(`Send flow (recovery ${attempt})`, true),
+    });
+    markSessionActive(sessionId);
+    return { ok: true, ...(result || {}) };
+  }, { priority: sendPriority });
 }
 
 export async function checkSessionForSession(sessionId, { requestId = null } = {}) {
-  return withGlobalSendLock(() =>
-    withSessionLock(sessionId, async () => {
-      throwIfSessionRestricted(sessionId, 'check_cached');
-      await ensureSessionActive(sessionId);
-      const executeCheckFlow = async (label) => {
-        const activeSession = await ensureSessionActive(sessionId);
-        touchSession(sessionId);
-        const result = await withTimeout(
-          checkSessionFlow(activeSession.page, {
-            sessionId,
-            cUser: activeSession.cUser || null,
-            twofaSecret: activeSession.twofaSecret || null,
-            requestId,
-          }),
-          config.flowTimeoutMs,
-          label
-        );
-        return result || {};
-      };
+  return withSessionLock(sessionId, async () => {
+    throwIfSessionRestricted(sessionId, 'check_cached');
+    await ensureSessionActive(sessionId);
+    const executeCheckFlow = async (label) => {
+      const activeSession = await ensureSessionActive(sessionId);
+      touchSession(sessionId);
+      const result = await withTimeout(
+        checkSessionFlow(activeSession.page, {
+          sessionId,
+          cUser: activeSession.cUser || null,
+          twofaSecret: activeSession.twofaSecret || null,
+          requestId,
+        }),
+        config.flowTimeoutMs,
+        label
+      );
+      return result || {};
+    };
 
-      const result = await runRecoverableSessionFlow({
-        sessionId,
-        flowName: 'check',
-        manualActionFlow: 'check',
-        restrictedFlow: 'check',
-        failureSuspendReason: 'check_flow_failed',
-        retryFailureSuspendReason: 'check_retry_failed',
-        initialTask: () => executeCheckFlow('Check flow'),
-        retryTask: (attempt) => executeCheckFlow(`Check flow (recovery ${attempt})`),
-      });
-      markSessionActive(sessionId);
-      return { ok: true, ...(result || {}) };
-    })
-  );
+    const result = await runRecoverableSessionFlow({
+      sessionId,
+      flowName: 'check',
+      manualActionFlow: 'check',
+      restrictedFlow: 'check',
+      failureSuspendReason: 'check_flow_failed',
+      retryFailureSuspendReason: 'check_retry_failed',
+      initialTask: () => executeCheckFlow('Check flow'),
+      retryTask: (attempt) => executeCheckFlow(`Check flow (recovery ${attempt})`),
+    });
+    markSessionActive(sessionId);
+    return { ok: true, ...(result || {}) };
+  });
 }
 
 /**

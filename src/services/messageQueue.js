@@ -12,9 +12,46 @@ let workerStarted = false;
 let stopRequested = false;
 let pumping = false;
 let timerRef = null;
+let burstSessionId = null;
+let burstRemaining = 0;
 
 function webhookEnabled() {
   return String(config.queue.webhookUrl || '').trim().length > 0;
+}
+
+function sessionBurstSize() {
+  return Math.max(1, Number(config.queue.sessionBurstSize) || 1);
+}
+
+function hasActiveBurst() {
+  return !!burstSessionId && burstRemaining > 0;
+}
+
+function clearBurstSession() {
+  burstSessionId = null;
+  burstRemaining = 0;
+}
+
+function trackClaimedSession(sessionId) {
+  const targetSessionId = String(sessionId || '').trim();
+  if (!targetSessionId) {
+    clearBurstSession();
+    return;
+  }
+
+  const burstSize = sessionBurstSize();
+  if (burstSize <= 1) {
+    clearBurstSession();
+    return;
+  }
+
+  if (burstSessionId !== targetSessionId) {
+    burstSessionId = targetSessionId;
+    burstRemaining = Math.max(0, burstSize - 1);
+    return;
+  }
+
+  burstRemaining = Math.max(0, burstRemaining - 1);
 }
 
 function clearWorkerTimer() {
@@ -81,10 +118,11 @@ async function processJob(job) {
       message: job.message,
       useReplyFlow: job.useReplyFlow,
       includeSuccessScreenshot: job.includeSuccessScreenshot,
+      priority: job.priority || (job.useReplyFlow ? 'high' : 'normal'),
     });
     sessionStore.markMessageJobSent(job.id, result || {});
     console.log(`[MessageQueue] job sent id=${job.id} attempts=${job.attempts}`);
-    return;
+    return { outcome: 'sent', sessionId: job.sessionId, jobId: job.id };
   } catch (error) {
     const message = error?.message ? String(error.message) : String(error);
     const errorResult = buildErrorResult(error, message);
@@ -96,13 +134,14 @@ async function processJob(job) {
       console.warn(
         `[MessageQueue] job failed id=${job.id} attempts=${attempts}/${maxAttempts} retryable=${retryable}`
       );
-      return;
+      return { outcome: 'error', sessionId: job.sessionId, jobId: job.id };
     }
 
     const retryDelay = backoffMs(attempts, config.queue.retryBaseMs, config.queue.retryMaxMs);
     const retryAt = Date.now() + retryDelay;
     sessionStore.markMessageJobRetry(job.id, message, retryAt);
     console.warn(`[MessageQueue] job retry id=${job.id} attempts=${attempts}/${maxAttempts} retry_in_ms=${retryDelay}`);
+    return { outcome: 'retry', sessionId: job.sessionId, jobId: job.id };
   }
 }
 
@@ -116,6 +155,7 @@ function buildWebhookPayload(job) {
       request_id: job.requestId || null,
       meta_blast_message_id: job.metaBlastMessageId || null,
       session_id: job.sessionId,
+      priority: job.priority || 'normal',
       status: job.status,
       attempts: job.attempts,
       max_attempts: job.maxAttempts,
@@ -212,15 +252,40 @@ export async function pumpQueue() {
     sessionStore.requeueStaleProcessingMessageJobs(config.queue.processingTimeoutMs);
     let processed = 0;
     const maxBatch = Math.max(1, Number(config.queue.batchSize) || 1);
-    const batchPromises = [];
-    while (!stopRequested && processed < maxBatch) {
-      const job = sessionStore.claimNextMessageJob(Date.now());
-      if (!job) break;
-      batchPromises.push(processJob(job));
-      processed += 1;
+    const jobs = [];
+    let preferredClaimAttempted = false;
+
+    while (!stopRequested && jobs.length < maxBatch) {
+      const now = Date.now();
+      const preferredSessionId =
+        !preferredClaimAttempted && hasActiveBurst() ? burstSessionId : null;
+      const job = sessionStore.claimNextMessageJob(now, preferredSessionId, Boolean(preferredSessionId));
+
+      if (!job) {
+        if (preferredSessionId) {
+          preferredClaimAttempted = true;
+          continue;
+        }
+        break;
+      }
+
+      preferredClaimAttempted = true;
+      trackClaimedSession(job.sessionId);
+      jobs.push(job);
     }
-    if (batchPromises.length > 0) {
-      await Promise.allSettled(batchPromises);
+
+    if (jobs.length > 0) {
+      const results = await Promise.allSettled(jobs.map((job) => processJob(job)));
+      for (const item of results) {
+        if (item.status !== 'fulfilled') {
+          continue;
+        }
+        const result = item.value;
+        if (result?.sessionId && result.outcome !== 'sent' && burstSessionId === String(result.sessionId)) {
+          clearBurstSession();
+        }
+      }
+      processed = jobs.length;
     }
     await flushWebhookQueue(maxBatch);
   } finally {
@@ -256,6 +321,7 @@ export function enqueueMessageJob({
   requestId = null,
   metaBlastMessageId = null,
   sessionId,
+  priority = 'normal',
   extension,
   phoneNumber,
   message,
@@ -276,6 +342,7 @@ export function enqueueMessageJob({
     requestId: normalizedRequestId,
     metaBlastMessageId: metaBlastMessageId ? String(metaBlastMessageId).trim() : null,
     sessionId: String(sessionId),
+    priority,
     extension: String(extension),
     phoneNumber: String(phoneNumber),
     message: String(message),
