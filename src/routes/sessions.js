@@ -221,7 +221,29 @@ router.post('/', async (req, res, next) => {
  */
 router.delete('/:sessionId', async (req, res, next) => {
   const { sessionId } = req.params;
+  const requestId = normalizeRequestId(sessionId, req.body?.requestId || req.query?.requestId);
   try {
+    const asyncMode = toBoolean(req.query?.async) || toBoolean(req.body?.async);
+    if (asyncMode) {
+      const { job, created } = enqueueSessionFlowJob({
+        requestId,
+        jobType: 'destroy_session',
+        targetSessionId: sessionId,
+        payload: {
+          context: req.body?.context && typeof req.body.context === 'object' && !Array.isArray(req.body.context)
+            ? req.body.context
+            : null,
+        },
+        webhookUrl: req.body?.webhookUrl ? String(req.body.webhookUrl).trim() : null,
+      });
+      return res.status(202).json({
+        ok: true,
+        accepted: true,
+        created,
+        job: serializeSessionFlowJob(job),
+      });
+    }
+
     await destroySession(sessionId);
 
     res.json({
@@ -270,7 +292,11 @@ router.post('/:sessionId/check', async (req, res, next) => {
       });
     }
 
-    const result = await checkSessionForSession(sessionId, { requestId });
+    const result = await checkSessionForSession(sessionId, {
+      requestId,
+      flowTimeoutMs: req.body?.flowTimeoutMs,
+      recoverableRetryAttempts: req.body?.recoverableRetryAttempts,
+    });
     res.json({
       ok: true,
       message: 'Session check ok',
@@ -324,7 +350,11 @@ router.post('/:sessionId/resume-check', async (req, res, next) => {
       });
     }
 
-    const result = await checkSessionForSession(sessionId, { requestId });
+    const result = await checkSessionForSession(sessionId, {
+      requestId,
+      flowTimeoutMs: req.body?.flowTimeoutMs,
+      recoverableRetryAttempts: req.body?.recoverableRetryAttempts,
+    });
     const session = getSessionInfo(sessionId);
     res.json({
       ok: true,
@@ -417,7 +447,7 @@ router.put('/:sessionId/cookies', async (req, res, next) => {
       });
     }
 
-    await updateSessionCookies(sessionId, cookies, { twofaSecret });
+    await updateSessionCookies(sessionId, cookies, { twofaSecret, proxy: proxyConfig });
     res.json({
       ok: true,
       message: 'Cookies updated',
@@ -448,7 +478,7 @@ router.put('/:sessionId/cookies', async (req, res, next) => {
 router.put('/:sessionId/proxy', async (req, res, next) => {
   const { sessionId } = req.params;
   try {
-    const { proxy } = req.body || {};
+    const { proxy, async, requestId, context, webhookUrl } = req.body || {};
     if (!proxy || typeof proxy !== 'object' || !proxy.server) {
       return res.status(400).json({
         ok: false,
@@ -461,6 +491,27 @@ router.put('/:sessionId/proxy', async (req, res, next) => {
       username: proxy.username || undefined,
       password: proxy.password || undefined,
     };
+
+    const asyncMode = toBoolean(req.query?.async) || toBoolean(async);
+    const normalizedRequestId = normalizeRequestId(sessionId, requestId);
+    if (asyncMode) {
+      const { job, created } = enqueueSessionFlowJob({
+        requestId: normalizedRequestId,
+        jobType: 'update_session_proxy',
+        targetSessionId: sessionId,
+        payload: {
+          proxy: proxyConfig,
+          context: context && typeof context === 'object' && !Array.isArray(context) ? context : null,
+        },
+        webhookUrl: webhookUrl ? String(webhookUrl).trim() : null,
+      });
+      return res.status(202).json({
+        ok: true,
+        accepted: true,
+        created,
+        job: serializeSessionFlowJob(job),
+      });
+    }
 
     const result = await updateSessionProxy(sessionId, proxyConfig);
     res.json({

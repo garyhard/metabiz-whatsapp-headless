@@ -5,7 +5,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { createBrowser } from './browserFactory.js';
 import { normalizeCookiesInput, parseCookieString, toPlaywrightCookies, toPlaywrightCookiesFromJson } from '../utils/cookies.js';
-import { sendMessage, checkSessionFlow, captureDebugScreenshot, resolveTwoFactorIfNeeded } from './automation.js';
+import { sendMessage, checkSessionFlow, captureDebugScreenshot, detectNeedNewCookiesPage, resolveTwoFactorIfNeeded } from './automation.js';
 import { SessionNotFoundError, InvalidInputError, BrowserCrashError, FlowTimeoutError, AutomationError } from '../errors.js';
 import { config } from '../config.js';
 import { sessionStore } from './sessionStore.js';
@@ -17,6 +17,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const INBOX_URL = 'https://business.facebook.com/latest/inbox';
+const FACEBOOK_HOME_URL = 'https://www.facebook.com/';
 const PROXY_IP_CHECK_URL = 'https://api.ipify.org?format=json';
 const PROXY_IP_CHECK_TIMEOUT = 15000;
 const PROXY_META_CHECK_TIMEOUT = 60000;
@@ -42,6 +43,23 @@ async function applyResolutionCookies(context, viewport) {
     await context.addCookies(cookies);
   } catch (error) {
     console.warn(`[SessionManager] Failed to set resolution cookies: ${error.message}`);
+  }
+}
+
+async function summarizeContextCookies(context) {
+  try {
+    const cookies = await context.cookies([FACEBOOK_HOME_URL, INBOX_URL]);
+    const names = Array.from(new Set(cookies.map((cookie) => cookie?.name).filter(Boolean))).sort();
+    return {
+      count: cookies.length,
+      names,
+    };
+  } catch (error) {
+    return {
+      count: 0,
+      names: [],
+      error: error?.message || String(error),
+    };
   }
 }
 
@@ -361,6 +379,29 @@ function normalizeText(text) {
     .toLowerCase();
 }
 
+function normalizeProxyConfig(proxy) {
+  if (!proxy || typeof proxy !== 'object' || !proxy.server) return null;
+  const server = String(proxy.server || '').trim();
+  if (!server) return null;
+  const username = String(proxy.username || '').trim();
+  const password = String(proxy.password || '').trim();
+  return {
+    server,
+    ...(username ? { username } : {}),
+    ...(password ? { password } : {}),
+  };
+}
+
+function sameProxyConfig(left, right) {
+  const a = normalizeProxyConfig(left);
+  const b = normalizeProxyConfig(right);
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return a.server === b.server &&
+    String(a.username || '') === String(b.username || '') &&
+    String(a.password || '') === String(b.password || '');
+}
+
 async function buildInvalidInputDetails(page, label, cUser = 'unknown', details = null) {
   const normalized = details && typeof details === 'object' ? { ...details } : {};
   if (!page) {
@@ -383,6 +424,16 @@ async function buildInvalidInputDetails(page, label, cUser = 'unknown', details 
   }
 
   return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
+async function buildNeedNewCookiesDetails(page, label, cUser = 'unknown', detected = null, details = {}) {
+  const normalizedDetected = detected && typeof detected === 'object' ? detected : {};
+  return buildInvalidInputDetails(page, label, cUser, {
+    type: 'need_new_cookies',
+    indicator: normalizedDetected.reason || null,
+    matchedHints: Array.isArray(normalizedDetected.matchedHints) ? normalizedDetected.matchedHints : [],
+    ...details,
+  });
 }
 
 async function dismissSaveLoginInfo(page) {
@@ -488,8 +539,6 @@ async function verifyProxyConnection(context, proxyConfig, cUser = null) {
       logStep('proxy:check:ip:warn', { cUser, server: proxyConfig.server, error: error?.message || String(error) });
     }
 
-    logStep('proxy:check:meta:start', { cUser, url: INBOX_URL, timeout: PROXY_META_CHECK_TIMEOUT });
-    await checkPage.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: PROXY_META_CHECK_TIMEOUT });
     logStep('proxy:check:ok', { cUser, server: proxyConfig.server, ip: ipAddress || null, ipCheckFailed });
     return ipAddress;
   } catch (error) {
@@ -586,6 +635,10 @@ function isCaptchaRequiredError(error) {
 
 function isAccountRestrictedError(error) {
   return error instanceof AutomationError && String(error?.details?.type || '').toLowerCase() === 'account_restricted';
+}
+
+function isInboxNotReadyError(error) {
+  return error instanceof AutomationError && String(error?.details?.type || '').toLowerCase() === 'inbox_not_ready';
 }
 
 function getEffectiveSessionStatus(session) {
@@ -774,6 +827,7 @@ async function runRecoverableSessionFlow({
   retryFailureSuspendReason,
   initialTask,
   retryTask,
+  maxRecoveryAttemptsOverride = null,
 }) {
   try {
     return await initialTask();
@@ -792,7 +846,11 @@ async function runRecoverableSessionFlow({
     }
 
     let lastError = error;
-    const maxRecoveryAttempts = Math.max(0, Number(config.flowRecoverableRetryAttempts) || 0);
+    const configuredAttempts =
+      maxRecoveryAttemptsOverride == null
+        ? Number(config.flowRecoverableRetryAttempts) || 0
+        : Number(maxRecoveryAttemptsOverride) || 0;
+    const maxRecoveryAttempts = Math.max(0, configuredAttempts);
     const retryDelayMs = Math.max(0, Number(config.flowRecoverableRetryDelayMs) || 0);
 
     for (let attempt = 1; attempt <= maxRecoveryAttempts; attempt += 1) {
@@ -848,7 +906,7 @@ function clearSessionTimers(session) {
   }
 }
 
-function setIdleTimer(sessionId) {
+function setIdleTimer(sessionId, timeoutOverrideMs = null) {
   const session = sessions.get(sessionId);
   if (!session) return;
 
@@ -857,7 +915,12 @@ function setIdleTimer(sessionId) {
     session.idleTimer = null;
   }
 
-  if (!config.idleTimeoutMs || config.idleTimeoutMs <= 0) return;
+  const configuredTimeoutMs = Number(timeoutOverrideMs);
+  const idleTimeoutMs = Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs >= 0
+    ? configuredTimeoutMs
+    : config.idleTimeoutMs;
+
+  if (!idleTimeoutMs || idleTimeoutMs <= 0) return;
 
   session.idleTimer = setTimeout(async () => {
     try {
@@ -865,7 +928,7 @@ function setIdleTimer(sessionId) {
     } catch (error) {
       console.warn(`[SessionManager] Idle suspend failed for session ${sessionId}:`, error.message);
     }
-  }, config.idleTimeoutMs);
+  }, idleTimeoutMs);
 }
 
 function touchSession(sessionId) {
@@ -893,28 +956,95 @@ function markSessionActive(sessionId) {
   sessionStore.updateStatus(sessionId, 'active', session.lastActivity);
 }
 
+function hasQueuedWorkForSession(sessionId) {
+  const now = Date.now();
+  return (
+    sessionStore.hasQueuedMessageJobForSession(sessionId, now) ||
+    sessionStore.hasQueuedSessionFlowJobForSession(sessionId, now)
+  );
+}
+
+function settleSessionAfterFlow(sessionId) {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+
+  markSessionActive(sessionId);
+
+  if (hasQueuedWorkForSession(sessionId)) {
+    return;
+  }
+
+  const configuredPostFlowIdleTimeoutMs = Math.max(0, Number(config.postFlowIdleTimeoutMs) || 0);
+  if (configuredPostFlowIdleTimeoutMs <= 0) {
+    void suspendSession(sessionId).catch((error) => {
+      console.warn(`[SessionManager] Post-flow suspend failed for session ${sessionId}:`, error.message);
+    });
+    return;
+  }
+
+  const effectiveTimeoutMs =
+    config.idleTimeoutMs > 0
+      ? Math.min(config.idleTimeoutMs, configuredPostFlowIdleTimeoutMs)
+      : configuredPostFlowIdleTimeoutMs;
+
+  setIdleTimer(sessionId, effectiveTimeoutMs);
+}
+
 function markSessionNeedsManualAction(sessionId, error, flow = 'unknown') {
   const session = sessions.get(sessionId);
   if (!session) return;
   clearSessionTimers(session);
+  const manualActionType = String(error?.details?.type || 'manual_action_required');
+  const manualActionMessage = error?.message || 'Manual action required';
   session.status = 'needs_manual_action';
   session.lastActivity = Date.now();
   session.manualAction = {
-    type: String(error?.details?.type || 'manual_action_required'),
+    type: manualActionType,
     flow,
     detectedAt: new Date().toISOString(),
     details: {
       ...(error?.details || {}),
       flow,
     },
-    message: error?.message || 'Manual action required',
+    message: manualActionMessage,
   };
   sessionStore.updateStatus(sessionId, 'needs_manual_action', session.lastActivity);
+  const queuedMessageJobs = sessionStore.failQueuedMessageJobsForSession(
+    sessionId,
+    manualActionMessage,
+    {
+      ok: false,
+      error: manualActionMessage,
+      errorCode: manualActionType,
+      details: {
+        ...(error?.details || {}),
+        flow,
+        sessionId,
+      },
+    }
+  );
+  const queuedSessionFlowJobs = sessionStore.failQueuedSessionFlowJobsForSession(
+    sessionId,
+    manualActionMessage,
+    manualActionType,
+    {
+      ok: false,
+      error: manualActionMessage,
+      errorCode: manualActionType,
+      details: {
+        ...(error?.details || {}),
+        flow,
+        sessionId,
+      },
+    }
+  );
   logStep('session:manual_action_required', {
     sessionId,
     flow,
     type: session.manualAction.type,
     message: session.manualAction.message,
+    cancelledJobs: queuedMessageJobs,
+    cancelledSessionFlowJobs: queuedSessionFlowJobs,
   });
 }
 
@@ -1214,6 +1344,8 @@ export async function createSession(
       }
 
       // Create browser instance with existing fingerprint and proxy if provided (for recreation)
+      await cleanupProfile(sessionId);
+      logStep('createSession:profile:reset', { sessionId, cUser: finalCUser });
       browserInstance = await createBrowser(sessionId, fingerprintToUse, proxyConfig);
       browser = browserInstance.browser;
       context = browserInstance.context;
@@ -1253,7 +1385,23 @@ export async function createSession(
       }
       await applyResolutionCookies(context, browserInstance.fingerprint?.viewport);
       logStep('createSession:cookies:applied', { sessionId, cUser: finalCUser, format: normalized.format });
+      const cookieSummary = await summarizeContextCookies(context);
+      logStep('createSession:cookies:verified', {
+        sessionId,
+        cUser: finalCUser,
+        count: cookieSummary.count,
+        names: cookieSummary.names,
+        error: cookieSummary.error || null,
+      });
       setProgress(finalCUser, 'create:cookies:applied', { sessionId, format: normalized.format });
+
+      console.log(`[SessionManager] Navigating to ${FACEBOOK_HOME_URL} for cookie bootstrap...`);
+      await withRetry(
+        () => page.goto(FACEBOOK_HOME_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }),
+        { retries: 2, delayMs: 1000 }
+      );
+      logStep('createSession:bootstrap:done', { sessionId, cUser: finalCUser, url: page.url() });
+      await page.waitForTimeout(500);
 
       // Navigate to inbox
       console.log(`[SessionManager] Navigating to ${INBOX_URL}...`);
@@ -1317,6 +1465,21 @@ export async function createSession(
             type: 'need_new_cookies',
             reason: authCheck.reason,
             stage: 'create_session.auth_check',
+          })
+        );
+      }
+      const needNewCookies = await detectNeedNewCookiesPage(page);
+      if (needNewCookies?.detected) {
+        logStep('createSession:need_new_cookies', {
+          sessionId,
+          cUser: finalCUser,
+          indicator: needNewCookies.reason || null,
+        });
+        throw new InvalidInputError(
+          'Session requires new cookies',
+          await buildNeedNewCookiesDetails(page, 'create-need-new-cookies', finalCUser, needNewCookies, {
+            stage: 'create_session.need_new_cookies',
+            sessionId,
           })
         );
       }
@@ -1450,6 +1613,7 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
   const normalized = normalizeCookiesInput(cookieInput);
   const cUser = extractCUser(normalized);
   const persist = options?.persist === true;
+  const freshBrowser = options?.freshBrowser === true;
   const normalizedTwofaSecret = String(options?.twofaSecret || '').trim() || null;
   if (normalized.format === 'string') {
     if (!normalized.raw || !String(normalized.raw).trim()) {
@@ -1477,11 +1641,12 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
   try {
     logStep('validateCookies:start', { cUser });
     setProgress(cUser, 'validate:start');
-    const storedFingerprint = sessionStore.getFingerprint(cUser);
+    const storedFingerprint = freshBrowser ? null : sessionStore.getFingerprint(cUser);
     if (persist) {
       await reserveBrowserSlot(browserReservationKey, [], 'validate_cookies_persist');
       browserSlotReserved = true;
     }
+    logStep('validateCookies:browser:init', { cUser, freshBrowser, reuseFingerprint: Boolean(storedFingerprint) });
     browserInstance = await createBrowser(tempSessionId, storedFingerprint, proxy);
     browser = browserInstance.browser;
     context = browserInstance.context;
@@ -1543,6 +1708,18 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
           type: 'need_new_cookies',
           reason: authCheck.reason,
           stage: 'validate_cookies.auth_check',
+        })
+      );
+    }
+    const needNewCookies = await detectNeedNewCookiesPage(page);
+    if (needNewCookies?.detected) {
+      logStep('validateCookies:need_new_cookies', { cUser, indicator: needNewCookies.reason || null });
+      setProgress(cUser, 'validate:need_new_cookies', { indicator: needNewCookies.reason || null });
+      throw new InvalidInputError(
+        'Session requires new cookies',
+        await buildNeedNewCookiesDetails(page, 'validate-need-new-cookies', cUser, needNewCookies, {
+          stage: 'validate_cookies.need_new_cookies',
+          sessionId: persist ? tempSessionId : null,
         })
       );
     }
@@ -1659,6 +1836,7 @@ export async function updateSessionCookies(sessionId, cookieInput, options = {})
   return withSessionLock(sessionId, async () => {
     const normalized = normalizeCookiesInput(cookieInput);
     const incomingTwofa = String(options?.twofaSecret || '').trim();
+    const incomingProxy = normalizeProxyConfig(options?.proxy || null);
     if (normalized.format === 'string') {
       if (!normalized.raw || !String(normalized.raw).trim()) {
         throw new InvalidInputError('Cookies are required');
@@ -1667,6 +1845,18 @@ export async function updateSessionCookies(sessionId, cookieInput, options = {})
     if (normalized.format === 'json' && (!Array.isArray(normalized.raw) || normalized.raw.length === 0)) {
       throw new InvalidInputError('Cookies are required');
     }
+    const cUser = extractCUser(normalized);
+    if (!cUser) {
+      throw new InvalidInputError('c_user cookie is required');
+    }
+
+    logStep('updateSessionCookies:start', {
+      sessionId,
+      cUser,
+      cookieFormat: normalized.format,
+      proxyProvided: !!incomingProxy,
+      proxyServer: incomingProxy?.server || null,
+    });
 
     let session = sessions.get(sessionId);
     if (!session) {
@@ -1676,14 +1866,14 @@ export async function updateSessionCookies(sessionId, cookieInput, options = {})
       }
       logStep('updateSessionCookies:restore', { sessionId, cUser: stored.cUser });
       await createSession(
-        stored.cookies,
+        normalized.raw,
         sessionId,
         stored.fingerprint,
-        stored.proxy || null,
+        incomingProxy || stored.proxy || null,
         {
           skipCUserCheck: true,
-          cUserOverride: stored.cUser,
-          twofaSecret: stored.twofaSecret || null,
+          cUserOverride: cUser,
+          twofaSecret: incomingTwofa || stored.twofaSecret || null,
         }
       );
       session = sessions.get(sessionId);
@@ -1691,14 +1881,36 @@ export async function updateSessionCookies(sessionId, cookieInput, options = {})
     if (!session) {
       throw new SessionNotFoundError(sessionId);
     }
-    const cUser = extractCUser(normalized);
-    if (!cUser) {
-      throw new InvalidInputError('c_user cookie is required');
-    }
     const stored = sessionStore.getBySessionId(sessionId);
     const previousCUser = session.cUser || stored?.cUser || null;
+    const currentProxy = normalizeProxyConfig(session.proxy || stored?.proxy || null);
     if (previousCUser && previousCUser !== cUser) {
       logStep('updateSessionCookies:cuser_changed', { sessionId, from: previousCUser, to: cUser });
+    }
+    if (incomingProxy) {
+      const recreateReason = sameProxyConfig(incomingProxy, currentProxy) ? 'proxy_reapply' : 'proxy_changed';
+      logStep(`updateSessionCookies:${recreateReason}`, {
+        sessionId,
+        cUser,
+        from: currentProxy?.server || null,
+        to: incomingProxy.server,
+      });
+      await destroySession(sessionId, { preserveStore: true });
+      await createSession(
+        normalized.raw,
+        sessionId,
+        session.fingerprint || stored?.fingerprint || null,
+        incomingProxy,
+        {
+          skipCUserCheck: true,
+          cUserOverride: cUser,
+          twofaSecret: incomingTwofa || session.twofaSecret || stored?.twofaSecret || null,
+        }
+      );
+      session = sessions.get(sessionId);
+      if (!session) {
+        throw new SessionNotFoundError(sessionId);
+      }
     }
     if (normalized.format === 'string') {
       const cookies = parseCookieString(normalized.raw);
@@ -1722,6 +1934,12 @@ export async function updateSessionCookies(sessionId, cookieInput, options = {})
       }
       await session.context.addCookies(playwrightCookies);
     }
+    logStep('updateSessionCookies:cookies_applied', {
+      sessionId,
+      cUser,
+      cookieFormat: normalized.format,
+      proxyServer: incomingProxy?.server || session.proxy?.server || stored?.proxy?.server || null,
+    });
 
     const viewport = session.page ? session.page.viewportSize() : null;
     await applyResolutionCookies(session.context, viewport);
@@ -1755,12 +1973,28 @@ export async function updateSessionCookies(sessionId, cookieInput, options = {})
       }
       const authCheck = await detectLoginOrCheckpoint(session.page);
       if (authCheck.blocked) {
+        logStep('updateSessionCookies:auth_blocked', { sessionId, cUser, reason: authCheck.reason });
         throw new InvalidInputError(
           `Session not authenticated: ${authCheck.reason}`,
           await buildInvalidInputDetails(session.page, 'update-cookies-auth-blocked', cUser, {
             type: 'need_new_cookies',
             reason: authCheck.reason,
             stage: 'update_session_cookies.auth_check',
+            sessionId,
+          })
+        );
+      }
+      const needNewCookies = await detectNeedNewCookiesPage(session.page);
+      if (needNewCookies?.detected) {
+        logStep('updateSessionCookies:need_new_cookies', {
+          sessionId,
+          cUser,
+          indicator: needNewCookies.reason || null,
+        });
+        throw new InvalidInputError(
+          'Session requires new cookies',
+          await buildNeedNewCookiesDetails(session.page, 'update-cookies-need-new-cookies', cUser, needNewCookies, {
+            stage: 'update_session_cookies.need_new_cookies',
             sessionId,
           })
         );
@@ -1772,9 +2006,27 @@ export async function updateSessionCookies(sessionId, cookieInput, options = {})
           twofaSecret,
         });
       } catch (error) {
+        logStep('updateSessionCookies:check_failed', {
+          sessionId,
+          cUser,
+          error: error?.message || String(error),
+        });
         if (isAccountRestrictedError(error)) {
           markSessionRestricted(sessionId, error, 'update_cookies');
           throw error;
+        }
+        if (isInboxNotReadyError(error)) {
+          throw new InvalidInputError(
+            'Session loaded Facebook Business, but inbox is not ready yet',
+            await buildInvalidInputDetails(session.page, 'update-cookies-inbox-not-ready', cUser, {
+              type: 'inbox_not_ready',
+              reason: String(error?.details?.reason || 'inbox_not_ready'),
+              stage: 'update_session_cookies.inbox_check',
+              sessionId,
+              upstreamStage: error?.details?.stage || null,
+              upstreamUrl: error?.details?.url || null,
+            })
+          );
         }
         if (error instanceof InvalidInputError) {
           throw error;
@@ -1803,7 +2055,7 @@ export async function updateSessionCookies(sessionId, cookieInput, options = {})
       cookieFormat: normalized.format,
       cookies: normalized.raw,
       fingerprint: session.fingerprint || stored?.fingerprint || null,
-      proxy: session.proxy || stored?.proxy || null,
+      proxy: incomingProxy || session.proxy || stored?.proxy || null,
       twofaSecret: twofaToStore || null,
       status: getEffectiveSessionStatus(session),
       lastActivity: session.lastActivity,
@@ -2038,15 +2290,22 @@ export async function sendMessageForSession(
       initialTask: () => executeSendFlow('Send flow', forceInitialRefresh),
       retryTask: (attempt) => executeSendFlow(`Send flow (recovery ${attempt})`, true),
     });
-    markSessionActive(sessionId);
+    settleSessionAfterFlow(sessionId);
     return { ok: true, ...(result || {}) };
   }, { priority: sendPriority });
 }
 
-export async function checkSessionForSession(sessionId, { requestId = null } = {}) {
+export async function checkSessionForSession(
+  sessionId,
+  { requestId = null, flowTimeoutMs = null, recoverableRetryAttempts = null } = {}
+) {
   return withSessionLock(sessionId, async () => {
     throwIfSessionRestricted(sessionId, 'check_cached');
     await ensureSessionActive(sessionId);
+    const effectiveFlowTimeoutMs =
+      Number.isFinite(Number(flowTimeoutMs)) && Number(flowTimeoutMs) > 0
+        ? Number(flowTimeoutMs)
+        : config.flowTimeoutMs;
     const executeCheckFlow = async (label) => {
       const activeSession = await ensureSessionActive(sessionId);
       touchSession(sessionId);
@@ -2057,7 +2316,7 @@ export async function checkSessionForSession(sessionId, { requestId = null } = {
           twofaSecret: activeSession.twofaSecret || null,
           requestId,
         }),
-        config.flowTimeoutMs,
+        effectiveFlowTimeoutMs,
         label
       );
       return result || {};
@@ -2072,8 +2331,9 @@ export async function checkSessionForSession(sessionId, { requestId = null } = {
       retryFailureSuspendReason: 'check_retry_failed',
       initialTask: () => executeCheckFlow('Check flow'),
       retryTask: (attempt) => executeCheckFlow(`Check flow (recovery ${attempt})`),
+      maxRecoveryAttemptsOverride: recoverableRetryAttempts,
     });
-    markSessionActive(sessionId);
+    settleSessionAfterFlow(sessionId);
     return { ok: true, ...(result || {}) };
   });
 }

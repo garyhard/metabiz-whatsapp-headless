@@ -107,7 +107,8 @@ function buildErrorResult(error, fallbackMessage) {
 }
 
 function isRetryableMessageJobError(errorResult) {
-  return String(errorResult?.errorCode || '').toLowerCase() !== 'account_restricted';
+  const code = String(errorResult?.errorCode || '').toLowerCase();
+  return !['account_restricted', 'need_new_cookies', 'captcha_required'].includes(code);
 }
 
 async function processJob(job) {

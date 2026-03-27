@@ -84,8 +84,6 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_message_jobs_status_next_retry
     ON message_jobs(status, next_retry_at, created_at);
-  CREATE INDEX IF NOT EXISTS idx_message_jobs_status_retry_priority_created
-    ON message_jobs(status, next_retry_at, priority, created_at);
   CREATE TABLE IF NOT EXISTS session_flow_jobs (
     id TEXT PRIMARY KEY,
     request_id TEXT UNIQUE,
@@ -843,6 +841,23 @@ export const sessionStore = {
     return !!row;
   },
 
+  hasQueuedSessionFlowJobForSession(sessionId, now = Date.now()) {
+    if (!sessionId) return false;
+    const row = getRow(`
+      SELECT id
+      FROM session_flow_jobs
+      WHERE target_session_id = :session_id
+        AND status = 'queued'
+        AND next_retry_at <= :now
+      ORDER BY created_at ASC
+      LIMIT 1
+    `, {
+      ':session_id': String(sessionId),
+      ':now': now,
+    });
+    return !!row;
+  },
+
   markMessageJobSent(jobId, result) {
     const now = Date.now();
     runStatement(`
@@ -931,6 +946,35 @@ export const sessionStore = {
     `, {
       ':session_id': String(sessionId),
       ':error_message': errorMessage || null,
+      ':result_json': serialize(result),
+      ':finished_at': now,
+      ':updated_at': now,
+    });
+  },
+
+  failQueuedSessionFlowJobsForSession(sessionId, errorMessage, errorCode = null, result = null) {
+    if (!sessionId) return 0;
+
+    const now = Date.now();
+    return runStatementWithChanges(`
+      UPDATE session_flow_jobs
+      SET status = 'error',
+          error_message = :error_message,
+          error_code = :error_code,
+          result_json = :result_json,
+          webhook_notified = 0,
+          webhook_attempts = 0,
+          webhook_next_retry_at = 0,
+          webhook_last_error = NULL,
+          webhook_delivered_at = NULL,
+          finished_at = :finished_at,
+          updated_at = :updated_at
+      WHERE target_session_id = :session_id
+        AND status = 'queued'
+    `, {
+      ':session_id': String(sessionId),
+      ':error_message': errorMessage || null,
+      ':error_code': errorCode || null,
       ':result_json': serialize(result),
       ':finished_at': now,
       ':updated_at': now,

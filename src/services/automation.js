@@ -193,6 +193,22 @@ const NEED_NEW_COOKIES_IDENTITY_HINTS = normalizeList([
   'konfirmasi identitas anda',
   'kami memerlukan info lebih lanjut untuk memastikan anda manusia',
 ]);
+const NEED_NEW_COOKIES_TEMP_BLOCK_TITLE_HINTS = normalizeList([
+  'you are temporarily blocked',
+  "you're temporarily blocked",
+  'anda diblokir sementara',
+]);
+const NEED_NEW_COOKIES_TEMP_BLOCK_REASON_HINTS = normalizeList([
+  'you seem to have misused this feature by going too fast',
+  'you seem to have misused this feature by using it too fast',
+  'this feature is temporarily unavailable to you',
+  'using this feature too quickly',
+  'misused this feature by going too fast',
+  'sepertinya anda menyalahgunakan fitur ini dengan menggunakannya terlalu cepat',
+  'menggunakannya terlalu cepat',
+  'fitur ini untuk sementara tidak tersedia',
+  'dilarang menggunakan fitur ini untuk sementara',
+]);
 const OPEN_WHATSAPP_MODAL_LABELS = uniqueNormalizedList([
   ...(config?.texts?.openWhatsappModal || []),
   'send a message on whatsapp',
@@ -1412,11 +1428,13 @@ function isAuthRelatedError(error) {
   const type = String(error?.details?.type || '').toLowerCase();
   return (
     type === 'account_restricted' ||
+    type === 'need_new_cookies' ||
     message.includes('redirected to auth') ||
     message.includes('checkpoint') ||
     message.includes('login') ||
     message.includes('twofactor') ||
-    message.includes('account restricted')
+    message.includes('account restricted') ||
+    message.includes('need new cookies')
   );
 }
 
@@ -1686,24 +1704,37 @@ async function hasCaptchaMismatchMessage(page) {
   }
 }
 
-async function detectNeedNewCookiesPage(page) {
+export async function detectNeedNewCookiesPage(page) {
   try {
-    return await page.evaluate(({ hints, videoHints, identityHints }) => {
+    return await page.evaluate(({ hints, videoHints, identityHints, tempBlockTitleHints, tempBlockReasonHints }) => {
       const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase();
       const matchedHints = hints.filter((hint) => text.includes(hint));
       const hasStrongVideoHint = videoHints.some((hint) => text.includes(hint));
       const hasIdentityHint = identityHints.some((hint) => text.includes(hint));
+      const matchedTempBlockTitleHints = tempBlockTitleHints.filter((hint) => text.includes(hint));
+      const matchedTempBlockReasonHints = tempBlockReasonHints.filter((hint) => text.includes(hint));
+      const hasTempBlockTitleHint = matchedTempBlockTitleHints.length > 0;
+      const hasTempBlockReasonHint = matchedTempBlockReasonHints.length > 0;
+      const identityVerificationDetected = hasStrongVideoHint && hasIdentityHint;
+      const temporaryBlockDetected = hasTempBlockTitleHint && hasTempBlockReasonHint;
       return {
-        detected: hasStrongVideoHint && hasIdentityHint,
-        matchedHints,
+        detected: identityVerificationDetected || temporaryBlockDetected,
+        matchedHints: [
+          ...matchedHints,
+          ...matchedTempBlockTitleHints,
+          ...matchedTempBlockReasonHints,
+        ],
+        reason: identityVerificationDetected ? 'identity_verification' : (temporaryBlockDetected ? 'temporary_block' : null),
       };
     }, {
       hints: NEED_NEW_COOKIES_TEXT_HINTS,
       videoHints: NEED_NEW_COOKIES_VIDEO_HINTS,
       identityHints: NEED_NEW_COOKIES_IDENTITY_HINTS,
+      tempBlockTitleHints: NEED_NEW_COOKIES_TEMP_BLOCK_TITLE_HINTS,
+      tempBlockReasonHints: NEED_NEW_COOKIES_TEMP_BLOCK_REASON_HINTS,
     });
   } catch {
-    return { detected: false, matchedHints: [] };
+    return { detected: false, matchedHints: [], reason: null };
   }
 }
 
@@ -1800,21 +1831,39 @@ async function collectAccountRestrictedDetails(page, label = 'Automation', extra
   };
 }
 
-async function collectRestrictedIdentityDetails(page, label = 'Automation', extraDetails = {}) {
+async function collectNeedNewCookiesDetails(page, label = 'Automation', extraDetails = {}) {
   const detected = await detectNeedNewCookiesPage(page);
-  return collectAccountRestrictedDetails(page, label, {
-    indicator: 'identity_verification_video_selfie',
+  const { cUser = 'unknown', ...restDetails } = extraDetails || {};
+  const debug = await captureDebugScreenshot(page, 'need-new-cookies', cUser).catch(() => null);
+  const diag = await getAuthPageDiagnostics(page);
+  console.warn(
+    `[${label}] Need new cookies detected`,
+    JSON.stringify({
+      url: diag.url || page.url(),
+      title: diag.title,
+      indicator: detected?.reason || null,
+      debugPath: debug?.path || null,
+    })
+  );
+  return {
+    type: 'need_new_cookies',
+    url: diag.url || page.url(),
+    title: diag.title,
+    text: diag.text,
+    screenshotPath: debug?.path || null,
+    screenshotFilename: debug?.filename || null,
+    indicator: detected?.reason || 'need_new_cookies',
     matchedHints: detected?.matchedHints || [],
-    ...extraDetails,
-  });
+    ...restDetails,
+  };
 }
 
-async function getRestrictedIdentityDetailsIfPresent(page, label = 'Automation', extraDetails = {}) {
+async function getNeedNewCookiesDetailsIfPresent(page, label = 'Automation', extraDetails = {}) {
   const detected = await detectNeedNewCookiesPage(page);
   if (!detected?.detected) {
     return null;
   }
-  return collectRestrictedIdentityDetails(page, label, extraDetails);
+  return collectNeedNewCookiesDetails(page, label, extraDetails);
 }
 
 async function findCaptchaInput(page) {
@@ -1907,7 +1956,7 @@ async function tryResolveCaptchaCheckpoint(page, label = 'Automation', cUser = '
       if (needNewCookies?.detected) {
         return {
           resolved: false,
-          details: await collectRestrictedIdentityDetails(page, label, {
+          details: await collectNeedNewCookiesDetails(page, label, {
             captchaAutoSubmitAttempted: true,
             captchaAutoSubmitSucceeded: true,
             captchaSubmittedText: captchaText,
@@ -2008,6 +2057,9 @@ async function resolveCaptchaCheckpointIfPresent(page, label = 'Automation', cUs
   }
 
   const errorType = String(result?.details?.type || '').toLowerCase();
+  if (errorType === 'need_new_cookies') {
+    throw new AutomationError(`${label}: Need new cookies`, result?.details || null);
+  }
   if (errorType === 'account_restricted') {
     throw new AutomationError(`${label}: Account restricted detected`, result?.details || null);
   }
@@ -2021,29 +2073,29 @@ async function resolveTwoFactorChallenge(page, { twofaSecret = null, label = 'Au
 
   console.log(`[${label}] Two-factor challenge detected, resolving via TOTP...`);
 
-  const initialRestricted = await getRestrictedIdentityDetailsIfPresent(page, label, {
+  const initialRestricted = await getNeedNewCookiesDetailsIfPresent(page, label, {
     authStage: 'twofactor_initial',
   });
   if (initialRestricted) {
-    throw new AutomationError(`${label}: Account restricted detected`, initialRestricted);
+    throw new AutomationError(`${label}: Need new cookies`, initialRestricted);
   }
 
   await advanceHumanConfirmation(page, label).catch(() => false);
 
-  const postHumanRestricted = await getRestrictedIdentityDetailsIfPresent(page, label, {
+  const postHumanRestricted = await getNeedNewCookiesDetailsIfPresent(page, label, {
     authStage: 'twofactor_post_human_confirmation',
   });
   if (postHumanRestricted) {
-    throw new AutomationError(`${label}: Account restricted detected`, postHumanRestricted);
+    throw new AutomationError(`${label}: Need new cookies`, postHumanRestricted);
   }
 
   await resolveCaptchaCheckpointIfPresent(page, label, cUser);
 
-  const postCaptchaRestricted = await getRestrictedIdentityDetailsIfPresent(page, label, {
+  const postCaptchaRestricted = await getNeedNewCookiesDetailsIfPresent(page, label, {
     authStage: 'twofactor_post_captcha',
   });
   if (postCaptchaRestricted) {
-    throw new AutomationError(`${label}: Account restricted detected`, postCaptchaRestricted);
+    throw new AutomationError(`${label}: Need new cookies`, postCaptchaRestricted);
   }
 
   if (!isTwoFactorUrl(page.url())) {
@@ -2068,11 +2120,11 @@ async function resolveTwoFactorChallenge(page, { twofaSecret = null, label = 'Au
 
   await resolveCaptchaCheckpointIfPresent(page, label, cUser);
 
-  const postMethodRestricted = await getRestrictedIdentityDetailsIfPresent(page, label, {
+  const postMethodRestricted = await getNeedNewCookiesDetailsIfPresent(page, label, {
     authStage: 'twofactor_post_method_selection',
   });
   if (postMethodRestricted) {
-    throw new AutomationError(`${label}: Account restricted detected`, postMethodRestricted);
+    throw new AutomationError(`${label}: Need new cookies`, postMethodRestricted);
   }
 
   if (!isTwoFactorUrl(page.url())) {
@@ -2128,18 +2180,18 @@ async function resolveTwoFactorChallenge(page, { twofaSecret = null, label = 'Au
   }
 
   if (input === 'restricted') {
-    const restrictedDetails = await collectRestrictedIdentityDetails(page, label, {
+    const restrictedDetails = await collectNeedNewCookiesDetails(page, label, {
       authStage: 'twofactor_wait_for_input',
     });
-    throw new AutomationError(`${label}: Account restricted detected`, restrictedDetails);
+    throw new AutomationError(`${label}: Need new cookies`, restrictedDetails);
   }
 
   if (!input) {
-    const restrictedDetails = await getRestrictedIdentityDetailsIfPresent(page, label, {
+    const restrictedDetails = await getNeedNewCookiesDetailsIfPresent(page, label, {
       authStage: 'twofactor_input_missing',
     });
     if (restrictedDetails) {
-      throw new AutomationError(`${label}: Account restricted detected`, restrictedDetails);
+      throw new AutomationError(`${label}: Need new cookies`, restrictedDetails);
     }
 
     const debug = await captureDebugScreenshot(page, 'twofa-input-not-found', cUser).catch(() => null);
@@ -2296,6 +2348,10 @@ async function ensureOnInbox(page, label = 'Automation', { twofaSecret = null, c
   await dismissSaveLoginInfo(page, label);
   await dismissInboxBlockingPrompts(page, label);
   await detectAccountRestricted(page, label, cUser);
+  const needNewCookiesDetails = await getNeedNewCookiesDetailsIfPresent(page, label, { cUser });
+  if (needNewCookiesDetails) {
+    throw new AutomationError(`${label}: Need new cookies`, needNewCookiesDetails);
+  }
 }
 
 async function waitForMainSpinner(page, { timeoutMs = 30000 } = {}) {
@@ -2323,7 +2379,13 @@ async function ensureInboxReady(page, label = 'Automation', options = {}) {
   await ensureOnInbox(page, label, options);
   const spinnerOk = await waitForMainSpinner(page, { timeoutMs: SPINNER_TIMEOUT_MS });
   if (!spinnerOk) {
-    throw new AutomationError(`${label}: Inbox still loading (spinner timeout)`);
+    throw new AutomationError(`${label}: Inbox still loading (spinner timeout)`, {
+      type: 'inbox_not_ready',
+      reason: 'spinner_timeout',
+      stage: 'ensure_inbox_ready.spinner',
+      label,
+      url: page.url(),
+    });
   }
 }
 
@@ -3710,52 +3772,33 @@ export async function checkSessionFlow(page, { sessionId = null, cUser = null, t
   };
 
   const runCheck = async () => {
-    // Step 1: Open WhatsApp modal
-    await openWhatsappModal(page);
-    logStep('check:open_modal');
-
-    // Step 2: Click "New WhatsApp number"
-    const newNumberResult = await clickNewWhatsappNumber(page);
-    logStep('check:new_number', newNumberResult);
-
-    // Step 3: Ensure extension combobox exists
-    const dialog = await waitFor(
+    const inboxReady = await waitFor(
       page,
-      async () => findFirstVisible(page, '[role="dialog"]'),
-      { timeoutMs: 10000 }
-    );
-    if (!dialog) {
-      throw new AutomationError('Check: Dialog not found');
-    }
-    logStep('check:dialog_ok');
+      async () => {
+        const ready = await page.evaluate(() => {
+          return (
+            !!document.querySelector('span[data-surface="/bizweb:all/thread_row"]') ||
+            !!document.querySelector('[data-pagelet*="BizInbox"]') ||
+            !!document.querySelector('input[role="combobox"][placeholder="Search"]') ||
+            !!document.querySelector('[aria-label="Inbox"], [aria-label="Kotak Masuk"], [aria-label*="Inbox" i], [aria-label*="Kotak Masuk" i]')
+          );
+        }).catch(() => false);
+        return ready ? true : null;
+      },
+      { timeoutMs: 10000, intervalMs: 300 }
+    ).catch(() => null);
 
-    const combo = await findFirstVisibleInRoot(page, dialog, '[role="combobox"][aria-haspopup="listbox"]');
-    if (!combo) {
-      throw new AutomationError('Check: Extension dropdown not found');
+    if (!inboxReady) {
+      throw new AutomationError('Check: Inbox indicators not found', {
+        type: 'inbox_not_ready',
+        reason: 'inbox_indicators_not_found',
+        stage: 'check_session.inbox_indicators',
+        sessionId,
+        url: page.url(),
+      });
     }
-    logStep('check:combo_ok');
 
-    // Step 4: Ensure phone input exists
-    const phoneInput = await findDialogPhoneInput(page, dialog);
-    if (!phoneInput) {
-      throw new AutomationError('Check: Phone input not found');
-    }
-    logStep('check:phone_ok');
-
-    // Step 5: Ensure message input exists
-    const { textarea, editable } = await findDialogMessageInput(page, dialog);
-    if (!textarea && !editable) {
-      throw new AutomationError('Check: Message input not found');
-    }
-    logStep('check:message_ok');
-
-    // Close dialog
-    try {
-      await page.keyboard.press('Escape');
-      await sleep(300);
-    } catch {
-      // Ignore close failures
-    }
+    logStep('check:inbox_ready');
   };
 
   let lastError = null;
@@ -3800,6 +3843,8 @@ export async function checkSessionFlow(page, { sessionId = null, cUser = null, t
     type: 'check',
     steps,
     error: lastError?.message || 'unknown error',
+    errorType: lastError?.details?.type || null,
+    errorDetails: lastError?.details || null,
     screenshotPath: debug.path,
     url: debug.url,
     ...(captchaLog || {}),

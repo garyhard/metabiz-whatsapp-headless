@@ -8,7 +8,9 @@ import { sessionStore } from './sessionStore.js';
 import {
   checkSessionForSession,
   createSession,
+  destroySession,
   updateSessionCookies,
+  updateSessionProxy,
   validateCookies,
 } from './sessionManager.js';
 import { config } from '../config.js';
@@ -133,6 +135,7 @@ async function executeJob(job) {
     case 'validate_cookies': {
       const validationResult = await validateCookies(payload.cookies, payload.proxy || null, {
         persist: payload.persist === true,
+        freshBrowser: payload.freshBrowser === true,
         twofaSecret: payload.twofaSecret || null,
       });
 
@@ -181,6 +184,7 @@ async function executeJob(job) {
       try {
         await updateSessionCookies(job.targetSessionId, payload.cookies, {
           twofaSecret: payload.twofaSecret || null,
+          proxy: payload.proxy || null,
         });
         return {
           ok: true,
@@ -199,6 +203,21 @@ async function executeJob(job) {
           recreated: true,
         };
       }
+    case 'update_session_proxy': {
+      const result = await updateSessionProxy(job.targetSessionId, payload.proxy || null);
+      return {
+        ok: true,
+        sessionId: result?.sessionId || job.targetSessionId,
+        ...(result || {}),
+      };
+    }
+    case 'destroy_session':
+      await destroySession(job.targetSessionId);
+      return {
+        ok: true,
+        sessionId: job.targetSessionId,
+        destroyed: true,
+      };
     default:
       throw new InvalidInputError(`Unsupported session flow job type: ${job.jobType}`);
   }

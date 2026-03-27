@@ -39,9 +39,42 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DEBUG_DIR = path.join(__dirname, '../profiles/debug');
 
+function resolveHttpRequestId(req) {
+  const explicit =
+    String(
+      req.body?.requestId ||
+      req.query?.requestId ||
+      req.headers['x-request-id'] ||
+      req.headers['x-correlation-id'] ||
+      ''
+    ).trim();
+
+  if (explicit) return explicit;
+  return `http-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function buildHttpJsonErrorBody(req, error, fallback, extra = {}) {
+  const details = {
+    requestId: req.requestId || null,
+    method: req.method,
+    path: req.originalUrl || req.url || null,
+    ...(extra.details && typeof extra.details === 'object' ? extra.details : {}),
+  };
+
+  return buildJsonErrorBody(error, fallback, {
+    ...extra,
+    details,
+  });
+}
+
 // Middleware
 app.disable('x-powered-by');
 app.use(express.json());
+app.use((req, res, next) => {
+  req.requestId = resolveHttpRequestId(req);
+  res.setHeader('X-Request-Id', req.requestId);
+  next();
+});
 
 // Health check endpoint (no auth required)
 app.get('/health', (req, res) => {
@@ -108,20 +141,29 @@ app.use((err, req, res, next) => {
       ok: false,
       error: 'Invalid JSON request body',
       errorCode: 'invalid_json',
+      details: {
+        requestId: req.requestId,
+        method: req.method,
+        path: req.originalUrl || req.url || null,
+      },
     });
   }
 
   if (err instanceof SessionNotFoundError) {
-    return res.status(404).json(buildJsonErrorBody(err, 'Session not found'));
+    return res.status(404).json(buildHttpJsonErrorBody(req, err, 'Session not found', {
+      errorCode: 'session_not_found',
+    }));
   }
 
   if (err instanceof InvalidInputError) {
-    return res.status(400).json(buildJsonErrorBody(err, 'Invalid input'));
+    return res.status(400).json(buildHttpJsonErrorBody(req, err, 'Invalid input', {
+      errorCode: 'invalid_input',
+    }));
   }
 
   if (err instanceof AutomationError) {
     return res.status(500).json(
-      buildJsonErrorBody(err, 'Automation failed', {
+      buildHttpJsonErrorBody(req, err, 'Automation failed', {
         errorCode: getAutomationErrorCode(err),
         details: err.details,
       })
@@ -129,15 +171,21 @@ app.use((err, req, res, next) => {
   }
 
   if (err instanceof BrowserCrashError) {
-    return res.status(500).json(buildJsonErrorBody(err, 'Browser crashed'));
+    return res.status(500).json(buildHttpJsonErrorBody(req, err, 'Browser crashed', {
+      errorCode: 'browser_crashed',
+    }));
   }
 
   if (err instanceof FlowTimeoutError) {
-    return res.status(504).json(buildJsonErrorBody(err, 'Flow timed out'));
+    return res.status(504).json(buildHttpJsonErrorBody(req, err, 'Flow timed out', {
+      errorCode: 'flow_timeout',
+    }));
   }
 
   // Generic error handler
-  const errorBody = buildJsonErrorBody(err, 'Internal server error');
+  const errorBody = buildHttpJsonErrorBody(req, err, 'Internal server error', {
+    errorCode: 'internal_server_error',
+  });
   res.status(500).json({
     ...errorBody,
     message: errorBody.error,
@@ -149,6 +197,12 @@ app.use((req, res) => {
   res.status(404).json({
     ok: false,
     error: 'Not found',
+    errorCode: 'not_found',
+    details: {
+      requestId: req.requestId || null,
+      method: req.method,
+      path: req.originalUrl || req.url || null,
+    },
   });
 });
 

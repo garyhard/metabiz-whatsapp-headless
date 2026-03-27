@@ -12,6 +12,7 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 const DEV_MODE = process.env.DEV_MODE === 'true' || process.env.NODE_ENV === 'development';
 const FLOW_TIMEOUT_MS = parseInt(process.env.FLOW_TIMEOUT_MS || '60000', 10);
 const IDLE_TIMEOUT_MINUTES = parseInt(process.env.IDLE_TIMEOUT_MINUTES || '0', 10);
+const POST_FLOW_IDLE_TIMEOUT_MS = parseInt(process.env.POST_FLOW_IDLE_TIMEOUT_MS || '30000', 10);
 const SEND_RELOAD_IDLE_MINUTES = parseInt(process.env.SEND_RELOAD_IDLE_MINUTES || '10', 10);
 const BROWSER_POOL_WAIT_MS = parseInt(process.env.BROWSER_POOL_WAIT_MS || '30000', 10);
 
@@ -69,6 +70,9 @@ export const config = {
   idleTimeoutMs: Number.isFinite(IDLE_TIMEOUT_MINUTES) && IDLE_TIMEOUT_MINUTES > 0
     ? IDLE_TIMEOUT_MINUTES * 60 * 1000
     : 0,
+  postFlowIdleTimeoutMs: Number.isFinite(POST_FLOW_IDLE_TIMEOUT_MS) && POST_FLOW_IDLE_TIMEOUT_MS >= 0
+    ? POST_FLOW_IDLE_TIMEOUT_MS
+    : 30000,
   sendReloadIdleMs: Number.isFinite(SEND_RELOAD_IDLE_MINUTES) && SEND_RELOAD_IDLE_MINUTES > 0
     ? SEND_RELOAD_IDLE_MINUTES * 60 * 1000
     : 0,

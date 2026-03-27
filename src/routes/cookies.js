@@ -23,7 +23,7 @@ function toBoolean(value) {
  */
 router.post('/validate', async (req, res, next) => {
   try {
-    const { cookies, proxy, persist, twofaSecret, async, requestId, context, checkAfterSuccess, webhookUrl } = req.body || {};
+    const { cookies, proxy, persist, freshBrowser, twofaSecret, async, requestId, context, checkAfterSuccess, webhookUrl } = req.body || {};
 
     const cookiesIsString = typeof cookies === 'string';
     const cookiesIsArray = Array.isArray(cookies);
@@ -65,6 +65,7 @@ router.post('/validate', async (req, res, next) => {
           cookies,
           proxy: proxyConfig,
           persist: persist === true,
+          freshBrowser: freshBrowser === true,
           twofaSecret,
           context: context && typeof context === 'object' && !Array.isArray(context) ? context : null,
           checkAfterSuccess: toBoolean(checkAfterSuccess),
@@ -81,6 +82,7 @@ router.post('/validate', async (req, res, next) => {
 
     const result = await validateCookies(cookies, proxyConfig, {
       persist: persist === true,
+      freshBrowser: freshBrowser === true,
       twofaSecret,
     });
 
