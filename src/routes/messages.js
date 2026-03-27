@@ -3,7 +3,7 @@
  */
 
 import express from 'express';
-import { sendMessageForSession, restoreSessionFromStore } from '../services/sessionManager.js';
+import { getAllSessionIds, getSessionInfo, sendMessageForSession, restoreSessionFromStore } from '../services/sessionManager.js';
 import { enqueueMessageJob, getMessageJob } from '../services/messageQueue.js';
 import { sessionStore } from '../services/sessionStore.js';
 import {
@@ -59,6 +59,90 @@ function serializeJob(job) {
     webhookLastError: job.webhookLastError || null,
   };
 }
+
+function normalizeLimit(value, fallback = 100, max = 500) {
+  const parsed = parseInt(String(value || ''), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  return Math.min(parsed, max);
+}
+
+function buildSessionSummary(sessions) {
+  return (Array.isArray(sessions) ? sessions : []).reduce((memo, session) => {
+    const status = String(session?.status || '').trim().toLowerCase();
+    memo.total += 1;
+    if (session?.liveBrowser) memo.liveBrowser += 1;
+    if (status === 'active') memo.active += 1;
+    if (status === 'suspended') memo.suspended += 1;
+    if (status === 'restricted') memo.restricted += 1;
+    if (status === 'needs_manual_action') memo.needsManualAction += 1;
+    return memo;
+  }, {
+    total: 0,
+    liveBrowser: 0,
+    active: 0,
+    suspended: 0,
+    restricted: 0,
+    needsManualAction: 0,
+  });
+}
+
+function decorateJobWithSession(job, sessionMap) {
+  const row = serializeJob(job);
+  const sessionId = row?.sessionId;
+  const session = sessionId ? sessionMap.get(sessionId) || null : null;
+  return {
+    ...row,
+    session: session ? {
+      sessionId: session.sessionId,
+      cUser: session.cUser || null,
+      status: session.status || null,
+      liveBrowser: session.liveBrowser === true,
+      lastActivity: session.lastActivity || null,
+    } : null,
+    messagePreview: String(row?.message || '').replace(/\s+/g, ' ').trim().slice(0, 160),
+  };
+}
+
+/**
+ * GET /api/sessions/jobs/monitor
+ * Get MetaBiz queue/session monitoring snapshot
+ */
+router.get('/jobs/monitor', async (req, res) => {
+  const queuedLimit = normalizeLimit(req.query?.queuedLimit, 100, 500);
+  const processingLimit = normalizeLimit(req.query?.processingLimit, 100, 500);
+
+  const loadedSessions = getAllSessionIds().map((id) => getSessionInfo(id)).filter(Boolean);
+  const loadedSessionMap = new Map(loadedSessions.map((session) => [session.sessionId, session]));
+  const queueCounts = sessionStore.messageJobStatusCounts();
+  const queuedJobs = sessionStore.listQueuedMessageJobs(queuedLimit);
+  const processingJobs = sessionStore.listProcessingMessageJobs(processingLimit);
+
+  const processingSessionIds = [...new Set(processingJobs.map((job) => String(job.sessionId || '')).filter(Boolean))];
+  const queuedSessionIds = [...new Set(queuedJobs.map((job) => String(job.sessionId || '')).filter(Boolean))];
+
+  return res.json({
+    ok: true,
+    generatedAt: new Date().toISOString(),
+    queue: {
+      counts: {
+        queued: Number(queueCounts.queued || 0),
+        processing: Number(queueCounts.processing || 0),
+        sent: Number(queueCounts.sent || 0),
+        error: Number(queueCounts.error || 0),
+      },
+      processingSessionCount: processingSessionIds.length,
+      queuedSessionCount: queuedSessionIds.length,
+      processingJobs: processingJobs.map((job) => decorateJobWithSession(job, loadedSessionMap)),
+      queuedJobs: queuedJobs.map((job) => decorateJobWithSession(job, loadedSessionMap)),
+    },
+    sessions: {
+      summary: buildSessionSummary(loadedSessions),
+      loaded: loadedSessions,
+    },
+  });
+});
 
 /**
  * GET /api/sessions/jobs/:jobId

@@ -269,10 +269,17 @@ function signPayload(rawBody) {
   return `sha256=${digest}`;
 }
 
+function isRetryableWebhookStatus(statusCode) {
+  const code = Number(statusCode) || 0;
+  if (code <= 0) return true;
+  if (code >= 500) return true;
+  return [408, 409, 425, 429].includes(code);
+}
+
 async function postWebhook(job) {
   const url = resolveWebhookUrl(job);
   if (!url) {
-    return { ok: false, error: 'webhook_url_not_set', retryable: false };
+    return { ok: false, error: 'webhook_url_not_set', retryable: false, statusCode: null };
   }
 
   const payload = buildWebhookPayload(job);
@@ -293,11 +300,16 @@ async function postWebhook(job) {
 
     if (!response.ok) {
       const text = await response.text().catch(() => '');
-      return { ok: false, error: `HTTP ${response.status} ${text}`.trim() };
+      return {
+        ok: false,
+        error: `HTTP ${response.status} ${text}`.trim(),
+        retryable: isRetryableWebhookStatus(response.status),
+        statusCode: Number(response.status) || null,
+      };
     }
     return { ok: true };
   } catch (error) {
-    return { ok: false, error: error?.message || String(error) };
+    return { ok: false, error: error?.message || String(error), retryable: true, statusCode: null };
   } finally {
     clearTimeout(timeout);
   }
@@ -308,6 +320,14 @@ async function deliverWebhook(job) {
   if (webhookResult.ok) {
     sessionStore.markSessionFlowWebhookDelivered(job.id);
     console.log(`[SessionFlowQueue] webhook delivered job=${job.id} status=${job.status}`);
+    return;
+  }
+
+  if (webhookResult.retryable === false) {
+    sessionStore.markSessionFlowWebhookStopped(job.id, webhookResult.error);
+    console.warn(
+      `[SessionFlowQueue] webhook stopped job=${job.id} status=${job.status} error=${webhookResult.error}`
+    );
     return;
   }
 

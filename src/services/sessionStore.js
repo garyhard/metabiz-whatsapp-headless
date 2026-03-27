@@ -850,11 +850,11 @@ export const sessionStore = {
       SET status = 'sent',
           error_message = NULL,
           result_json = :result_json,
-          webhook_notified = 0,
+          webhook_notified = CASE WHEN COALESCE(TRIM(meta_blast_message_id), '') = '' THEN 1 ELSE 0 END,
           webhook_attempts = 0,
           webhook_next_retry_at = 0,
           webhook_last_error = NULL,
-          webhook_delivered_at = NULL,
+          webhook_delivered_at = CASE WHEN COALESCE(TRIM(meta_blast_message_id), '') = '' THEN :finished_at ELSE NULL END,
           finished_at = :finished_at,
           updated_at = :updated_at
       WHERE id = :id
@@ -892,11 +892,11 @@ export const sessionStore = {
       SET status = 'error',
           error_message = :error_message,
           result_json = :result_json,
-          webhook_notified = 0,
+          webhook_notified = CASE WHEN COALESCE(TRIM(meta_blast_message_id), '') = '' THEN 1 ELSE 0 END,
           webhook_attempts = 0,
           webhook_next_retry_at = 0,
           webhook_last_error = NULL,
-          webhook_delivered_at = NULL,
+          webhook_delivered_at = CASE WHEN COALESCE(TRIM(meta_blast_message_id), '') = '' THEN :finished_at ELSE NULL END,
           finished_at = :finished_at,
           updated_at = :updated_at
       WHERE id = :id
@@ -919,11 +919,11 @@ export const sessionStore = {
       SET status = 'error',
           error_message = :error_message,
           result_json = :result_json,
-          webhook_notified = 0,
+          webhook_notified = CASE WHEN COALESCE(TRIM(meta_blast_message_id), '') = '' THEN 1 ELSE 0 END,
           webhook_attempts = 0,
           webhook_next_retry_at = 0,
           webhook_last_error = NULL,
-          webhook_delivered_at = NULL,
+          webhook_delivered_at = CASE WHEN COALESCE(TRIM(meta_blast_message_id), '') = '' THEN :finished_at ELSE NULL END,
           finished_at = :finished_at,
           updated_at = :updated_at
       WHERE session_id = :session_id
@@ -1020,11 +1020,55 @@ export const sessionStore = {
     return rows.map(normalizeMessageJobRow);
   },
 
+  messageJobStatusCounts() {
+    const rows = getRows(`
+      SELECT status, COUNT(*) AS count
+      FROM message_jobs
+      GROUP BY status
+    `, {});
+
+    return rows.reduce((memo, row) => {
+      const status = String(row.status || "").trim().toLowerCase();
+      if (!status) return memo;
+      memo[status] = Number(row.count || 0);
+      return memo;
+    }, {});
+  },
+
+  listQueuedMessageJobs(limit = 100) {
+    const maxRows = Math.max(1, Number(limit) || 100);
+    const rows = getRows(`
+      SELECT *
+      FROM message_jobs
+      WHERE status = 'queued'
+      ORDER BY created_at ASC
+      LIMIT :limit
+    `, {
+      ':limit': maxRows,
+    });
+    return rows.map(normalizeMessageJobRow);
+  },
+
+  listProcessingMessageJobs(limit = 100) {
+    const maxRows = Math.max(1, Number(limit) || 100);
+    const rows = getRows(`
+      SELECT *
+      FROM message_jobs
+      WHERE status = 'processing'
+      ORDER BY updated_at ASC
+      LIMIT :limit
+    `, {
+      ':limit': maxRows,
+    });
+    return rows.map(normalizeMessageJobRow);
+  },
+
   hasPendingWebhook(now = Date.now()) {
     const row = getRow(`
       SELECT id
       FROM message_jobs
       WHERE webhook_notified = 0
+        AND COALESCE(TRIM(meta_blast_message_id), '') <> ''
         AND status IN ('sent', 'error')
         AND webhook_next_retry_at <= :now
       ORDER BY updated_at ASC
@@ -1038,6 +1082,7 @@ export const sessionStore = {
       SELECT id
       FROM message_jobs
       WHERE webhook_notified = 0
+        AND COALESCE(TRIM(meta_blast_message_id), '') <> ''
         AND status IN ('sent', 'error')
         AND webhook_next_retry_at <= :now
       ORDER BY updated_at ASC
@@ -1051,6 +1096,7 @@ export const sessionStore = {
           updated_at = :updated_at
       WHERE id = :id
         AND webhook_notified = 0
+        AND COALESCE(TRIM(meta_blast_message_id), '') <> ''
         AND status IN ('sent', 'error')
         AND webhook_next_retry_at <= :now
     `, {
@@ -1060,6 +1106,24 @@ export const sessionStore = {
     });
     if (changes <= 0) return null;
     return this.getMessageJob(row.id);
+  },
+
+  stopInvalidMessageJobWebhooks() {
+    const now = Date.now();
+    return runStatementWithChanges(`
+      UPDATE message_jobs
+      SET webhook_notified = 1,
+          webhook_next_retry_at = 0,
+          updated_at = :updated_at
+      WHERE webhook_notified = 0
+        AND status IN ('sent', 'error')
+        AND (
+          COALESCE(TRIM(meta_blast_message_id), '') = ''
+          OR LOWER(COALESCE(webhook_last_error, '')) LIKE '%meta blast message id not found%'
+        )
+    `, {
+      ':updated_at': now,
+    });
   },
 
   markWebhookDelivered(jobId) {
@@ -1092,6 +1156,23 @@ export const sessionStore = {
       ':id': jobId,
       ':webhook_last_error': errorMessage || null,
       ':webhook_next_retry_at': nextRetryAt || now,
+      ':updated_at': now,
+    });
+    return this.getMessageJob(jobId);
+  },
+
+  markWebhookStopped(jobId, errorMessage) {
+    const now = Date.now();
+    runStatement(`
+      UPDATE message_jobs
+      SET webhook_notified = 1,
+          webhook_last_error = :webhook_last_error,
+          webhook_next_retry_at = 0,
+          updated_at = :updated_at
+      WHERE id = :id
+    `, {
+      ':id': jobId,
+      ':webhook_last_error': errorMessage || null,
       ':updated_at': now,
     });
     return this.getMessageJob(jobId);
@@ -1347,6 +1428,23 @@ export const sessionStore = {
       ':id': jobId,
       ':webhook_last_error': errorMessage || null,
       ':webhook_next_retry_at': nextRetryAt || now,
+      ':updated_at': now,
+    });
+    return this.getSessionFlowJob(jobId);
+  },
+
+  markSessionFlowWebhookStopped(jobId, errorMessage) {
+    const now = Date.now();
+    runStatement(`
+      UPDATE session_flow_jobs
+      SET webhook_notified = 1,
+          webhook_last_error = :webhook_last_error,
+          webhook_next_retry_at = 0,
+          updated_at = :updated_at
+      WHERE id = :id
+    `, {
+      ':id': jobId,
+      ':webhook_last_error': errorMessage || null,
       ':updated_at': now,
     });
     return this.getSessionFlowJob(jobId);
