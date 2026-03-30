@@ -260,8 +260,36 @@ function getEvictableSessionCandidate(protectedSessionIds = []) {
 }
 
 async function tryReserveBrowserSlot(reservationKey, protectedSessionIds = [], reason = 'activation') {
+  return tryReserveBrowserSlotWithOptions(reservationKey, protectedSessionIds, reason, {});
+}
+
+function resolveBrowserPoolPolicy(options = {}) {
+  const lane = String(options?.lane || '').trim().toLowerCase();
+  const baseMaxActiveBrowsers = Number(config.maxActiveBrowsers) || 0;
+  const baseWaitMs = Math.max(0, Number(config.browserPoolWaitMs) || 0);
+
+  if (lane !== 'create') {
+    return {
+      lane: 'default',
+      maxActiveBrowsers: baseMaxActiveBrowsers,
+      waitMs: baseWaitMs,
+    };
+  }
+
+  const extraCapacity = Math.max(0, Number(config.createQueue?.browserExtraCapacity) || 0);
+  const createWaitMs = Math.max(0, Number(config.createQueue?.browserPoolWaitMs) || baseWaitMs);
+
+  return {
+    lane: 'create',
+    maxActiveBrowsers: baseMaxActiveBrowsers > 0 ? baseMaxActiveBrowsers + extraCapacity : 0,
+    waitMs: createWaitMs,
+  };
+}
+
+async function tryReserveBrowserSlotWithOptions(reservationKey, protectedSessionIds = [], reason = 'activation', options = {}) {
+  const poolPolicy = resolveBrowserPoolPolicy(options);
   return withBrowserPoolLock(async () => {
-    const maxActiveBrowsers = Number(config.maxActiveBrowsers) || 0;
+    const maxActiveBrowsers = poolPolicy.maxActiveBrowsers;
     if (maxActiveBrowsers <= 0) {
       return { reserved: true, liveCount: getLiveBrowserCount(), pendingCount: pendingBrowserReservations.size };
     }
@@ -286,11 +314,12 @@ async function tryReserveBrowserSlot(reservationKey, protectedSessionIds = [], r
       };
     }
 
-    logStep('browser_pool:evict:start', {
-      reason,
-      maxActiveBrowsers,
-      evictSessionId: candidate.sessionId,
-      cUser: candidate.cUser,
+      logStep('browser_pool:evict:start', {
+        reason,
+        lane: poolPolicy.lane,
+        maxActiveBrowsers,
+        evictSessionId: candidate.sessionId,
+        cUser: candidate.cUser,
       lastActivity: candidate.lastActivity || null,
       liveCount: currentLiveBrowsers,
       pendingCount: currentPendingReservations,
@@ -301,6 +330,7 @@ async function tryReserveBrowserSlot(reservationKey, protectedSessionIds = [], r
     const nextPendingCount = pendingBrowserReservations.size;
     logStep('browser_pool:evict:done', {
       reason,
+      lane: poolPolicy.lane,
       maxActiveBrowsers,
       evictSessionId: candidate.sessionId,
       liveCount: nextLiveCount,
@@ -315,20 +345,22 @@ async function tryReserveBrowserSlot(reservationKey, protectedSessionIds = [], r
   });
 }
 
-async function reserveBrowserSlot(reservationKey, protectedSessionIds = [], reason = 'activation') {
-  const maxActiveBrowsers = Number(config.maxActiveBrowsers) || 0;
+async function reserveBrowserSlot(reservationKey, protectedSessionIds = [], reason = 'activation', options = {}) {
+  const poolPolicy = resolveBrowserPoolPolicy(options);
+  const maxActiveBrowsers = poolPolicy.maxActiveBrowsers;
   if (maxActiveBrowsers <= 0) {
     return;
   }
 
-  const waitMs = Math.max(0, Number(config.browserPoolWaitMs) || 0);
+  const waitMs = poolPolicy.waitMs;
   const deadline = Date.now() + waitMs;
 
   while (true) {
-    const result = await tryReserveBrowserSlot(reservationKey, protectedSessionIds, reason);
+    const result = await tryReserveBrowserSlotWithOptions(reservationKey, protectedSessionIds, reason, options);
     if (result.reserved) {
       logStep('browser_pool:reserve', {
         reason,
+        lane: poolPolicy.lane,
         maxActiveBrowsers,
         liveCount: result.liveCount,
         pendingCount: result.pendingCount,
@@ -782,14 +814,45 @@ function markSessionRestricted(sessionId, error, flow = 'unknown') {
       },
     }
   );
+  const cancelledFlowJobs = sessionStore.failQueuedSessionFlowJobsForSession(
+    sessionId,
+    manualAction.message,
+    'account_restricted',
+    {
+      ok: false,
+      error: manualAction.message,
+      errorCode: 'account_restricted',
+      details: {
+        ...(manualAction.details || {}),
+        flow,
+        sessionId,
+      },
+    }
+  );
   sessionStore.updateStatus(sessionId, 'restricted', detectedAtMs);
   logStep('session:restricted', {
     sessionId,
     flow,
     cancelledJobs,
+    cancelledFlowJobs,
     screenshotPath: manualAction.details?.screenshotPath || null,
     message: manualAction.message,
   });
+
+  if (session) {
+    setTimeout(() => {
+      destroySession(sessionId, { preserveStore: true })
+        .then(() => {
+          logStep('session:restricted:destroyed', {
+            sessionId,
+            flow,
+          });
+        })
+        .catch((destroyError) => {
+          console.warn(`[SessionManager] restricted destroy failed ${sessionId}:`, destroyError?.message || String(destroyError));
+        });
+    }, 0);
+  }
 }
 
 function throwIfSessionRestricted(sessionId, flow = 'unknown') {
@@ -1614,6 +1677,12 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
   const cUser = extractCUser(normalized);
   const persist = options?.persist === true;
   const freshBrowser = options?.freshBrowser === true;
+  const skipProxyValidation = options?.skipProxyValidation === true;
+  const navigationRetries =
+    Number.isFinite(Number(options?.navigationRetries)) && Number(options.navigationRetries) >= 0
+      ? Number(options.navigationRetries)
+      : 2;
+  const browserPoolLane = String(options?.browserPoolLane || '').trim().toLowerCase();
   const normalizedTwofaSecret = String(options?.twofaSecret || '').trim() || null;
   if (normalized.format === 'string') {
     if (!normalized.raw || !String(normalized.raw).trim()) {
@@ -1643,7 +1712,9 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
     setProgress(cUser, 'validate:start');
     const storedFingerprint = freshBrowser ? null : sessionStore.getFingerprint(cUser);
     if (persist) {
-      await reserveBrowserSlot(browserReservationKey, [], 'validate_cookies_persist');
+      await reserveBrowserSlot(browserReservationKey, [], 'validate_cookies_persist', {
+        lane: browserPoolLane,
+      });
       browserSlotReserved = true;
     }
     logStep('validateCookies:browser:init', { cUser, freshBrowser, reuseFingerprint: Boolean(storedFingerprint) });
@@ -1653,7 +1724,7 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
     page = browserInstance.page;
 
     let ipAddress = null;
-    if (proxy && proxy.server) {
+    if (proxy && proxy.server && !skipProxyValidation) {
       ipAddress = await verifyProxyConnection(context, proxy, cUser);
       setProgress(cUser, 'validate:proxy:ok');
     }
@@ -1684,7 +1755,7 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
 
     await withRetry(
       () => page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }),
-      { retries: 2, delayMs: 1000 }
+      { retries: navigationRetries, delayMs: 1000 }
     );
     await page.waitForTimeout(1500);
     await dismissSaveLoginInfo(page);
@@ -1796,17 +1867,24 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
  * Validate proxy connectivity using Playwright (no cookies required)
  * @param {Object} [proxy]
  */
-export async function validateProxy(proxy = null) {
+export async function validateProxy(proxy = null, options = {}) {
   if (!proxy || !proxy.server) {
     throw new InvalidInputError('Proxy is required');
   }
 
   const tempSessionId = `proxy-${uuidv4()}`;
+  const browserReservationKey = `proxy:${tempSessionId}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
+  const browserPoolLane = String(options?.browserPoolLane || '').trim().toLowerCase();
+  let browserSlotReserved = false;
   let browser = null;
   let context = null;
 
   try {
     logStep('validateProxy:start', { server: proxy.server });
+    await reserveBrowserSlot(browserReservationKey, [], 'validate_proxy', {
+      lane: browserPoolLane,
+    });
+    browserSlotReserved = true;
     const browserInstance = await createBrowser(tempSessionId, null, proxy);
     browser = browserInstance.browser;
     context = browserInstance.context;
@@ -1823,6 +1901,9 @@ export async function validateProxy(proxy = null) {
   } finally {
     if (context) await context.close().catch(() => {});
     if (browser) await browser.close().catch(() => {});
+    if (browserSlotReserved) {
+      await releaseBrowserSlot(browserReservationKey);
+    }
     await cleanupProfile(tempSessionId);
   }
 }
@@ -2297,7 +2378,7 @@ export async function sendMessageForSession(
 
 export async function checkSessionForSession(
   sessionId,
-  { requestId = null, flowTimeoutMs = null, recoverableRetryAttempts = null } = {}
+  { requestId = null, flowTimeoutMs = null, recoverableRetryAttempts = null, flowMaxAttempts = null } = {}
 ) {
   return withSessionLock(sessionId, async () => {
     throwIfSessionRestricted(sessionId, 'check_cached');
@@ -2315,6 +2396,10 @@ export async function checkSessionForSession(
           cUser: activeSession.cUser || null,
           twofaSecret: activeSession.twofaSecret || null,
           requestId,
+          maxAttempts:
+            Number.isFinite(Number(flowMaxAttempts)) && Number(flowMaxAttempts) > 0
+              ? Number(flowMaxAttempts)
+              : undefined,
         }),
         effectiveFlowTimeoutMs,
         label

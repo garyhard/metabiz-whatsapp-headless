@@ -57,6 +57,14 @@ router.post('/validate', async (req, res, next) => {
 
     const asyncMode = toBoolean(req.query?.async) || toBoolean(async);
     const normalizedRequestId = normalizeRequestId('validate-cookies', requestId);
+    if (persist === true && !asyncMode) {
+      return res.status(409).json({
+        ok: false,
+        error: 'Synchronous persisted cookie validation is disabled. Use POST /api/create-operations instead.',
+        errorCode: 'sync_persist_validate_disabled',
+        requestId: normalizedRequestId,
+      });
+    }
     if (asyncMode) {
       const { job, created } = enqueueSessionFlowJob({
         requestId: normalizedRequestId,

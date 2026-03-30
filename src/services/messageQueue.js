@@ -121,7 +121,13 @@ async function processJob(job) {
       includeSuccessScreenshot: job.includeSuccessScreenshot,
       priority: job.priority || (job.useReplyFlow ? 'high' : 'normal'),
     });
-    sessionStore.markMessageJobSent(job.id, result || {});
+    const updatedJob = sessionStore.markMessageJobSent(job.id, result || {});
+    if (updatedJob?.status !== 'sent') {
+      console.warn(
+        `[MessageQueue] job completion ignored id=${job.id} current_status=${updatedJob?.status || 'missing'}`
+      );
+      return { outcome: 'ignored', sessionId: job.sessionId, jobId: job.id };
+    }
     console.log(`[MessageQueue] job sent id=${job.id} attempts=${job.attempts}`);
     return { outcome: 'sent', sessionId: job.sessionId, jobId: job.id };
   } catch (error) {
@@ -131,7 +137,13 @@ async function processJob(job) {
     const attempts = Math.max(1, Number(job.attempts) || 1);
     const retryable = isRetryableMessageJobError(errorResult);
     if (!retryable || attempts >= maxAttempts) {
-      sessionStore.markMessageJobError(job.id, message, errorResult);
+      const updatedJob = sessionStore.markMessageJobError(job.id, message, errorResult);
+      if (updatedJob?.status !== 'error') {
+        console.warn(
+          `[MessageQueue] job error transition ignored id=${job.id} current_status=${updatedJob?.status || 'missing'}`
+        );
+        return { outcome: 'ignored', sessionId: job.sessionId, jobId: job.id };
+      }
       console.warn(
         `[MessageQueue] job failed id=${job.id} attempts=${attempts}/${maxAttempts} retryable=${retryable}`
       );
@@ -140,21 +152,29 @@ async function processJob(job) {
 
     const retryDelay = backoffMs(attempts, config.queue.retryBaseMs, config.queue.retryMaxMs);
     const retryAt = Date.now() + retryDelay;
-    sessionStore.markMessageJobRetry(job.id, message, retryAt);
+    const updatedJob = sessionStore.markMessageJobRetry(job.id, message, retryAt);
+    if (updatedJob?.status !== 'queued') {
+      console.warn(
+        `[MessageQueue] job retry transition ignored id=${job.id} current_status=${updatedJob?.status || 'missing'}`
+      );
+      return { outcome: 'ignored', sessionId: job.sessionId, jobId: job.id };
+    }
     console.warn(`[MessageQueue] job retry id=${job.id} attempts=${attempts}/${maxAttempts} retry_in_ms=${retryDelay}`);
     return { outcome: 'retry', sessionId: job.sessionId, jobId: job.id };
   }
 }
 
 function buildWebhookPayload(job) {
+  const eventPrefix = job.metaBlastMessageId ? 'meta_blast_message' : 'meta_outbound_message';
   return {
     source: 'metabiz-whatsapp-headless',
-    event: `meta_blast_message.${job.status}`,
+    event: `${eventPrefix}.${job.status}`,
     occurred_at: new Date().toISOString(),
     job: {
       id: job.id,
       request_id: job.requestId || null,
       meta_blast_message_id: job.metaBlastMessageId || null,
+      use_reply_flow: job.useReplyFlow === true,
       session_id: job.sessionId,
       priority: job.priority || 'normal',
       status: job.status,

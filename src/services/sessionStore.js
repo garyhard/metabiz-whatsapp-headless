@@ -111,6 +111,28 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_session_flow_jobs_status_next_retry
     ON session_flow_jobs(status, next_retry_at, created_at);
+  CREATE TABLE IF NOT EXISTS create_operations (
+    id TEXT PRIMARY KEY,
+    request_id TEXT UNIQUE,
+    c_user TEXT,
+    payload_json TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    step TEXT,
+    message TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 3,
+    error_message TEXT,
+    error_code TEXT,
+    result_json TEXT,
+    debug_json TEXT,
+    next_retry_at INTEGER NOT NULL DEFAULT 0,
+    started_at INTEGER,
+    finished_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_create_operations_status_next_retry
+    ON create_operations(status, next_retry_at, created_at);
 `);
 
 try {
@@ -419,6 +441,17 @@ function getNextRunnableSessionFlowJobRow(now = Date.now()) {
   `, { ':now': now });
 }
 
+function getNextRunnableCreateOperationRow(now = Date.now()) {
+  return getRow(`
+    SELECT id
+    FROM create_operations
+    WHERE status = 'queued'
+      AND next_retry_at <= :now
+    ORDER BY created_at ASC
+    LIMIT 1
+  `, { ':now': now });
+}
+
 function buildMessageJobFilterClause({ sessionId = null, jobIds = [] } = {}) {
   const conditions = [];
   const params = {};
@@ -572,6 +605,30 @@ function normalizeSessionFlowJobRow(row) {
     webhookNextRetryAt: Number(row.webhook_next_retry_at || 0),
     webhookLastError: row.webhook_last_error || null,
     webhookDeliveredAt: row.webhook_delivered_at ? Number(row.webhook_delivered_at) : null,
+    startedAt: row.started_at ? Number(row.started_at) : null,
+    finishedAt: row.finished_at ? Number(row.finished_at) : null,
+    createdAt: Number(row.created_at || 0),
+    updatedAt: Number(row.updated_at || 0),
+  };
+}
+
+function normalizeCreateOperationRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    requestId: row.request_id || null,
+    cUser: row.c_user || null,
+    payload: deserializeSafe(row.payload_json) || {},
+    status: row.status,
+    step: row.step || null,
+    message: row.message || null,
+    attempts: Number(row.attempts || 0),
+    maxAttempts: Number(row.max_attempts || 0),
+    errorMessage: row.error_message || null,
+    errorCode: row.error_code || null,
+    result: deserializeSafe(row.result_json),
+    debug: deserializeSafe(row.debug_json),
+    nextRetryAt: Number(row.next_retry_at || 0),
     startedAt: row.started_at ? Number(row.started_at) : null,
     finishedAt: row.finished_at ? Number(row.finished_at) : null,
     createdAt: Number(row.created_at || 0),
@@ -865,14 +922,15 @@ export const sessionStore = {
       SET status = 'sent',
           error_message = NULL,
           result_json = :result_json,
-          webhook_notified = CASE WHEN COALESCE(TRIM(meta_blast_message_id), '') = '' THEN 1 ELSE 0 END,
+          webhook_notified = 0,
           webhook_attempts = 0,
           webhook_next_retry_at = 0,
           webhook_last_error = NULL,
-          webhook_delivered_at = CASE WHEN COALESCE(TRIM(meta_blast_message_id), '') = '' THEN :finished_at ELSE NULL END,
+          webhook_delivered_at = NULL,
           finished_at = :finished_at,
           updated_at = :updated_at
       WHERE id = :id
+        AND status = 'processing'
     `, {
       ':id': jobId,
       ':result_json': serialize(result || {}),
@@ -891,6 +949,7 @@ export const sessionStore = {
           next_retry_at = :next_retry_at,
           updated_at = :updated_at
       WHERE id = :id
+        AND status = 'processing'
     `, {
       ':id': jobId,
       ':error_message': errorMessage || null,
@@ -907,14 +966,15 @@ export const sessionStore = {
       SET status = 'error',
           error_message = :error_message,
           result_json = :result_json,
-          webhook_notified = CASE WHEN COALESCE(TRIM(meta_blast_message_id), '') = '' THEN 1 ELSE 0 END,
+          webhook_notified = 0,
           webhook_attempts = 0,
           webhook_next_retry_at = 0,
           webhook_last_error = NULL,
-          webhook_delivered_at = CASE WHEN COALESCE(TRIM(meta_blast_message_id), '') = '' THEN :finished_at ELSE NULL END,
+          webhook_delivered_at = NULL,
           finished_at = :finished_at,
           updated_at = :updated_at
       WHERE id = :id
+        AND status = 'processing'
     `, {
       ':id': jobId,
       ':error_message': errorMessage || null,
@@ -925,7 +985,7 @@ export const sessionStore = {
     return this.getMessageJob(jobId);
   },
 
-  failQueuedMessageJobsForSession(sessionId, errorMessage, result = null) {
+  failQueuedMessageJobsForSession(sessionId, errorMessage, result = null, { suppressWebhook = true } = {}) {
     if (!sessionId) return 0;
 
     const now = Date.now();
@@ -934,11 +994,11 @@ export const sessionStore = {
       SET status = 'error',
           error_message = :error_message,
           result_json = :result_json,
-          webhook_notified = CASE WHEN COALESCE(TRIM(meta_blast_message_id), '') = '' THEN 1 ELSE 0 END,
+          webhook_notified = :webhook_notified,
           webhook_attempts = 0,
           webhook_next_retry_at = 0,
           webhook_last_error = NULL,
-          webhook_delivered_at = CASE WHEN COALESCE(TRIM(meta_blast_message_id), '') = '' THEN :finished_at ELSE NULL END,
+          webhook_delivered_at = CASE WHEN :webhook_notified = 1 THEN :finished_at ELSE NULL END,
           finished_at = :finished_at,
           updated_at = :updated_at
       WHERE session_id = :session_id
@@ -947,12 +1007,41 @@ export const sessionStore = {
       ':session_id': String(sessionId),
       ':error_message': errorMessage || null,
       ':result_json': serialize(result),
+      ':webhook_notified': suppressWebhook ? 1 : 0,
       ':finished_at': now,
       ':updated_at': now,
     });
   },
 
-  failQueuedSessionFlowJobsForSession(sessionId, errorMessage, errorCode = null, result = null) {
+  failMessageJobsForSession(sessionId, errorMessage, result = null, { suppressWebhook = true } = {}) {
+    if (!sessionId) return 0;
+
+    const now = Date.now();
+    return runStatementWithChanges(`
+      UPDATE message_jobs
+      SET status = 'error',
+          error_message = :error_message,
+          result_json = :result_json,
+          webhook_notified = :webhook_notified,
+          webhook_attempts = 0,
+          webhook_next_retry_at = 0,
+          webhook_last_error = NULL,
+          webhook_delivered_at = CASE WHEN :webhook_notified = 1 THEN :finished_at ELSE NULL END,
+          finished_at = :finished_at,
+          updated_at = :updated_at
+      WHERE session_id = :session_id
+        AND status IN ('queued', 'processing')
+    `, {
+      ':session_id': String(sessionId),
+      ':error_message': errorMessage || null,
+      ':result_json': serialize(result),
+      ':webhook_notified': suppressWebhook ? 1 : 0,
+      ':finished_at': now,
+      ':updated_at': now,
+    });
+  },
+
+  failQueuedSessionFlowJobsForSession(sessionId, errorMessage, errorCode = null, result = null, { suppressWebhook = true } = {}) {
     if (!sessionId) return 0;
 
     const now = Date.now();
@@ -962,11 +1051,11 @@ export const sessionStore = {
           error_message = :error_message,
           error_code = :error_code,
           result_json = :result_json,
-          webhook_notified = 0,
+          webhook_notified = :webhook_notified,
           webhook_attempts = 0,
           webhook_next_retry_at = 0,
           webhook_last_error = NULL,
-          webhook_delivered_at = NULL,
+          webhook_delivered_at = CASE WHEN :webhook_notified = 1 THEN :finished_at ELSE NULL END,
           finished_at = :finished_at,
           updated_at = :updated_at
       WHERE target_session_id = :session_id
@@ -976,6 +1065,37 @@ export const sessionStore = {
       ':error_message': errorMessage || null,
       ':error_code': errorCode || null,
       ':result_json': serialize(result),
+      ':webhook_notified': suppressWebhook ? 1 : 0,
+      ':finished_at': now,
+      ':updated_at': now,
+    });
+  },
+
+  failSessionFlowJobsForSession(sessionId, errorMessage, errorCode = null, result = null, { suppressWebhook = true } = {}) {
+    if (!sessionId) return 0;
+
+    const now = Date.now();
+    return runStatementWithChanges(`
+      UPDATE session_flow_jobs
+      SET status = 'error',
+          error_message = :error_message,
+          error_code = :error_code,
+          result_json = :result_json,
+          webhook_notified = :webhook_notified,
+          webhook_attempts = 0,
+          webhook_next_retry_at = 0,
+          webhook_last_error = NULL,
+          webhook_delivered_at = CASE WHEN :webhook_notified = 1 THEN :finished_at ELSE NULL END,
+          finished_at = :finished_at,
+          updated_at = :updated_at
+      WHERE target_session_id = :session_id
+        AND status IN ('queued', 'processing')
+    `, {
+      ':session_id': String(sessionId),
+      ':error_message': errorMessage || null,
+      ':error_code': errorCode || null,
+      ':result_json': serialize(result),
+      ':webhook_notified': suppressWebhook ? 1 : 0,
       ':finished_at': now,
       ':updated_at': now,
     });
@@ -1317,6 +1437,7 @@ export const sessionStore = {
           finished_at = :finished_at,
           updated_at = :updated_at
       WHERE id = :id
+        AND status = 'processing'
     `, {
       ':id': jobId,
       ':result_json': serialize(result || {}),
@@ -1337,6 +1458,7 @@ export const sessionStore = {
           next_retry_at = :next_retry_at,
           updated_at = :updated_at
       WHERE id = :id
+        AND status = 'processing'
     `, {
       ':id': jobId,
       ':error_message': errorMessage || null,
@@ -1364,6 +1486,7 @@ export const sessionStore = {
           finished_at = :finished_at,
           updated_at = :updated_at
       WHERE id = :id
+        AND status = 'processing'
     `, {
       ':id': jobId,
       ':error_message': errorMessage || null,
@@ -1494,10 +1617,200 @@ export const sessionStore = {
     return this.getSessionFlowJob(jobId);
   },
 
+  enqueueCreateOperation({
+    id,
+    requestId = null,
+    cUser = null,
+    payload = {},
+    maxAttempts = 3,
+    step = 'create.queued',
+    message = 'Create Meta queued.',
+  }) {
+    const now = Date.now();
+    runStatement(`
+      INSERT INTO create_operations (
+        id, request_id, c_user, payload_json, status, step, message,
+        attempts, max_attempts, next_retry_at,
+        created_at, updated_at
+      ) VALUES (
+        :id, :request_id, :c_user, :payload_json, 'queued', :step, :message,
+        0, :max_attempts, 0,
+        :created_at, :updated_at
+      )
+    `, {
+      ':id': id,
+      ':request_id': requestId || null,
+      ':c_user': cUser || null,
+      ':payload_json': serialize(payload || {}),
+      ':step': step,
+      ':message': message,
+      ':max_attempts': maxAttempts,
+      ':created_at': now,
+      ':updated_at': now,
+    });
+    return this.getCreateOperation(id);
+  },
+
+  getCreateOperation(operationId) {
+    const row = getRow('SELECT * FROM create_operations WHERE id = :id', { ':id': operationId });
+    return normalizeCreateOperationRow(row);
+  },
+
+  getCreateOperationByRequestId(requestId) {
+    if (!requestId) return null;
+    const row = getRow(`
+      SELECT *
+      FROM create_operations
+      WHERE request_id = :request_id
+      ORDER BY created_at DESC
+      LIMIT 1
+    `, { ':request_id': requestId });
+    return normalizeCreateOperationRow(row);
+  },
+
+  hasRunnableCreateOperation(now = Date.now()) {
+    const row = getNextRunnableCreateOperationRow(now);
+    return !!row;
+  },
+
+  claimNextCreateOperation(now = Date.now()) {
+    const row = getNextRunnableCreateOperationRow(now);
+    if (!row || !row.id) return null;
+
+    const changes = runStatementWithChanges(`
+      UPDATE create_operations
+      SET status = 'processing',
+          attempts = attempts + 1,
+          started_at = COALESCE(started_at, :now),
+          updated_at = :now
+      WHERE id = :id
+        AND status = 'queued'
+        AND next_retry_at <= :now
+    `, {
+      ':id': row.id,
+      ':now': now,
+    });
+    if (changes <= 0) return null;
+    return this.getCreateOperation(row.id);
+  },
+
+  markCreateOperationProgress(operationId, step, message, result = null) {
+    const now = Date.now();
+    runStatement(`
+      UPDATE create_operations
+      SET status = 'processing',
+          step = :step,
+          message = :message,
+          result_json = COALESCE(:result_json, result_json),
+          updated_at = :updated_at
+      WHERE id = :id
+    `, {
+      ':id': operationId,
+      ':step': step || null,
+      ':message': message || null,
+      ':result_json': result ? serialize(result) : null,
+      ':updated_at': now,
+    });
+    return this.getCreateOperation(operationId);
+  },
+
+  markCreateOperationCompleted(operationId, result = null, message = 'Create Meta completed.') {
+    const now = Date.now();
+    runStatement(`
+      UPDATE create_operations
+      SET status = 'completed',
+          step = 'create.done',
+          message = :message,
+          error_message = NULL,
+          error_code = NULL,
+          result_json = :result_json,
+          debug_json = NULL,
+          finished_at = :finished_at,
+          updated_at = :updated_at
+      WHERE id = :id
+        AND status = 'processing'
+    `, {
+      ':id': operationId,
+      ':message': message || 'Create Meta completed.',
+      ':result_json': serialize(result || {}),
+      ':finished_at': now,
+      ':updated_at': now,
+    });
+    return this.getCreateOperation(operationId);
+  },
+
+  markCreateOperationRetry(operationId, errorMessage, errorCode, nextRetryAt, debug = null, result = null) {
+    const now = Date.now();
+    runStatement(`
+      UPDATE create_operations
+      SET status = 'queued',
+          error_message = :error_message,
+          error_code = :error_code,
+          debug_json = COALESCE(:debug_json, debug_json),
+          result_json = COALESCE(:result_json, result_json),
+          next_retry_at = :next_retry_at,
+          updated_at = :updated_at
+      WHERE id = :id
+        AND status = 'processing'
+    `, {
+      ':id': operationId,
+      ':error_message': errorMessage || null,
+      ':error_code': errorCode || null,
+      ':debug_json': debug ? serialize(debug) : null,
+      ':result_json': result ? serialize(result) : null,
+      ':next_retry_at': nextRetryAt || now,
+      ':updated_at': now,
+    });
+    return this.getCreateOperation(operationId);
+  },
+
+  markCreateOperationError(operationId, errorMessage, errorCode, debug = null, result = null) {
+    const now = Date.now();
+    runStatement(`
+      UPDATE create_operations
+      SET status = 'error',
+          step = COALESCE(step, 'create.failed'),
+          message = :error_message,
+          error_message = :error_message,
+          error_code = :error_code,
+          debug_json = :debug_json,
+          result_json = :result_json,
+          finished_at = :finished_at,
+          updated_at = :updated_at
+      WHERE id = :id
+        AND status = 'processing'
+    `, {
+      ':id': operationId,
+      ':error_message': errorMessage || null,
+      ':error_code': errorCode || null,
+      ':debug_json': serialize(debug || {}),
+      ':result_json': serialize(result || {}),
+      ':finished_at': now,
+      ':updated_at': now,
+    });
+    return this.getCreateOperation(operationId);
+  },
+
+  requeueStaleProcessingCreateOperations(timeoutMs = 900000) {
+    const now = Date.now();
+    const threshold = now - Math.max(1000, Number(timeoutMs) || 900000);
+    runStatement(`
+      UPDATE create_operations
+      SET status = 'queued',
+          next_retry_at = :now,
+          updated_at = :now
+      WHERE status = 'processing' AND updated_at < :threshold
+    `, {
+      ':now': now,
+      ':threshold': threshold,
+    });
+  },
+
   clearAll() {
     runStatement('DELETE FROM sessions', {});
     runStatement('DELETE FROM fingerprints', {});
     runStatement('DELETE FROM message_jobs', {});
     runStatement('DELETE FROM session_flow_jobs', {});
+    runStatement('DELETE FROM create_operations', {});
   },
 };

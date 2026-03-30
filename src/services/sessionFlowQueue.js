@@ -226,7 +226,13 @@ async function executeJob(job) {
 async function processJob(job) {
   try {
     const result = await executeJob(job);
-    sessionStore.markSessionFlowJobCompleted(job.id, result || {});
+    const updatedJob = sessionStore.markSessionFlowJobCompleted(job.id, result || {});
+    if (updatedJob?.status !== 'completed') {
+      console.warn(
+        `[SessionFlowQueue] job completion ignored id=${job.id} type=${job.jobType} current_status=${updatedJob?.status || 'missing'}`
+      );
+      return;
+    }
     console.log(`[SessionFlowQueue] job completed id=${job.id} type=${job.jobType} attempts=${job.attempts}`);
     return;
   } catch (error) {
@@ -238,7 +244,13 @@ async function processJob(job) {
     const retryable = isRetryableSessionFlowError(errorResult);
 
     if (!retryable || attempts >= maxAttempts) {
-      sessionStore.markSessionFlowJobError(job.id, message, errorResult.errorCode, errorResult);
+      const updatedJob = sessionStore.markSessionFlowJobError(job.id, message, errorResult.errorCode, errorResult);
+      if (updatedJob?.status !== 'error') {
+        console.warn(
+          `[SessionFlowQueue] job error transition ignored id=${job.id} type=${job.jobType} current_status=${updatedJob?.status || 'missing'}`
+        );
+        return;
+      }
       console.warn(
         `[SessionFlowQueue] job failed id=${job.id} type=${job.jobType} attempts=${attempts}/${maxAttempts} retryable=${retryable}`
       );
@@ -247,7 +259,13 @@ async function processJob(job) {
 
     const retryDelay = backoffMs(attempts, config.sessionQueue.retryBaseMs, config.sessionQueue.retryMaxMs);
     const retryAt = Date.now() + retryDelay;
-    sessionStore.markSessionFlowJobRetry(job.id, message, errorResult.errorCode, retryAt, errorResult);
+    const updatedJob = sessionStore.markSessionFlowJobRetry(job.id, message, errorResult.errorCode, retryAt, errorResult);
+    if (updatedJob?.status !== 'queued') {
+      console.warn(
+        `[SessionFlowQueue] job retry transition ignored id=${job.id} type=${job.jobType} current_status=${updatedJob?.status || 'missing'}`
+      );
+      return;
+    }
     console.warn(
       `[SessionFlowQueue] job retry id=${job.id} type=${job.jobType} attempts=${attempts}/${maxAttempts} retry_in_ms=${retryDelay}`
     );

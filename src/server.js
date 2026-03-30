@@ -9,9 +9,11 @@ import sessionsRouter from './routes/sessions.js';
 import messagesRouter from './routes/messages.js';
 import cookiesRouter from './routes/cookies.js';
 import sessionJobsRouter from './routes/sessionJobs.js';
+import createOperationsRouter from './routes/createOperations.js';
 import { destroyAllSessions, restoreSessions, getProgressByCUser } from './services/sessionManager.js';
 import { startMessageQueueWorker, stopMessageQueueWorker } from './services/messageQueue.js';
 import { startSessionFlowQueueWorker, stopSessionFlowQueueWorker } from './services/sessionFlowQueue.js';
+import { startCreateOperationQueueWorker, stopCreateOperationQueueWorker } from './services/createOperationQueue.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
@@ -90,6 +92,8 @@ app.use('/api/sessions', apiKeyAuth, messagesRouter);
 app.use('/api/cookies', apiKeyAuth, cookiesRouter);
 // Async session jobs
 app.use('/api/session-jobs', apiKeyAuth, sessionJobsRouter);
+// Operation-based create preflight
+app.use('/api/create-operations', apiKeyAuth, createOperationsRouter);
 // Debug screenshot download
 app.get('/api/debug/screenshot', apiKeyAuth, async (req, res) => {
   try {
@@ -229,6 +233,7 @@ async function gracefulShutdown(signal) {
   // Close all browser sessions (skip in dev mode to preserve sessions across restarts)
   stopMessageQueueWorker();
   stopSessionFlowQueueWorker();
+  stopCreateOperationQueueWorker();
   if (config.devMode) {
     console.log('[Server] Dev mode: Preserving browser sessions across restart');
     console.log('[Server] Sessions will remain active. Use DELETE /api/sessions/:id to manually destroy them.');
@@ -256,6 +261,7 @@ server = app.listen(config.port, async () => {
   console.log(`[Server] Health check: http://localhost:${config.port}/health`);
   startMessageQueueWorker();
   startSessionFlowQueueWorker();
+  startCreateOperationQueueWorker();
   if (config.devMode) {
     console.log(`[Server] 🛠️  Dev mode: Sessions will be preserved across restarts`);
   } else {

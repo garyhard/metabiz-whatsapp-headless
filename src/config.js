@@ -103,6 +103,17 @@ export const config = {
     webhookRetryBaseMs: parsePositiveInt(process.env.META_SESSION_WEBHOOK_RETRY_BASE_MS, 10000),
     webhookRetryMaxMs: parsePositiveInt(process.env.META_SESSION_WEBHOOK_RETRY_MAX_MS, 300000),
   },
+  createQueue: {
+    pollIntervalMs: parsePositiveInt(process.env.META_CREATE_QUEUE_POLL_INTERVAL_MS, 1500),
+    batchSize: parsePositiveInt(process.env.META_CREATE_QUEUE_BATCH_SIZE, 1),
+    concurrency: parsePositiveInt(process.env.META_CREATE_QUEUE_CONCURRENCY, 1),
+    maxAttempts: parsePositiveInt(process.env.META_CREATE_QUEUE_MAX_ATTEMPTS, 3),
+    retryBaseMs: parsePositiveInt(process.env.META_CREATE_QUEUE_RETRY_BASE_MS, 30000),
+    retryMaxMs: parsePositiveInt(process.env.META_CREATE_QUEUE_RETRY_MAX_MS, 300000),
+    processingTimeoutMs: parsePositiveInt(process.env.META_CREATE_QUEUE_PROCESSING_TIMEOUT_MS, 900000),
+    browserExtraCapacity: parseNonNegativeInt(process.env.META_CREATE_BROWSER_EXTRA_CAPACITY, 1),
+    browserPoolWaitMs: parseNonNegativeInt(process.env.META_CREATE_BROWSER_POOL_WAIT_MS, 15000),
+  },
   proxy: defaultProxy,
   texts: {
     openWhatsappModal: parseEnvList(

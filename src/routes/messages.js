@@ -42,6 +42,7 @@ function serializeJob(job) {
     requestId: job.requestId,
     metaBlastMessageId: job.metaBlastMessageId || null,
     sessionId: job.sessionId,
+    useReplyFlow: job.useReplyFlow === true,
     priority: job.priority || 'normal',
     status: job.status,
     attempts: job.attempts,
@@ -222,7 +223,7 @@ router.post('/jobs/cancel', async (req, res) => {
  */
 router.post('/:sessionId/send-message', async (req, res, next) => {
   const { sessionId } = req.params;
-  const { extension, phoneNumber, message, includeSuccessScreenshot, requestId } = req.body || {};
+  const { extension, phoneNumber, message, includeSuccessScreenshot, requestId, async } = req.body || {};
   const normalizedRequestId = normalizeRequestId(sessionId, requestId);
   const normalizedPriority = 'high';
   try {
@@ -240,6 +241,26 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
       return res.status(400).json({
         ok: false,
         error: 'All fields must be strings',
+      });
+    }
+
+    const asyncMode = toBoolean(req.query?.async) || toBoolean(async);
+    if (asyncMode) {
+      const { job, created } = enqueueMessageJob({
+        requestId: normalizedRequestId,
+        sessionId,
+        priority: normalizedPriority,
+        extension,
+        phoneNumber,
+        message,
+        useReplyFlow: true,
+        includeSuccessScreenshot: includeSuccessScreenshot === true,
+      });
+      return res.status(202).json({
+        ok: true,
+        accepted: true,
+        created,
+        job: serializeJob(job),
       });
     }
 

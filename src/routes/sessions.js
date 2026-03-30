@@ -175,6 +175,15 @@ router.post('/', async (req, res, next) => {
 
     const asyncMode = toBoolean(req.query?.async) || toBoolean(async);
     normalizedRequestId = normalizeRequestId('create-session', requestId);
+    if (!asyncMode) {
+      return res.status(409).json({
+        ok: false,
+        error: 'Synchronous session creation is disabled. Use POST /api/create-operations instead.',
+        errorCode: 'sync_create_disabled',
+        requestId: normalizedRequestId,
+      });
+    }
+
     if (asyncMode) {
       const { job, created } = enqueueSessionFlowJob({
         requestId: normalizedRequestId,
@@ -194,16 +203,6 @@ router.post('/', async (req, res, next) => {
         job: serializeSessionFlowJob(job),
       });
     }
-
-    const result = await createSession(cookies, null, null, proxyConfig, { twofaSecret });
-
-    res.status(201).json({
-      sessionId: result.sessionId,
-      ipAddress: result.ipAddress,
-      status: 'active',
-      cUser: result.cUser || null,
-      fingerprint: result.fingerprint || null,
-    });
   } catch (error) {
     if (error instanceof InvalidInputError) {
       return res.status(400).json(await buildInvalidInputErrorBody(error, normalizedRequestId));

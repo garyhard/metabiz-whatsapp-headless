@@ -3736,7 +3736,10 @@ export async function sendMessage(
  * Lightweight UI check to validate session can open WhatsApp flow
  * @param {Page} page - Playwright page instance
  */
-export async function checkSessionFlow(page, { sessionId = null, cUser = null, twofaSecret = null, requestId = null } = {}) {
+export async function checkSessionFlow(
+  page,
+  { sessionId = null, cUser = null, twofaSecret = null, requestId = null, maxAttempts: maxAttemptsOverride = null } = {}
+) {
   console.log('[Automation] ========================================');
   console.log('[Automation] Starting WhatsApp session check');
   console.log(`[Automation] Current URL: ${page.url()}`);
@@ -3748,7 +3751,10 @@ export async function checkSessionFlow(page, { sessionId = null, cUser = null, t
   };
   logStep('check:start', { sessionId });
 
-  const maxAttempts = 3;
+  const maxAttempts =
+    Number.isFinite(Number(maxAttemptsOverride)) && Number(maxAttemptsOverride) > 0
+      ? Number(maxAttemptsOverride)
+      : 3;
   const backoffMs = [2000, 5000, 10000];
   const shouldRetry = (error) =>
     error instanceof AutomationError && !isAuthRelatedError(error);
