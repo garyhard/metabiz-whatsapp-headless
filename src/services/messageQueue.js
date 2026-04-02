@@ -99,6 +99,45 @@ function countActiveSessionsAwaitingBrowser() {
   return pendingSessionIds.size;
 }
 
+function addPreferredSessionId(target, seen, sessionId) {
+  const normalizedSessionId = String(sessionId || '').trim();
+  if (!normalizedSessionId || seen.has(normalizedSessionId)) {
+    return;
+  }
+  seen.add(normalizedSessionId);
+  target.push(normalizedSessionId);
+}
+
+function buildPreferredClaimSessionIds(now = Date.now(), claimLimit = 1) {
+  const preferredSessionIds = [];
+  const seen = new Set();
+  const targetCount = Math.max(1, Number(claimLimit) || 1);
+
+  if (hasActiveBurst()) {
+    addPreferredSessionId(preferredSessionIds, seen, burstSessionId);
+  }
+
+  const groups = sessionStore.listMessageJobSessions(Math.max(targetCount * 6, 25), now);
+  for (const group of groups) {
+    if (preferredSessionIds.length >= targetCount) {
+      break;
+    }
+    if (Number(group?.runnableQueuedCount || 0) <= 0) {
+      continue;
+    }
+    if (Number(group?.processingCount || 0) > 0) {
+      continue;
+    }
+    const sessionInfo = getSessionInfo(group.sessionId);
+    if (!sessionInfo?.liveBrowser) {
+      continue;
+    }
+    addPreferredSessionId(preferredSessionIds, seen, group.sessionId);
+  }
+
+  return preferredSessionIds;
+}
+
 function trackClaimedSession(sessionId) {
   const targetSessionId = String(sessionId || '').trim();
   if (!targetSessionId) {
@@ -495,23 +534,30 @@ export async function pumpQueue() {
     const maxBatch = Math.max(1, Number(config.queue.batchSize) || 1);
     const claimLimit = nextClaimLimit(maxBatch);
     const jobs = [];
-    let preferredClaimAttempted = false;
+    const preferredSessionIds = buildPreferredClaimSessionIds(Date.now(), claimLimit);
+    let preferredSessionIndex = 0;
 
     while (!stopRequested && jobs.length < claimLimit) {
       const now = Date.now();
-      const preferredSessionId =
-        !preferredClaimAttempted && hasActiveBurst() ? burstSessionId : null;
-      const job = sessionStore.claimNextMessageJob(now, preferredSessionId, Boolean(preferredSessionId));
+      let job = null;
+
+      while (!job && preferredSessionIndex < preferredSessionIds.length) {
+        const preferredSessionId = preferredSessionIds[preferredSessionIndex];
+        preferredSessionIndex += 1;
+        job = sessionStore.claimNextMessageJob(now, preferredSessionId, true);
+      }
 
       if (!job) {
-        if (preferredSessionId) {
-          preferredClaimAttempted = true;
+        job = sessionStore.claimNextMessageJob(now);
+      }
+
+      if (!job) {
+        if (preferredSessionIndex < preferredSessionIds.length) {
           continue;
         }
         break;
       }
 
-      preferredClaimAttempted = true;
       trackClaimedSession(job.sessionId);
       jobs.push(job);
     }
