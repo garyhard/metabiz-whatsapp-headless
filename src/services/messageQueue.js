@@ -5,7 +5,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
 import { sessionStore } from './sessionStore.js';
-import { sendMessageForSession } from './sessionManager.js';
+import { getBrowserPoolStatus, getSessionInfo, sendMessageForSession, warmSessionForQueuedWork } from './sessionManager.js';
 import { config } from '../config.js';
 
 let workerStarted = false;
@@ -14,13 +14,64 @@ let pumping = false;
 let timerRef = null;
 let burstSessionId = null;
 let burstRemaining = 0;
+const activeJobs = new Map();
+const warmingSessions = new Set();
+let lastPumpStartedAt = null;
+let lastPumpFinishedAt = null;
+let lastPumpError = null;
+let lastJobStartedAt = null;
+let lastJobFinishedAt = null;
 
 function webhookEnabled() {
   return String(config.queue.webhookUrl || '').trim().length > 0;
 }
 
+function workerConcurrencyLimit() {
+  const configured = Number(config.sendConcurrency);
+  if (!Number.isFinite(configured) || configured <= 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Math.max(1, configured);
+}
+
+function hasAvailableWorkerCapacity() {
+  const limit = workerConcurrencyLimit();
+  if (!Number.isFinite(limit)) {
+    return true;
+  }
+  return activeJobs.size < limit;
+}
+
+function nextClaimLimit(maxBatch) {
+  const limit = workerConcurrencyLimit();
+  if (!Number.isFinite(limit)) {
+    return maxBatch;
+  }
+  return Math.max(0, Math.min(maxBatch, limit - activeJobs.size));
+}
+
+function workerStallThresholdMs() {
+  return Math.max(
+    Number(config.queue.processingTimeoutMs) || 0,
+    (Number(config.queue.pollIntervalMs) || 0) * 4,
+    30000
+  );
+}
+
 function sessionBurstSize() {
   return Math.max(1, Number(config.queue.sessionBurstSize) || 1);
+}
+
+function sessionPrewarmEnabled() {
+  return config.queue.sessionPrewarmEnabled !== false;
+}
+
+function sessionPrewarmLimit() {
+  return Math.max(1, Number(config.queue.sessionPrewarmLimit) || 1);
+}
+
+function sessionPrewarmIdleTimeoutMs() {
+  return Math.max(0, Number(config.queue.sessionPrewarmIdleTimeoutMs) || 0);
 }
 
 function hasActiveBurst() {
@@ -30,6 +81,22 @@ function hasActiveBurst() {
 function clearBurstSession() {
   burstSessionId = null;
   burstRemaining = 0;
+}
+
+function countActiveSessionsAwaitingBrowser() {
+  const pendingSessionIds = new Set();
+  for (const meta of activeJobs.values()) {
+    const sessionId = String(meta?.sessionId || '').trim();
+    if (!sessionId || pendingSessionIds.has(sessionId)) {
+      continue;
+    }
+    const session = getSessionInfo(sessionId);
+    if (session?.liveBrowser) {
+      continue;
+    }
+    pendingSessionIds.add(sessionId);
+  }
+  return pendingSessionIds.size;
 }
 
 function trackClaimedSession(sessionId) {
@@ -164,6 +231,39 @@ async function processJob(job) {
   }
 }
 
+function startBackgroundJob(job) {
+  lastJobStartedAt = Date.now();
+  const task = processJob(job)
+    .then((result) => {
+      if (result?.sessionId && result.outcome !== 'sent' && burstSessionId === String(result.sessionId)) {
+        clearBurstSession();
+      }
+      return result;
+    })
+    .catch((error) => {
+      if (burstSessionId === String(job.sessionId)) {
+        clearBurstSession();
+      }
+      console.error(
+        `[MessageQueue] unhandled process error id=${job?.id || 'unknown'} error=${error?.message || String(error)}`
+      );
+    })
+    .finally(() => {
+      activeJobs.delete(task);
+      lastJobFinishedAt = Date.now();
+      if (!stopRequested) {
+        schedulePump(0);
+      }
+    });
+
+  activeJobs.set(task, {
+    id: job.id,
+    sessionId: job.sessionId,
+    startedAt: Date.now(),
+  });
+  return task;
+}
+
 function buildWebhookPayload(job) {
   const eventPrefix = job.metaBlastMessageId ? 'meta_blast_message' : 'meta_outbound_message';
   return {
@@ -284,20 +384,120 @@ async function flushWebhookQueue(maxBatch) {
   return delivered;
 }
 
+function canPrewarmSessionGroup(group, browserSlotsRemaining) {
+  if (!group || !group.sessionId) return false;
+  if (Number(group.runnableQueuedCount || 0) <= 0) return false;
+  if (Number(group.processingCount || 0) > 0) return false;
+
+  const sessionInfo = getSessionInfo(group.sessionId);
+  if (sessionInfo?.liveBrowser) return false;
+  if (sessionInfo?.status === 'restricted') return false;
+  if (sessionInfo?.status === 'needs_manual_action') return false;
+  if (sessionInfo?.manualAction?.type && sessionInfo.manualAction.type !== 'account_restricted') {
+    return false;
+  }
+
+  const storedSession = sessionStore.getBySessionId(group.sessionId);
+  if (!sessionInfo && !storedSession) return false;
+  if (storedSession?.restricted || storedSession?.status === 'restricted') return false;
+  if (storedSession?.status === 'needs_manual_action') return false;
+
+  if (browserSlotsRemaining != null && browserSlotsRemaining <= 0) return false;
+  if (warmingSessions.has(group.sessionId)) return false;
+  return true;
+}
+
+function scheduleSessionPrewarm(sessionId) {
+  const normalizedSessionId = String(sessionId || '').trim();
+  if (!normalizedSessionId || warmingSessions.has(normalizedSessionId)) {
+    return false;
+  }
+
+  warmingSessions.add(normalizedSessionId);
+  void warmSessionForQueuedWork(normalizedSessionId, {
+    holdMs: sessionPrewarmIdleTimeoutMs(),
+  })
+    .then((result) => {
+      if (result?.warmed) {
+        console.log(`[MessageQueue] prewarmed session=${normalizedSessionId}`);
+      }
+    })
+    .catch((error) => {
+      console.warn(
+        `[MessageQueue] prewarm failed session=${normalizedSessionId} error=${error?.message || String(error)}`
+      );
+    })
+    .finally(() => {
+      warmingSessions.delete(normalizedSessionId);
+      if (!stopRequested) {
+        schedulePump(0);
+      }
+    });
+
+  return true;
+}
+
+function prewarmQueuedSessions() {
+  if (!sessionPrewarmEnabled()) {
+    return 0;
+  }
+
+  const browserPool = getBrowserPoolStatus();
+  const activeBrowserDemand = countActiveSessionsAwaitingBrowser();
+  const availableSlots = browserPool.availableSlots == null
+    ? null
+    : Math.max(0, Number(browserPool.availableSlots || 0) - activeBrowserDemand);
+  if (availableSlots != null && availableSlots <= 0) {
+    return 0;
+  }
+
+  const warmupLimit = availableSlots == null
+    ? sessionPrewarmLimit()
+    : Math.min(sessionPrewarmLimit(), availableSlots);
+  if (warmupLimit <= 0) {
+    return 0;
+  }
+
+  const groups = sessionStore.listMessageJobSessions(Math.max(warmupLimit * 4, warmupLimit), Date.now());
+  let scheduled = 0;
+  let remainingSlots = availableSlots;
+
+  for (const group of groups) {
+    if (scheduled >= warmupLimit) {
+      break;
+    }
+    if (!canPrewarmSessionGroup(group, remainingSlots)) {
+      continue;
+    }
+    const queued = scheduleSessionPrewarm(group.sessionId);
+    if (!queued) {
+      continue;
+    }
+    scheduled += 1;
+    if (remainingSlots != null) {
+      remainingSlots = Math.max(0, remainingSlots - 1);
+    }
+  }
+
+  return scheduled;
+}
+
 export async function pumpQueue() {
   if (stopRequested) return;
   if (pumping) return;
 
   pumping = true;
+  lastPumpStartedAt = Date.now();
+  lastPumpError = null;
   try {
     sessionStore.stopInvalidMessageJobWebhooks();
     sessionStore.requeueStaleProcessingMessageJobs(config.queue.processingTimeoutMs);
-    let processed = 0;
     const maxBatch = Math.max(1, Number(config.queue.batchSize) || 1);
+    const claimLimit = nextClaimLimit(maxBatch);
     const jobs = [];
     let preferredClaimAttempted = false;
 
-    while (!stopRequested && jobs.length < maxBatch) {
+    while (!stopRequested && jobs.length < claimLimit) {
       const now = Date.now();
       const preferredSessionId =
         !preferredClaimAttempted && hasActiveBurst() ? burstSessionId : null;
@@ -317,26 +517,21 @@ export async function pumpQueue() {
     }
 
     if (jobs.length > 0) {
-      const results = await Promise.allSettled(jobs.map((job) => processJob(job)));
-      for (const item of results) {
-        if (item.status !== 'fulfilled') {
-          continue;
-        }
-        const result = item.value;
-        if (result?.sessionId && result.outcome !== 'sent' && burstSessionId === String(result.sessionId)) {
-          clearBurstSession();
-        }
-      }
-      processed = jobs.length;
+      jobs.forEach((job) => startBackgroundJob(job));
     }
+    prewarmQueuedSessions();
     await flushWebhookQueue(maxBatch);
+  } catch (error) {
+    lastPumpError = error?.message || String(error);
+    throw error;
   } finally {
     pumping = false;
+    lastPumpFinishedAt = Date.now();
   }
 
   if (stopRequested) return;
   if (
-    sessionStore.hasRunnableMessageJob(Date.now()) ||
+    (hasAvailableWorkerCapacity() && sessionStore.hasRunnableMessageJob(Date.now())) ||
     (webhookEnabled() && sessionStore.hasPendingWebhook(Date.now()))
   ) {
     schedulePump(0);
@@ -357,6 +552,43 @@ export function stopMessageQueueWorker() {
   stopRequested = true;
   clearWorkerTimer();
   console.log('[MessageQueue] worker stopped');
+}
+
+export function getMessageQueueWorkerStatus(now = Date.now()) {
+  const concurrencyLimit = workerConcurrencyLimit();
+  let oldestActiveJobAgeMs = null;
+  for (const meta of activeJobs.values()) {
+    const ageMs = meta?.startedAt ? Math.max(0, now - meta.startedAt) : null;
+    if (ageMs == null) continue;
+    if (oldestActiveJobAgeMs == null || ageMs > oldestActiveJobAgeMs) {
+      oldestActiveJobAgeMs = ageMs;
+    }
+  }
+
+  const stalled = (
+    (pumping && !!lastPumpStartedAt && now - lastPumpStartedAt > workerStallThresholdMs()) ||
+    (oldestActiveJobAgeMs != null && oldestActiveJobAgeMs > workerStallThresholdMs())
+  );
+
+  return {
+    workerStarted,
+    stopRequested,
+    pumping,
+    stalled,
+    activeJobs: activeJobs.size,
+    prewarmingSessions: warmingSessions.size,
+    prewarmingSessionIds: Array.from(warmingSessions.values()),
+    oldestActiveJobAgeMs,
+    concurrencyLimit: Number.isFinite(concurrencyLimit) ? concurrencyLimit : null,
+    pollIntervalMs: Math.max(1, Number(config.queue.pollIntervalMs) || 1),
+    batchSize: Math.max(1, Number(config.queue.batchSize) || 1),
+    lastPumpStartedAt,
+    lastPumpFinishedAt,
+    lastPumpAgeMs: lastPumpStartedAt ? Math.max(0, now - lastPumpStartedAt) : null,
+    lastJobStartedAt,
+    lastJobFinishedAt,
+    lastPumpError,
+  };
 }
 
 export function enqueueMessageJob({

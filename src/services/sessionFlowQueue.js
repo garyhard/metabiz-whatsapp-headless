@@ -27,6 +27,9 @@ let workerStarted = false;
 let stopRequested = false;
 let pumping = false;
 let timerRef = null;
+let lastPumpStartedAt = null;
+let lastPumpFinishedAt = null;
+let lastPumpError = null;
 
 function normalizeContext(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
@@ -57,6 +60,14 @@ function schedulePump(delayMs = 0) {
       }
     });
   }, Math.max(0, Number(delayMs) || 0));
+}
+
+function workerStallThresholdMs() {
+  return Math.max(
+    Number(config.sessionQueue.processingTimeoutMs) || 0,
+    (Number(config.sessionQueue.pollIntervalMs) || 0) * 4,
+    30000
+  );
 }
 
 function backoffMs(attempt, baseMs, maxMs) {
@@ -400,6 +411,8 @@ export async function pumpSessionFlowQueue() {
   if (pumping) return;
 
   pumping = true;
+  lastPumpStartedAt = Date.now();
+  lastPumpError = null;
   try {
     sessionStore.requeueStaleProcessingSessionFlowJobs(config.sessionQueue.processingTimeoutMs);
     let processed = 0;
@@ -411,8 +424,12 @@ export async function pumpSessionFlowQueue() {
       processed += 1;
     }
     await flushWebhookQueue(maxBatch);
+  } catch (error) {
+    lastPumpError = error?.message || String(error);
+    throw error;
   } finally {
     pumping = false;
+    lastPumpFinishedAt = Date.now();
   }
 
   if (stopRequested) return;
@@ -438,6 +455,25 @@ export function stopSessionFlowQueueWorker() {
   stopRequested = true;
   clearWorkerTimer();
   console.log('[SessionFlowQueue] worker stopped');
+}
+
+export function getSessionFlowQueueWorkerStatus(now = Date.now()) {
+  const stalled = pumping &&
+    !!lastPumpStartedAt &&
+    now - lastPumpStartedAt > workerStallThresholdMs();
+
+  return {
+    workerStarted,
+    stopRequested,
+    pumping,
+    stalled,
+    pollIntervalMs: Math.max(1, Number(config.sessionQueue.pollIntervalMs) || 1),
+    batchSize: Math.max(1, Number(config.sessionQueue.batchSize) || 1),
+    lastPumpStartedAt,
+    lastPumpFinishedAt,
+    lastPumpAgeMs: lastPumpStartedAt ? Math.max(0, now - lastPumpStartedAt) : null,
+    lastPumpError,
+  };
 }
 
 export function serializeSessionFlowJob(job) {

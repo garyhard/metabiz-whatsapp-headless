@@ -6,6 +6,7 @@ import initSqlJs from 'sql.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { config } from '../config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -332,13 +333,89 @@ function migrateSessionsTableDropCUserUnique() {
   }
 }
 
-function persistDb() {
+let persistDirtyVersion = 0;
+let persistedVersion = 0;
+let persistInFlight = null;
+let persistTimer = null;
+let lastPersistStartedAt = null;
+let lastPersistedAt = null;
+let lastPersistError = null;
+
+function exportDbBuffer() {
   const data = db.export();
-  fs.writeFileSync(DB_PATH, Buffer.from(data));
+  return Buffer.from(data);
+}
+
+function clearPersistTimer() {
+  if (!persistTimer) return;
+  clearTimeout(persistTimer);
+  persistTimer = null;
+}
+
+function persistDbSync() {
+  clearPersistTimer();
+  lastPersistStartedAt = Date.now();
+  fs.writeFileSync(DB_PATH, exportDbBuffer());
+  persistedVersion = persistDirtyVersion;
+  lastPersistedAt = Date.now();
+  lastPersistError = null;
+}
+
+async function flushPersistDbAsync() {
+  if (persistInFlight) {
+    return persistInFlight;
+  }
+  if (persistedVersion >= persistDirtyVersion) {
+    return null;
+  }
+
+  const targetVersion = persistDirtyVersion;
+  const buffer = exportDbBuffer();
+  lastPersistStartedAt = Date.now();
+  persistInFlight = fs.promises.writeFile(DB_PATH, buffer)
+    .then(() => {
+      persistedVersion = Math.max(persistedVersion, targetVersion);
+      lastPersistedAt = Date.now();
+      lastPersistError = null;
+    })
+    .catch((error) => {
+      lastPersistError = error?.message || String(error);
+      console.error('[SessionStore] Persist failed:', lastPersistError);
+    })
+    .finally(() => {
+      persistInFlight = null;
+      if (persistedVersion < persistDirtyVersion) {
+        schedulePersistDbFlush(0);
+      }
+    });
+  return persistInFlight;
+}
+
+function schedulePersistDbFlush(delayMs = null) {
+  if (persistTimer) return;
+  const configuredDelay = Math.max(0, Number(config.storePersistDebounceMs) || 0);
+  const waitMs = delayMs == null ? configuredDelay : Math.max(0, Number(delayMs) || 0);
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    flushPersistDbAsync().catch((error) => {
+      lastPersistError = error?.message || String(error);
+      console.error('[SessionStore] Persist flush failed:', lastPersistError);
+    });
+  }, waitMs);
+}
+
+function markDbDirty() {
+  persistDirtyVersion += 1;
+  if (Number(config.storePersistDebounceMs) <= 0) {
+    persistDbSync();
+    return;
+  }
+  schedulePersistDbFlush();
 }
 
 migrateSessionsTableDropCUserUnique();
-persistDb();
+persistDirtyVersion = 1;
+persistDbSync();
 
 function serialize(value) {
   if (value === null || value === undefined) return null;
@@ -490,7 +567,7 @@ function runStatement(sql, params) {
   } finally {
     stmt.free();
   }
-  persistDb();
+  markDbDirty();
 }
 
 function runStatementWithChanges(sql, params) {
@@ -501,7 +578,7 @@ function runStatementWithChanges(sql, params) {
     stmt.free();
   }
   const changes = db.getRowsModified();
-  persistDb();
+  markDbDirty();
   return changes;
 }
 
@@ -583,6 +660,26 @@ function normalizeMessageJobRow(row) {
   };
 }
 
+function normalizeMessageJobSessionRow(row) {
+  if (!row) return null;
+  return {
+    sessionId: row.session_id,
+    totalJobs: Number(row.total_jobs || 0),
+    queuedCount: Number(row.queued_count || 0),
+    runnableQueuedCount: Number(row.runnable_queued_count || 0),
+    delayedQueuedCount: Number(row.delayed_queued_count || 0),
+    processingCount: Number(row.processing_count || 0),
+    oldestQueuedCreatedAt: row.oldest_queued_created_at ? Number(row.oldest_queued_created_at) : null,
+    oldestRunnableQueuedCreatedAt: row.oldest_runnable_queued_created_at
+      ? Number(row.oldest_runnable_queued_created_at)
+      : null,
+    oldestProcessingUpdatedAt: row.oldest_processing_updated_at
+      ? Number(row.oldest_processing_updated_at)
+      : null,
+    latestUpdatedAt: row.latest_updated_at ? Number(row.latest_updated_at) : null,
+  };
+}
+
 function normalizeSessionFlowJobRow(row) {
   if (!row) return null;
   return {
@@ -633,6 +730,41 @@ function normalizeCreateOperationRow(row) {
     finishedAt: row.finished_at ? Number(row.finished_at) : null,
     createdAt: Number(row.created_at || 0),
     updatedAt: Number(row.updated_at || 0),
+  };
+}
+
+export async function flushSessionStorePersist({ forceSync = false } = {}) {
+  clearPersistTimer();
+
+  if (forceSync) {
+    if (persistInFlight) {
+      await persistInFlight.catch(() => {});
+    }
+    if (persistedVersion < persistDirtyVersion || lastPersistError) {
+      persistDbSync();
+    }
+    return;
+  }
+
+  await flushPersistDbAsync();
+  if (persistInFlight) {
+    await persistInFlight;
+  }
+  if (persistedVersion < persistDirtyVersion) {
+    persistDbSync();
+  }
+}
+
+export function getSessionStorePersistStatus(now = Date.now()) {
+  return {
+    dbPath: DB_PATH,
+    dirty: persistedVersion < persistDirtyVersion,
+    persistInFlight: !!persistInFlight,
+    persistScheduled: !!persistTimer,
+    lastPersistStartedAt,
+    lastPersistedAt,
+    lastPersistAgeMs: lastPersistedAt ? Math.max(0, now - lastPersistedAt) : null,
+    lastPersistError,
   };
 }
 
@@ -1225,6 +1357,38 @@ export const sessionStore = {
       ':limit': maxRows,
     });
     return rows.map(normalizeMessageJobRow);
+  },
+
+  listMessageJobSessions(limit = 100, now = Date.now()) {
+    const maxRows = Math.max(1, Number(limit) || 100);
+    const rows = getRows(`
+      SELECT
+        session_id,
+        COUNT(*) AS total_jobs,
+        SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued_count,
+        SUM(CASE WHEN status = 'queued' AND next_retry_at <= :now THEN 1 ELSE 0 END) AS runnable_queued_count,
+        SUM(CASE WHEN status = 'queued' AND next_retry_at > :now THEN 1 ELSE 0 END) AS delayed_queued_count,
+        SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) AS processing_count,
+        MIN(CASE WHEN status = 'queued' THEN created_at END) AS oldest_queued_created_at,
+        MIN(CASE WHEN status = 'queued' AND next_retry_at <= :now THEN created_at END) AS oldest_runnable_queued_created_at,
+        MIN(CASE WHEN status = 'processing' THEN updated_at END) AS oldest_processing_updated_at,
+        MAX(updated_at) AS latest_updated_at
+      FROM message_jobs
+      WHERE status IN ('queued', 'processing')
+      GROUP BY session_id
+      ORDER BY
+        runnable_queued_count DESC,
+        processing_count DESC,
+        COALESCE(oldest_runnable_queued_created_at, 9223372036854775807) ASC,
+        COALESCE(oldest_processing_updated_at, 9223372036854775807) ASC,
+        COALESCE(oldest_queued_created_at, 9223372036854775807) ASC,
+        session_id ASC
+      LIMIT :limit
+    `, {
+      ':now': now,
+      ':limit': maxRows,
+    });
+    return rows.map(normalizeMessageJobSessionRow);
   },
 
   hasPendingWebhook(now = Date.now()) {

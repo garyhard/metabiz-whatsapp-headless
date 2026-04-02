@@ -89,6 +89,21 @@ function getLiveBrowserCount() {
   return count;
 }
 
+function getBrowserPoolStatus() {
+  const configuredMax = Number(config.maxActiveBrowsers) || 0;
+  const liveBrowserCount = getLiveBrowserCount();
+  const pendingReservations = pendingBrowserReservations.size;
+  return {
+    maxActiveBrowsers: configuredMax > 0 ? configuredMax : null,
+    liveBrowserCount,
+    pendingReservations,
+    loadedSessions: sessions.size,
+    availableSlots: configuredMax > 0
+      ? Math.max(0, configuredMax - liveBrowserCount - pendingReservations)
+      : null,
+  };
+}
+
 function getSessionBusyCount(sessionId) {
   return sessionBusyCounts.get(sessionId) || 0;
 }
@@ -181,6 +196,14 @@ function ensureSessionLockState(sessionId) {
     sessionLocks.set(key, state);
   }
   return state;
+}
+
+function removeQueuedSessionWaiter(state, waiter) {
+  if (!state || !Array.isArray(state.queue) || !waiter) return false;
+  const index = state.queue.indexOf(waiter);
+  if (index < 0) return false;
+  state.queue.splice(index, 1);
+  return true;
 }
 
 function dispatchNextSessionWaiter(sessionId) {
@@ -598,21 +621,61 @@ function withTimeout(promise, ms, label) {
 async function withSessionLock(sessionId, task, { priority = 'normal' } = {}) {
   const key = String(sessionId);
   const state = ensureSessionLockState(key);
-  let release;
-  const current = new Promise((resolve) => {
-    release = resolve;
-  });
-  state.queue.push({
+  let acquiredLock = false;
+  const waiter = {
     priorityRank: lockPriorityRank(priority),
     seq: state.seq++,
-    resolve: release,
+    dispatched: false,
+    timedOut: false,
+    timeoutRef: null,
+    resolve: null,
+  };
+  const current = new Promise((resolve) => {
+    waiter.resolve = () => {
+      if (waiter.timedOut) return;
+      waiter.dispatched = true;
+      resolve();
+    };
   });
+  state.queue.push(waiter);
   dispatchNextSessionWaiter(key);
   try {
-    await current;
+    const waitTimeoutMs = Math.max(0, Number(config.sessionLockWaitTimeoutMs) || 0);
+    if (waitTimeoutMs > 0) {
+      await Promise.race([
+        current,
+        new Promise((_, reject) => {
+          waiter.timeoutRef = setTimeout(() => {
+            if (waiter.dispatched) {
+              return;
+            }
+            waiter.timedOut = true;
+            const removed = removeQueuedSessionWaiter(state, waiter);
+            if (removed && !state.active) {
+              dispatchNextSessionWaiter(key);
+            }
+            reject(new FlowTimeoutError(`Session ${key}: lock wait timed out after ${waitTimeoutMs}ms`));
+          }, waitTimeoutMs);
+        }),
+      ]);
+    } else {
+      await current;
+    }
+    acquiredLock = true;
+    if (waiter.timeoutRef) {
+      clearTimeout(waiter.timeoutRef);
+      waiter.timeoutRef = null;
+    }
     markSessionBusy(key);
     return await task();
   } finally {
+    if (waiter.timeoutRef) {
+      clearTimeout(waiter.timeoutRef);
+      waiter.timeoutRef = null;
+    }
+    if (!acquiredLock) {
+      return;
+    }
     unmarkSessionBusy(key);
     const currentState = sessionLocks.get(key);
     if (currentState === state) {
@@ -1153,7 +1216,7 @@ async function suspendUnhealthySession(sessionId, reason = 'unknown') {
   }
 }
 
-async function ensureSessionActive(sessionId) {
+async function ensureSessionActive(sessionId, options = {}) {
   let session = sessions.get(sessionId);
   if (session) {
     hydrateStoredRestrictedState(sessionId, session);
@@ -1172,6 +1235,7 @@ async function ensureSessionActive(sessionId) {
         skipCUserCheck: true,
         cUserOverride: stored.cUser,
         twofaSecret: stored.twofaSecret || null,
+        browserPoolOptions: options?.browserPoolOptions || {},
       }
     );
     session = sessions.get(sessionId);
@@ -1196,6 +1260,7 @@ async function ensureSessionActive(sessionId) {
       skipCUserCheck: true,
       cUserOverride: session.cUser,
       twofaSecret: session.twofaSecret || null,
+      browserPoolOptions: options?.browserPoolOptions || {},
     }
   );
   const refreshed = sessions.get(sessionId);
@@ -1207,6 +1272,85 @@ async function ensureSessionActive(sessionId) {
     return refreshed;
   }
   return getSession(sessionId);
+}
+
+function resolveQueuePrewarmIdleTimeoutMs(timeoutOverrideMs = null) {
+  const configured = Number(timeoutOverrideMs);
+  if (Number.isFinite(configured) && configured >= 0) {
+    return configured;
+  }
+  return Math.max(0, Number(config.queue.sessionPrewarmIdleTimeoutMs) || 0);
+}
+
+export async function warmSessionForQueuedWork(sessionId, { holdMs = null } = {}) {
+  const targetSessionId = String(sessionId || '').trim();
+  if (!targetSessionId) {
+    return { ok: false, warmed: false, reason: 'session_id_required', session: null };
+  }
+
+  return withSessionLock(targetSessionId, async () => {
+    const loadedSession = sessions.get(targetSessionId);
+    if (loadedSession) {
+      hydrateStoredRestrictedState(targetSessionId, loadedSession);
+    }
+
+    const storedSession = sessionStore.getBySessionId(targetSessionId);
+    if (!loadedSession && !storedSession) {
+      return { ok: false, warmed: false, reason: 'session_not_found', session: null };
+    }
+
+    if (storedSession?.restricted || storedSession?.status === 'restricted') {
+      return { ok: false, warmed: false, reason: 'restricted', session: getSessionInfo(targetSessionId) };
+    }
+
+    if (storedSession?.status === 'needs_manual_action') {
+      return { ok: false, warmed: false, reason: 'needs_manual_action', session: getSessionInfo(targetSessionId) };
+    }
+
+    const currentInfo = getSessionInfo(targetSessionId);
+    if (currentInfo?.status === 'needs_manual_action') {
+      return { ok: false, warmed: false, reason: 'needs_manual_action', session: currentInfo };
+    }
+
+    if (currentInfo?.manualAction?.type && currentInfo.manualAction.type !== 'account_restricted') {
+      return { ok: false, warmed: false, reason: 'needs_manual_action', session: currentInfo };
+    }
+
+    try {
+      throwIfSessionRestricted(targetSessionId, 'queue_prewarm');
+    } catch (error) {
+      return {
+        ok: false,
+        warmed: false,
+        reason: 'restricted',
+        error: error?.message || String(error),
+        session: getSessionInfo(targetSessionId),
+      };
+    }
+
+    if (!hasQueuedWorkForSession(targetSessionId)) {
+      return { ok: true, warmed: false, reason: 'no_runnable_work', session: getSessionInfo(targetSessionId) };
+    }
+
+    if (currentInfo?.liveBrowser) {
+      markSessionActive(targetSessionId);
+      const effectiveHoldMs = resolveQueuePrewarmIdleTimeoutMs(holdMs);
+      if (effectiveHoldMs > 0) {
+        setIdleTimer(targetSessionId, effectiveHoldMs);
+      }
+      return { ok: true, warmed: false, reason: 'already_live_browser', session: getSessionInfo(targetSessionId) };
+    }
+
+    await ensureSessionActive(targetSessionId);
+    markSessionActive(targetSessionId);
+
+    const effectiveHoldMs = resolveQueuePrewarmIdleTimeoutMs(holdMs);
+    if (effectiveHoldMs > 0) {
+      setIdleTimer(targetSessionId, effectiveHoldMs);
+    }
+
+    return { ok: true, warmed: true, reason: 'prewarmed', session: getSessionInfo(targetSessionId) };
+  }, { priority: 'low' });
 }
 
 async function recreateSessionFromMemory(sessionId) {
@@ -1356,7 +1500,7 @@ export async function createSession(
 ) {
   const normalized = normalizeCookiesInput(cookieInput);
   const cUser = extractCUser(normalized);
-  const { cUserOverride = null, twofaSecret = null } = options || {};
+  const { cUserOverride = null, twofaSecret = null, browserPoolOptions = {} } = options || {};
   const normalizedTwofaSecret = String(twofaSecret || '').trim() || null;
   const finalCUser = cUserOverride || cUser;
 
@@ -1401,7 +1545,8 @@ export async function createSession(
         await reserveBrowserSlot(
           browserReservationKey,
           [sessionId],
-          existingSessionId ? 'restore_session' : 'create_session'
+          existingSessionId ? 'restore_session' : 'create_session',
+          browserPoolOptions
         );
         browserSlotReserved = true;
       }
@@ -2430,6 +2575,8 @@ export async function checkSessionForSession(
 export function getAllSessionIds() {
   return Array.from(sessions.keys());
 }
+
+export { getBrowserPoolStatus };
 
 /**
  * Destroy all sessions except those in keepIds

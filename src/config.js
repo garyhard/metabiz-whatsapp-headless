@@ -34,6 +34,15 @@ function parseConcurrency(value, fallback) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
+function parseBoolean(value, fallback = false) {
+  if (value == null) return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (!normalized) return fallback;
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
+}
+
 function parseEnvList(value, fallback = []) {
   if (!value) return fallback;
   return value
@@ -77,11 +86,16 @@ export const config = {
     ? SEND_RELOAD_IDLE_MINUTES * 60 * 1000
     : 0,
   sendConcurrency: parseConcurrency(process.env.SEND_CONCURRENCY, 1),
+  sessionLockWaitTimeoutMs: parseNonNegativeInt(process.env.SESSION_LOCK_WAIT_TIMEOUT_MS, 90000),
+  storePersistDebounceMs: parseNonNegativeInt(process.env.SESSION_STORE_PERSIST_DEBOUNCE_MS, 50),
   priorityHighStreakLimit: parsePositiveInt(process.env.MESSAGE_PRIORITY_HIGH_STREAK_LIMIT, 3),
   queue: {
     pollIntervalMs: parsePositiveInt(process.env.MESSAGE_QUEUE_POLL_INTERVAL_MS, 1500),
     batchSize: parsePositiveInt(process.env.MESSAGE_QUEUE_BATCH_SIZE, 5),
     sessionBurstSize: parsePositiveInt(process.env.MESSAGE_QUEUE_SESSION_BURST_SIZE, 5),
+    sessionPrewarmEnabled: parseBoolean(process.env.MESSAGE_QUEUE_SESSION_PREWARM_ENABLED, true),
+    sessionPrewarmLimit: parsePositiveInt(process.env.MESSAGE_QUEUE_SESSION_PREWARM_LIMIT, 5),
+    sessionPrewarmIdleTimeoutMs: parseNonNegativeInt(process.env.MESSAGE_QUEUE_SESSION_PREWARM_IDLE_TIMEOUT_MS, 90000),
     maxAttempts: parsePositiveInt(process.env.MESSAGE_QUEUE_MAX_ATTEMPTS, 5),
     retryBaseMs: parsePositiveInt(process.env.MESSAGE_QUEUE_RETRY_BASE_MS, 30000),
     retryMaxMs: parsePositiveInt(process.env.MESSAGE_QUEUE_RETRY_MAX_MS, 300000),

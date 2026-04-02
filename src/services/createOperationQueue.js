@@ -18,7 +18,10 @@ let workerStarted = false;
 let stopRequested = false;
 let pumping = false;
 let timerRef = null;
-const activeOperations = new Set();
+const activeOperations = new Map();
+let lastPumpStartedAt = null;
+let lastPumpFinishedAt = null;
+let lastPumpError = null;
 
 function clearWorkerTimer() {
   if (!timerRef) return;
@@ -37,6 +40,14 @@ function schedulePump(delayMs = 0) {
       }
     });
   }, Math.max(0, Number(delayMs) || 0));
+}
+
+function workerStallThresholdMs() {
+  return Math.max(
+    Number(config.createQueue.processingTimeoutMs) || 0,
+    (Number(config.createQueue.pollIntervalMs) || 0) * 4,
+    30000
+  );
 }
 
 function getCreateQueueConcurrency() {
@@ -269,6 +280,8 @@ export async function pumpCreateOperationQueue() {
   if (pumping) return;
 
   pumping = true;
+  lastPumpStartedAt = Date.now();
+  lastPumpError = null;
   try {
     sessionStore.requeueStaleProcessingCreateOperations(config.createQueue.processingTimeoutMs);
     let claimed = 0;
@@ -292,11 +305,18 @@ export async function pumpCreateOperationQueue() {
             schedulePump(0);
           }
         });
-      activeOperations.add(task);
+      activeOperations.set(task, {
+        id: operation.id,
+        startedAt: Date.now(),
+      });
       claimed += 1;
     }
+  } catch (error) {
+    lastPumpError = error?.message || String(error);
+    throw error;
   } finally {
     pumping = false;
+    lastPumpFinishedAt = Date.now();
   }
 
   if (stopRequested) return;
@@ -322,6 +342,38 @@ export function stopCreateOperationQueueWorker() {
   stopRequested = true;
   clearWorkerTimer();
   console.log('[CreateOperationQueue] worker stopped');
+}
+
+export function getCreateOperationQueueWorkerStatus(now = Date.now()) {
+  let oldestActiveAgeMs = null;
+  for (const meta of activeOperations.values()) {
+    const ageMs = meta?.startedAt ? Math.max(0, now - meta.startedAt) : null;
+    if (ageMs == null) continue;
+    if (oldestActiveAgeMs == null || ageMs > oldestActiveAgeMs) {
+      oldestActiveAgeMs = ageMs;
+    }
+  }
+
+  const stalled = (
+    (pumping && !!lastPumpStartedAt && now - lastPumpStartedAt > workerStallThresholdMs()) ||
+    (oldestActiveAgeMs != null && oldestActiveAgeMs > workerStallThresholdMs())
+  );
+
+  return {
+    workerStarted,
+    stopRequested,
+    pumping,
+    stalled,
+    activeOperations: activeOperations.size,
+    pollIntervalMs: Math.max(1, Number(config.createQueue.pollIntervalMs) || 1),
+    batchSize: Math.max(1, Number(config.createQueue.batchSize) || 1),
+    concurrency: getCreateQueueConcurrency(),
+    oldestActiveAgeMs,
+    lastPumpStartedAt,
+    lastPumpFinishedAt,
+    lastPumpAgeMs: lastPumpStartedAt ? Math.max(0, now - lastPumpStartedAt) : null,
+    lastPumpError,
+  };
 }
 
 export function enqueueCreateOperation({

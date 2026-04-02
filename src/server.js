@@ -11,9 +11,22 @@ import cookiesRouter from './routes/cookies.js';
 import sessionJobsRouter from './routes/sessionJobs.js';
 import createOperationsRouter from './routes/createOperations.js';
 import { destroyAllSessions, restoreSessions, getProgressByCUser } from './services/sessionManager.js';
-import { startMessageQueueWorker, stopMessageQueueWorker } from './services/messageQueue.js';
-import { startSessionFlowQueueWorker, stopSessionFlowQueueWorker } from './services/sessionFlowQueue.js';
-import { startCreateOperationQueueWorker, stopCreateOperationQueueWorker } from './services/createOperationQueue.js';
+import {
+  startMessageQueueWorker,
+  stopMessageQueueWorker,
+  getMessageQueueWorkerStatus,
+} from './services/messageQueue.js';
+import {
+  startSessionFlowQueueWorker,
+  stopSessionFlowQueueWorker,
+  getSessionFlowQueueWorkerStatus,
+} from './services/sessionFlowQueue.js';
+import {
+  startCreateOperationQueueWorker,
+  stopCreateOperationQueueWorker,
+  getCreateOperationQueueWorkerStatus,
+} from './services/createOperationQueue.js';
+import { sessionStore, flushSessionStorePersist, getSessionStorePersistStatus } from './services/sessionStore.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
@@ -80,7 +93,32 @@ app.use((req, res, next) => {
 
 // Health check endpoint (no auth required)
 app.get('/health', (req, res) => {
-  res.json({ ok: true, status: 'healthy' });
+  const now = Date.now();
+  const messageQueue = getMessageQueueWorkerStatus(now);
+  const sessionFlowQueue = getSessionFlowQueueWorkerStatus(now);
+  const createOperationQueue = getCreateOperationQueueWorkerStatus(now);
+  const persist = getSessionStorePersistStatus(now);
+  const messageJobCounts = sessionStore.messageJobStatusCounts();
+  const queueHealthy = !messageQueue.stalled && !sessionFlowQueue.stalled && !createOperationQueue.stalled;
+
+  res.status(queueHealthy ? 200 : 503).json({
+    ok: queueHealthy,
+    status: queueHealthy ? 'healthy' : 'degraded',
+    messageJobs: {
+      queued: Number(messageJobCounts.queued || 0),
+      processing: Number(messageJobCounts.processing || 0),
+      sent: Number(messageJobCounts.sent || 0),
+      error: Number(messageJobCounts.error || 0),
+    },
+    workers: {
+      messageQueue,
+      sessionFlowQueue,
+      createOperationQueue,
+    },
+    store: {
+      persist,
+    },
+  });
 });
 
 // API routes with authentication
@@ -245,6 +283,12 @@ async function gracefulShutdown(signal) {
     } catch (error) {
       console.error('[Server] Error closing sessions:', error);
     }
+  }
+
+  try {
+    await flushSessionStorePersist({ forceSync: true });
+  } catch (error) {
+    console.error('[Server] Error flushing session store:', error);
   }
 
   process.exit(0);

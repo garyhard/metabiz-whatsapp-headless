@@ -3,8 +3,14 @@
  */
 
 import express from 'express';
-import { getAllSessionIds, getSessionInfo, sendMessageForSession, restoreSessionFromStore } from '../services/sessionManager.js';
-import { enqueueMessageJob, getMessageJob } from '../services/messageQueue.js';
+import {
+  getAllSessionIds,
+  getBrowserPoolStatus,
+  getSessionInfo,
+  sendMessageForSession,
+  restoreSessionFromStore,
+} from '../services/sessionManager.js';
+import { enqueueMessageJob, getMessageJob, getMessageQueueWorkerStatus } from '../services/messageQueue.js';
 import { sessionStore } from '../services/sessionStore.js';
 import {
   buildAutomationErrorBody,
@@ -102,8 +108,50 @@ function decorateJobWithSession(job, sessionMap) {
       liveBrowser: session.liveBrowser === true,
       lastActivity: session.lastActivity || null,
     } : null,
-    messagePreview: String(row?.message || '').replace(/\s+/g, ' ').trim().slice(0, 160),
+    messagePreview: String(job?.message || '').replace(/\s+/g, ' ').trim().slice(0, 160),
   };
+}
+
+function buildMonitorSessionSnapshot(sessionId, loadedSession, storedSession) {
+  const effectiveStatus = loadedSession?.status || storedSession?.status || null;
+  return {
+    sessionId,
+    cUser: loadedSession?.cUser || storedSession?.cUser || null,
+    status: effectiveStatus,
+    liveBrowser: loadedSession?.liveBrowser === true,
+    lastActivity: loadedSession?.lastActivity ?? storedSession?.lastActivity ?? null,
+    suspendedAt: loadedSession?.suspendedAt ?? (effectiveStatus === 'suspended' ? storedSession?.updatedAt || null : null),
+    manualAction: loadedSession?.manualAction || null,
+    restricted: storedSession?.restricted === true || effectiveStatus === 'restricted',
+    restrictionDetectedAt: storedSession?.restrictionDetectedAt || null,
+    loaded: !!loadedSession,
+    stored: !!storedSession,
+  };
+}
+
+function buildQueueWarmupState(group, sessionSnapshot, remainingSlots) {
+  if (!sessionSnapshot?.loaded && !sessionSnapshot?.stored) {
+    return { eligible: false, reason: 'session_not_found' };
+  }
+  if (Number(group?.runnableQueuedCount || 0) <= 0) {
+    return { eligible: false, reason: 'delayed_only' };
+  }
+  if (Number(group?.processingCount || 0) > 0) {
+    return { eligible: false, reason: 'processing_in_progress' };
+  }
+  if (sessionSnapshot?.liveBrowser) {
+    return { eligible: false, reason: 'already_live_browser' };
+  }
+  if (sessionSnapshot?.restricted) {
+    return { eligible: false, reason: 'restricted' };
+  }
+  if (sessionSnapshot?.status === 'needs_manual_action') {
+    return { eligible: false, reason: 'needs_manual_action' };
+  }
+  if (remainingSlots != null && remainingSlots <= 0) {
+    return { eligible: false, reason: 'no_available_slots' };
+  }
+  return { eligible: true, reason: 'available_slot' };
 }
 
 /**
@@ -111,21 +159,43 @@ function decorateJobWithSession(job, sessionMap) {
  * Get MetaBiz queue/session monitoring snapshot
  */
 router.get('/jobs/monitor', async (req, res) => {
+  const now = Date.now();
   const queuedLimit = normalizeLimit(req.query?.queuedLimit, 100, 500);
   const processingLimit = normalizeLimit(req.query?.processingLimit, 100, 500);
+  const sessionLimit = normalizeLimit(req.query?.sessionLimit, 100, 500);
 
   const loadedSessions = getAllSessionIds().map((id) => getSessionInfo(id)).filter(Boolean);
   const loadedSessionMap = new Map(loadedSessions.map((session) => [session.sessionId, session]));
   const queueCounts = sessionStore.messageJobStatusCounts();
   const queuedJobs = sessionStore.listQueuedMessageJobs(queuedLimit);
   const processingJobs = sessionStore.listProcessingMessageJobs(processingLimit);
+  const queueSessions = sessionStore.listMessageJobSessions(sessionLimit, now);
+  const browserPool = getBrowserPoolStatus();
+  const worker = getMessageQueueWorkerStatus(now);
 
   const processingSessionIds = [...new Set(processingJobs.map((job) => String(job.sessionId || '')).filter(Boolean))];
   const queuedSessionIds = [...new Set(queuedJobs.map((job) => String(job.sessionId || '')).filter(Boolean))];
+  let remainingWarmupSlots = browserPool.availableSlots;
+  const groupedSessions = queueSessions.map((group) => {
+    const sessionId = String(group.sessionId || '').trim();
+    const loadedSession = sessionId ? loadedSessionMap.get(sessionId) || null : null;
+    const storedSession = sessionId ? sessionStore.getBySessionId(sessionId) : null;
+    const session = buildMonitorSessionSnapshot(sessionId, loadedSession, storedSession);
+    const warmup = buildQueueWarmupState(group, session, remainingWarmupSlots);
+    if (warmup.eligible && remainingWarmupSlots != null) {
+      remainingWarmupSlots = Math.max(0, remainingWarmupSlots - 1);
+    }
+    return {
+      ...group,
+      session,
+      warmup,
+    };
+  });
 
   return res.json({
     ok: true,
     generatedAt: new Date().toISOString(),
+    worker,
     queue: {
       counts: {
         queued: Number(queueCounts.queued || 0),
@@ -135,11 +205,13 @@ router.get('/jobs/monitor', async (req, res) => {
       },
       processingSessionCount: processingSessionIds.length,
       queuedSessionCount: queuedSessionIds.length,
+      sessions: groupedSessions,
       processingJobs: processingJobs.map((job) => decorateJobWithSession(job, loadedSessionMap)),
       queuedJobs: queuedJobs.map((job) => decorateJobWithSession(job, loadedSessionMap)),
     },
     sessions: {
       summary: buildSessionSummary(loadedSessions),
+      browserPool,
       loaded: loadedSessions,
     },
   });
