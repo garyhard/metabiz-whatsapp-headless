@@ -16,7 +16,7 @@ import {
   clearAllSessions,
   getSessionCaptchaImageInfo,
 } from '../services/sessionManager.js';
-import { buildAutomationErrorBody, enrichAutomationDetails } from '../services/debugArtifacts.js';
+import { buildAutomationErrorBody, buildScreenshotDataUrlFromPath, enrichAutomationDetails } from '../services/debugArtifacts.js';
 import { normalizeRequestId } from '../services/automation.js';
 import { enqueueSessionFlowJob, serializeSessionFlowJob } from '../services/sessionFlowQueue.js';
 import { InvalidInputError, SessionNotFoundError, AutomationError } from '../errors.js';
@@ -47,6 +47,26 @@ async function buildInvalidInputErrorBody(error, fallbackRequestId = null) {
   });
 }
 
+async function enrichSessionResponse(session) {
+  const data = session && typeof session === 'object' ? JSON.parse(JSON.stringify(session)) : null;
+  if (!data) return data;
+
+  const details = data.manualAction && typeof data.manualAction === 'object' && data.manualAction.details && typeof data.manualAction.details === 'object'
+    ? data.manualAction.details
+    : null;
+  const screenshotPath = String(details?.screenshotPath || '').trim();
+  if (!details || !screenshotPath || details.screenshotDataUrl) {
+    return data;
+  }
+
+  const screenshotDataUrl = await buildScreenshotDataUrlFromPath(screenshotPath);
+  if (screenshotDataUrl) {
+    details.screenshotDataUrl = screenshotDataUrl;
+  }
+
+  return data;
+}
+
 /**
  * GET /api/sessions
  * List all active sessions
@@ -73,7 +93,7 @@ router.get('/', async (req, res, next) => {
 router.get('/:sessionId', async (req, res, next) => {
   try {
     const { sessionId } = req.params;
-    const session = getSessionInfo(sessionId);
+    const session = await enrichSessionResponse(getSessionInfo(sessionId));
     if (!session) {
       throw new SessionNotFoundError(sessionId);
     }
@@ -85,6 +105,56 @@ router.get('/:sessionId', async (req, res, next) => {
   } catch (error) {
     if (error instanceof SessionNotFoundError) {
       return res.status(404).json(buildJsonErrorBody(error, 'Session not found'));
+    }
+    next(error);
+  }
+});
+
+/**
+ * GET /api/sessions/:sessionId/restricted-image
+ * Return latest restricted screenshot image for the session
+ */
+router.get('/:sessionId/restricted-image', async (req, res, next) => {
+  const { sessionId } = req.params;
+  try {
+    const session = getSessionInfo(sessionId);
+    if (!session) {
+      throw new SessionNotFoundError(sessionId);
+    }
+
+    const details = session?.manualAction?.details && typeof session.manualAction.details === 'object'
+      ? session.manualAction.details
+      : null;
+    const screenshotPath = String(details?.screenshotPath || '').trim();
+    if (!screenshotPath) {
+      return res.status(404).json({
+        ok: false,
+        error: 'Restricted screenshot not found',
+        errorCode: 'restricted_screenshot_not_found',
+        sessionId,
+      });
+    }
+
+    await fs.access(screenshotPath);
+    res.setHeader('x-session-id', sessionId);
+    res.setHeader('x-session-status', session.status || 'restricted');
+    return res.sendFile(screenshotPath);
+  } catch (error) {
+    if (error instanceof SessionNotFoundError) {
+      return res.status(404).json(
+        buildJsonErrorBody(error, 'Session not found', {
+          errorCode: 'session_not_found',
+          sessionId,
+        })
+      );
+    }
+    if (String(error?.code || '') === 'ENOENT') {
+      return res.status(404).json({
+        ok: false,
+        error: 'Restricted screenshot file not found',
+        errorCode: 'restricted_screenshot_not_found',
+        sessionId,
+      });
     }
     next(error);
   }

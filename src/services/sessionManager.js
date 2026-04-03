@@ -837,6 +837,43 @@ function clearRestrictedSessionState(sessionId, nextStatus = null) {
   sessionStore.clearSessionRestricted(sessionId);
 }
 
+async function closeSessionRuntime(sessionId, { nextStatus = null, suspendedAt = null, clearManualAction = false } = {}) {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+
+  clearSessionTimers(session);
+
+  try {
+    if (session.page) {
+      await session.page.close().catch(() => {});
+    }
+    if (session.context) {
+      await session.context.close().catch(() => {});
+    }
+    if (session.browser) {
+      await session.browser.close().catch(() => {});
+    }
+  } catch (error) {
+    console.warn(`[SessionManager] close runtime failed for session ${sessionId}:`, error?.message || String(error));
+  }
+
+  session.page = null;
+  session.context = null;
+  session.browser = null;
+  session.activityTimer = null;
+  session.idleTimer = null;
+  session.ipAddress = null;
+  if (nextStatus) {
+    session.status = nextStatus;
+  }
+  if (suspendedAt != null) {
+    session.suspendedAt = suspendedAt;
+  }
+  if (clearManualAction) {
+    session.manualAction = null;
+  }
+}
+
 function markSessionRestricted(sessionId, error, flow = 'unknown') {
   const session = sessions.get(sessionId);
   const detectedAtMs = Date.now();
@@ -851,14 +888,11 @@ function markSessionRestricted(sessionId, error, flow = 'unknown') {
   );
 
   if (session) {
-    if (session.activityTimer) {
-      clearInterval(session.activityTimer);
-      session.activityTimer = null;
-    }
+    clearSessionTimers(session);
     session.status = 'restricted';
     session.lastActivity = detectedAtMs;
     session.manualAction = manualAction;
-    setIdleTimer(sessionId);
+    session.suspendedAt = detectedAtMs;
   }
 
   sessionStore.markSessionRestricted(sessionId, manualAction.details, detectedAtMs);
@@ -903,18 +937,16 @@ function markSessionRestricted(sessionId, error, flow = 'unknown') {
   });
 
   if (session) {
-    setTimeout(() => {
-      destroySession(sessionId, { preserveStore: true })
-        .then(() => {
-          logStep('session:restricted:destroyed', {
-            sessionId,
-            flow,
-          });
-        })
-        .catch((destroyError) => {
-          console.warn(`[SessionManager] restricted destroy failed ${sessionId}:`, destroyError?.message || String(destroyError));
+    void closeSessionRuntime(sessionId, { nextStatus: 'restricted', suspendedAt: detectedAtMs })
+      .then(() => {
+        logStep('session:restricted:runtime_closed', {
+          sessionId,
+          flow,
         });
-    }, 0);
+      })
+      .catch((closeError) => {
+        console.warn(`[SessionManager] restricted runtime close failed ${sessionId}:`, closeError?.message || String(closeError));
+      });
   }
 }
 
@@ -1177,30 +1209,8 @@ function markSessionNeedsManualAction(sessionId, error, flow = 'unknown') {
 async function suspendSession(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) return;
-
-  clearSessionTimers(session);
-
-  try {
-    if (session.page) {
-      await session.page.close().catch(() => {});
-    }
-    if (session.context) {
-      await session.context.close().catch(() => {});
-    }
-    if (session.browser) {
-      await session.browser.close().catch(() => {});
-    }
-  } catch (error) {
-    console.warn(`[SessionManager] Error suspending session ${sessionId}:`, error.message);
-  }
-
-  session.page = null;
-  session.context = null;
-  session.browser = null;
-  session.activityTimer = null;
-  session.ipAddress = null;
-  session.status = 'suspended';
-  session.suspendedAt = Date.now();
+  const suspendedAt = Date.now();
+  await closeSessionRuntime(sessionId, { nextStatus: 'suspended', suspendedAt });
   sessionStore.updateStatus(sessionId, 'suspended', session.lastActivity || Date.now());
 }
 
@@ -2598,6 +2608,29 @@ export async function cleanupSessions(keepIds = []) {
 export function getSessionInfo(sessionId) {
   const session = sessions.get(sessionId);
   if (!session) {
+    const stored = sessionStore.getBySessionId(sessionId);
+    if (!stored) {
+      return null;
+    }
+    if (stored.restricted || stored.status === 'restricted') {
+      const manualAction = buildRestrictedManualAction(
+        stored.restrictionDetails,
+        Number(stored.restrictionDetectedAt || stored.updatedAt || Date.now()),
+        stored.restrictionDetails?.flow || 'restricted_cache',
+        'Account restricted detected'
+      );
+      return {
+        sessionId,
+        createdAt: stored.createdAt,
+        lastActivity: stored.lastActivity,
+        suspendedAt: stored.updatedAt || null,
+        ipAddress: null,
+        cUser: stored.cUser || null,
+        status: 'restricted',
+        liveBrowser: false,
+        manualAction,
+      };
+    }
     return null;
   }
   hydrateStoredRestrictedState(sessionId, session);
@@ -2639,6 +2672,20 @@ export async function restoreSessionFromStore(sessionId) {
   const stored = sessionStore.getBySessionId(sessionId);
   if (!stored) {
     throw new SessionNotFoundError(sessionId);
+  }
+  if (stored.restricted || stored.status === 'restricted') {
+    const restricted = buildRestrictedManualAction(
+      stored.restrictionDetails,
+      Number(stored.restrictionDetectedAt || stored.updatedAt || Date.now()),
+      stored.restrictionDetails?.flow || 'restricted_cache',
+      'Account restricted detected'
+    );
+    throw new AutomationError(`Session ${sessionId}: Account restricted detected`, {
+      ...(restricted.details || {}),
+      flow: 'restore_cached',
+      cachedRestricted: true,
+      sessionId,
+    });
   }
   return createSession(
     stored.cookies,

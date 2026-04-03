@@ -5,7 +5,14 @@
 import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
 import { sessionStore } from './sessionStore.js';
-import { getBrowserPoolStatus, getSessionInfo, sendMessageForSession, warmSessionForQueuedWork } from './sessionManager.js';
+import {
+  getBrowserPoolStatus,
+  getSessionInfo,
+  restoreSessionFromStore,
+  sendMessageForSession,
+  warmSessionForQueuedWork,
+} from './sessionManager.js';
+import { SessionNotFoundError } from '../errors.js';
 import { config } from '../config.js';
 
 let workerStarted = false;
@@ -21,9 +28,36 @@ let lastPumpFinishedAt = null;
 let lastPumpError = null;
 let lastJobStartedAt = null;
 let lastJobFinishedAt = null;
+let webhookBlockedUntil = 0;
+let lastWebhookFailureAt = null;
+let lastWebhookFailureReason = null;
 
 function webhookEnabled() {
   return String(config.queue.webhookUrl || '').trim().length > 0;
+}
+
+function webhookBlockRemainingMs(now = Date.now()) {
+  const blockedUntil = Math.max(0, Number(webhookBlockedUntil) || 0);
+  if (blockedUntil <= now) {
+    return 0;
+  }
+  return blockedUntil - now;
+}
+
+function webhookBlocked(now = Date.now()) {
+  return webhookBlockRemainingMs(now) > 0;
+}
+
+function clearWebhookBlock(now = Date.now()) {
+  if ((Number(webhookBlockedUntil) || 0) <= now) {
+    webhookBlockedUntil = 0;
+  }
+}
+
+function blockWebhookDelivery(untilMs, reason, now = Date.now()) {
+  webhookBlockedUntil = Math.max(now, Number(untilMs) || 0);
+  lastWebhookFailureAt = now;
+  lastWebhookFailureReason = reason ? String(reason) : null;
 }
 
 function workerConcurrencyLimit() {
@@ -219,14 +253,25 @@ function isRetryableMessageJobError(errorResult) {
 
 async function processJob(job) {
   try {
-    const result = await sendMessageForSession(job.sessionId, {
+    const sendPayload = {
       extension: job.extension,
       phoneNumber: job.phoneNumber,
       message: job.message,
       useReplyFlow: job.useReplyFlow,
       includeSuccessScreenshot: job.includeSuccessScreenshot,
       priority: job.priority || (job.useReplyFlow ? 'high' : 'normal'),
-    });
+    };
+    let result;
+    try {
+      result = await sendMessageForSession(job.sessionId, sendPayload);
+    } catch (error) {
+      if (!(error instanceof SessionNotFoundError)) {
+        throw error;
+      }
+
+      await restoreSessionFromStore(job.sessionId);
+      result = await sendMessageForSession(job.sessionId, sendPayload);
+    }
     const updatedJob = sessionStore.markMessageJobSent(job.id, result || {});
     if (updatedJob?.status !== 'sent') {
       console.warn(
@@ -375,18 +420,30 @@ async function postWebhook(job) {
     }
     return { ok: true };
   } catch (error) {
-    return { ok: false, error: error?.message || String(error), retryable: true, statusCode: null };
+    const aborted = error?.name === 'AbortError';
+    return {
+      ok: false,
+      error: aborted
+        ? `timeout after ${config.queue.webhookTimeoutMs}ms`
+        : (error?.message || String(error)),
+      retryable: true,
+      statusCode: null,
+    };
   } finally {
     clearTimeout(timeout);
   }
 }
 
 async function deliverWebhook(job) {
+  const now = Date.now();
+  const attempts = Math.max(1, Number(job.webhookAttempts) || 1);
+  const maxAttempts = Math.max(1, Number(config.queue.webhookMaxAttempts) || 1);
   const webhookResult = await postWebhook(job);
   if (webhookResult.ok) {
     sessionStore.markWebhookDelivered(job.id);
+    clearWebhookBlock(now);
     console.log(`[MessageQueue] webhook delivered job=${job.id} status=${job.status}`);
-    return;
+    return { outcome: 'delivered', jobId: job.id };
   }
 
   if (webhookResult.retryable === false) {
@@ -394,33 +451,65 @@ async function deliverWebhook(job) {
     console.warn(
       `[MessageQueue] webhook stopped job=${job.id} status=${job.status} error=${webhookResult.error}`
     );
-    return;
+    return { outcome: 'stopped', jobId: job.id };
+  }
+
+  if (attempts >= maxAttempts) {
+    const stopError = `${webhookResult.error} (webhook max attempts reached)`;
+    sessionStore.markWebhookStopped(job.id, stopError);
+    console.warn(
+      `[MessageQueue] webhook stopped job=${job.id} status=${job.status} attempts=${attempts}/${maxAttempts} error=${webhookResult.error}`
+    );
+    return { outcome: 'stopped', jobId: job.id };
   }
 
   const delay = backoffMs(
-    Math.max(1, Number(job.webhookAttempts) || 1),
+    attempts,
     config.queue.webhookRetryBaseMs,
     config.queue.webhookRetryMaxMs
   );
-  sessionStore.markWebhookRetry(job.id, webhookResult.error, Date.now() + delay);
+  const retryAt = now + delay;
+  sessionStore.markWebhookRetry(job.id, webhookResult.error, retryAt);
+  blockWebhookDelivery(retryAt, webhookResult.error, now);
   console.warn(
-    `[MessageQueue] webhook retry job=${job.id} status=${job.status} in_ms=${delay} error=${webhookResult.error}`
+    `[MessageQueue] webhook retry job=${job.id} status=${job.status} attempts=${attempts}/${maxAttempts} in_ms=${delay} error=${webhookResult.error}`
   );
+  return { outcome: 'retry', jobId: job.id, retryAt };
 }
 
 async function flushWebhookQueue(maxBatch) {
   if (!webhookEnabled()) {
-    return 0;
+    return { delivered: 0, stopped: 0, blocked: false };
+  }
+
+  const now = Date.now();
+  clearWebhookBlock(now);
+  if (webhookBlocked(now)) {
+    return { delivered: 0, stopped: 0, blocked: true };
   }
 
   let delivered = 0;
+  let stopped = 0;
   for (let i = 0; i < maxBatch; i += 1) {
+    clearWebhookBlock();
+    if (webhookBlocked()) {
+      break;
+    }
     const pending = sessionStore.claimPendingWebhook(Date.now());
     if (!pending) break;
-    await deliverWebhook(pending);
-    delivered += 1;
+    const result = await deliverWebhook(pending);
+    if (result?.outcome === 'delivered') {
+      delivered += 1;
+      continue;
+    }
+    if (result?.outcome === 'retry') {
+      break;
+    }
+    if (result?.outcome === 'stopped') {
+      stopped += 1;
+    }
   }
-  return delivered;
+  return { delivered, stopped, blocked: webhookBlocked() };
 }
 
 function canPrewarmSessionGroup(group, browserSlotsRemaining) {
@@ -576,11 +665,15 @@ export async function pumpQueue() {
   }
 
   if (stopRequested) return;
+  const now = Date.now();
+  clearWebhookBlock(now);
   if (
-    (hasAvailableWorkerCapacity() && sessionStore.hasRunnableMessageJob(Date.now())) ||
-    (webhookEnabled() && sessionStore.hasPendingWebhook(Date.now()))
+    (hasAvailableWorkerCapacity() && sessionStore.hasRunnableMessageJob(now)) ||
+    (webhookEnabled() && sessionStore.hasPendingWebhook(now) && !webhookBlocked(now))
   ) {
     schedulePump(0);
+  } else if (webhookEnabled() && webhookBlocked(now)) {
+    schedulePump(webhookBlockRemainingMs(now));
   } else {
     schedulePump(config.queue.pollIntervalMs);
   }
@@ -590,6 +683,9 @@ export function startMessageQueueWorker() {
   if (workerStarted) return;
   workerStarted = true;
   stopRequested = false;
+  webhookBlockedUntil = 0;
+  lastWebhookFailureAt = null;
+  lastWebhookFailureReason = null;
   console.log('[MessageQueue] worker started');
   schedulePump(0);
 }
@@ -634,6 +730,10 @@ export function getMessageQueueWorkerStatus(now = Date.now()) {
     lastJobStartedAt,
     lastJobFinishedAt,
     lastPumpError,
+    webhookBlockedUntil: webhookBlocked(now) ? webhookBlockedUntil : null,
+    webhookBlockedForMs: webhookBlockRemainingMs(now),
+    lastWebhookFailureAt,
+    lastWebhookFailureReason,
   };
 }
 

@@ -102,6 +102,7 @@ export const config = {
     processingTimeoutMs: parsePositiveInt(process.env.MESSAGE_QUEUE_PROCESSING_TIMEOUT_MS, 180000),
     webhookUrl: String(process.env.META_BLAST_WEBHOOK_PRIVATE_URL || process.env.META_BLAST_WEBHOOK_URL || '').trim(),
     webhookTimeoutMs: parsePositiveInt(process.env.META_BLAST_WEBHOOK_TIMEOUT_MS, 15000),
+    webhookMaxAttempts: parsePositiveInt(process.env.META_BLAST_WEBHOOK_MAX_ATTEMPTS, 8),
     webhookRetryBaseMs: parsePositiveInt(process.env.META_BLAST_WEBHOOK_RETRY_BASE_MS, 10000),
     webhookRetryMaxMs: parsePositiveInt(process.env.META_BLAST_WEBHOOK_RETRY_MAX_MS, 300000),
   },
