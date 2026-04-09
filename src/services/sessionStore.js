@@ -346,6 +346,73 @@ function exportDbBuffer() {
   return Buffer.from(data);
 }
 
+function getTempDbPath() {
+  return `${DB_PATH}.tmp`;
+}
+
+function fsyncParentDirSync(filePath) {
+  let dirHandle = null;
+  try {
+    dirHandle = fs.openSync(path.dirname(filePath), 'r');
+    fs.fsyncSync(dirHandle);
+  } catch {
+    // Best-effort only.
+  } finally {
+    if (dirHandle != null) {
+      try {
+        fs.closeSync(dirHandle);
+      } catch {
+        // ignore close errors
+      }
+    }
+  }
+}
+
+function writeBufferAtomicallySync(filePath, buffer) {
+  const tempPath = getTempDbPath();
+  let fd = null;
+  try {
+    fd = fs.openSync(tempPath, 'w');
+    fs.writeFileSync(fd, buffer);
+    fs.fsyncSync(fd);
+  } finally {
+    if (fd != null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // ignore close errors
+      }
+    }
+  }
+
+  fs.renameSync(tempPath, filePath);
+  fsyncParentDirSync(filePath);
+}
+
+async function writeBufferAtomically(filePath, buffer) {
+  const tempPath = getTempDbPath();
+  const handle = await fs.promises.open(tempPath, 'w');
+  try {
+    await handle.writeFile(buffer);
+    await handle.sync();
+  } finally {
+    await handle.close().catch(() => {});
+  }
+
+  await fs.promises.rename(tempPath, filePath);
+
+  try {
+    const dirHandle = await fs.promises.open(path.dirname(filePath), 'r');
+    try {
+      await dirHandle.sync();
+    } finally {
+      await dirHandle.close().catch(() => {});
+    }
+  } catch {
+    // Best-effort only.
+  }
+}
+
 function clearPersistTimer() {
   if (!persistTimer) return;
   clearTimeout(persistTimer);
@@ -355,7 +422,7 @@ function clearPersistTimer() {
 function persistDbSync() {
   clearPersistTimer();
   lastPersistStartedAt = Date.now();
-  fs.writeFileSync(DB_PATH, exportDbBuffer());
+  writeBufferAtomicallySync(DB_PATH, exportDbBuffer());
   persistedVersion = persistDirtyVersion;
   lastPersistedAt = Date.now();
   lastPersistError = null;
@@ -372,7 +439,7 @@ async function flushPersistDbAsync() {
   const targetVersion = persistDirtyVersion;
   const buffer = exportDbBuffer();
   lastPersistStartedAt = Date.now();
-  persistInFlight = fs.promises.writeFile(DB_PATH, buffer)
+  persistInFlight = writeBufferAtomically(DB_PATH, buffer)
     .then(() => {
       persistedVersion = Math.max(persistedVersion, targetVersion);
       lastPersistedAt = Date.now();

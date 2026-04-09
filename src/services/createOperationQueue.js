@@ -184,6 +184,8 @@ async function executeOperation(operation) {
       flowTimeoutMs,
       recoverableRetryAttempts,
       flowMaxAttempts: 1,
+      priority: 'high',
+      browserPoolOptions: { lane: 'create' },
     });
     partialResult.check = checkResult;
 

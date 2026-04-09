@@ -39,6 +39,25 @@ function toBoolean(value) {
   return normalized === '1' || normalized === 'true' || normalized === 'yes';
 }
 
+function resolveCheckSchedulingOptions(context) {
+  const normalizedContext =
+    context && typeof context === 'object' && !Array.isArray(context)
+      ? context
+      : null;
+  const flow = String(normalizedContext?.flow || '').trim().toLowerCase();
+  if (flow === 'test_flow' || flow === 'test_flow_retry') {
+    return {
+      priority: 'high',
+      browserPoolLane: 'create',
+    };
+  }
+
+  return {
+    priority: 'normal',
+    browserPoolLane: 'default',
+  };
+}
+
 async function buildInvalidInputErrorBody(error, fallbackRequestId = null) {
   const details = await enrichAutomationDetails(error?.details, fallbackRequestId);
   return buildJsonErrorBody(error, 'Invalid input', {
@@ -339,6 +358,7 @@ router.delete('/:sessionId', async (req, res, next) => {
 router.post('/:sessionId/check', async (req, res, next) => {
   const { sessionId } = req.params;
   const requestId = normalizeRequestId(sessionId, req.body?.requestId);
+  const scheduling = resolveCheckSchedulingOptions(req.body?.context);
   try {
     const asyncMode = toBoolean(req.query?.async) || toBoolean(req.body?.async);
     if (asyncMode) {
@@ -350,6 +370,8 @@ router.post('/:sessionId/check', async (req, res, next) => {
           context: req.body?.context && typeof req.body.context === 'object' && !Array.isArray(req.body.context)
             ? req.body.context
             : null,
+          priority: scheduling.priority,
+          browserPoolLane: scheduling.browserPoolLane,
         },
         webhookUrl: req.body?.webhookUrl ? String(req.body.webhookUrl).trim() : null,
       });
@@ -365,6 +387,8 @@ router.post('/:sessionId/check', async (req, res, next) => {
       requestId,
       flowTimeoutMs: req.body?.flowTimeoutMs,
       recoverableRetryAttempts: req.body?.recoverableRetryAttempts,
+      priority: scheduling.priority,
+      browserPoolOptions: { lane: scheduling.browserPoolLane },
     });
     res.json({
       ok: true,
@@ -397,6 +421,7 @@ router.post('/:sessionId/check', async (req, res, next) => {
 router.post('/:sessionId/resume-check', async (req, res, next) => {
   const { sessionId } = req.params;
   const requestId = normalizeRequestId(sessionId, req.body?.requestId);
+  const scheduling = resolveCheckSchedulingOptions(req.body?.context);
   try {
     const asyncMode = toBoolean(req.query?.async) || toBoolean(req.body?.async);
     if (asyncMode) {
@@ -408,6 +433,8 @@ router.post('/:sessionId/resume-check', async (req, res, next) => {
           context: req.body?.context && typeof req.body.context === 'object' && !Array.isArray(req.body.context)
             ? req.body.context
             : null,
+          priority: scheduling.priority,
+          browserPoolLane: scheduling.browserPoolLane,
         },
         webhookUrl: req.body?.webhookUrl ? String(req.body.webhookUrl).trim() : null,
       });
@@ -423,6 +450,8 @@ router.post('/:sessionId/resume-check', async (req, res, next) => {
       requestId,
       flowTimeoutMs: req.body?.flowTimeoutMs,
       recoverableRetryAttempts: req.body?.recoverableRetryAttempts,
+      priority: scheduling.priority,
+      browserPoolOptions: { lane: scheduling.browserPoolLane },
     });
     const session = getSessionInfo(sessionId);
     res.json({

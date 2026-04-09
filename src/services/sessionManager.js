@@ -12,6 +12,8 @@ import { sessionStore } from './sessionStore.js';
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -21,9 +23,12 @@ const FACEBOOK_HOME_URL = 'https://www.facebook.com/';
 const PROXY_IP_CHECK_URL = 'https://api.ipify.org?format=json';
 const PROXY_IP_CHECK_TIMEOUT = 15000;
 const PROXY_META_CHECK_TIMEOUT = 60000;
+const PLAYWRIGHT_CLOSE_TIMEOUT_MS = 15000;
+const FORCE_KILL_GRACE_MS = 1500;
 const progressByCUser = new Map();
 const SESSIONS_FILE = path.join(__dirname, '../../profiles/sessions.json');
 const PROFILE_ROOT = path.join(__dirname, '../../profiles');
+const execFileAsync = promisify(execFile);
 
 async function applyResolutionCookies(context, viewport) {
   const width = Number(viewport?.width) || 1600;
@@ -44,6 +49,142 @@ async function applyResolutionCookies(context, viewport) {
   } catch (error) {
     console.warn(`[SessionManager] Failed to set resolution cookies: ${error.message}`);
   }
+}
+
+function getSessionProfileDir(sessionId) {
+  return path.join(PROFILE_ROOT, `session-${sessionId}`);
+}
+
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function closeWithTimeout(target, label, sessionId) {
+  if (!target || typeof target.close !== 'function') {
+    return null;
+  }
+
+  let timeoutId = null;
+  try {
+    await Promise.race([
+      Promise.resolve().then(() => target.close()),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`${label}.close timeout after ${PLAYWRIGHT_CLOSE_TIMEOUT_MS}ms`));
+        }, PLAYWRIGHT_CLOSE_TIMEOUT_MS);
+      }),
+    ]);
+    return null;
+  } catch (error) {
+    console.warn(
+      `[SessionManager] ${label}.close failed for session ${sessionId}:`,
+      error?.message || String(error)
+    );
+    return error;
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
+async function listProfileBrowserPids(profileDir) {
+  if (!profileDir || !['linux', 'darwin'].includes(process.platform)) {
+    return [];
+  }
+
+  try {
+    const args = process.platform === 'darwin'
+      ? ['-ax', '-o', 'pid=,command=']
+      : ['-eo', 'pid=,args='];
+    const { stdout } = await execFileAsync('ps', args, { maxBuffer: 10 * 1024 * 1024 });
+    const profilePattern = new RegExp(escapeRegExp(profileDir));
+    const browserPattern = /\b(chrome|chromium)\b/i;
+
+    return stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const match = line.match(/^(\d+)\s+(.*)$/);
+        if (!match) return null;
+        return {
+          pid: Number(match[1]),
+          command: match[2],
+        };
+      })
+      .filter((row) => row && Number.isInteger(row.pid) && row.pid > 0)
+      .filter((row) => profilePattern.test(row.command) && browserPattern.test(row.command));
+  } catch (error) {
+    console.warn(
+      `[SessionManager] Failed to inspect browser processes for profile ${profileDir}:`,
+      error?.message || String(error)
+    );
+    return [];
+  }
+}
+
+function killPid(pid, signal) {
+  try {
+    process.kill(pid, signal);
+    return true;
+  } catch (error) {
+    if (error?.code !== 'ESRCH') {
+      console.warn(`[SessionManager] Failed to send ${signal} to pid ${pid}:`, error?.message || String(error));
+    }
+    return false;
+  }
+}
+
+async function forceTerminateProfileBrowsers(sessionId, profileDir) {
+  const initial = await listProfileBrowserPids(profileDir);
+  if (initial.length === 0) {
+    return [];
+  }
+
+  const initialPids = initial.map((row) => row.pid);
+  console.warn(
+    `[SessionManager] Found lingering browser processes for session ${sessionId}: ${initialPids.join(', ')}`
+  );
+
+  initial.forEach((row) => killPid(row.pid, 'SIGTERM'));
+  await sleep(FORCE_KILL_GRACE_MS);
+
+  const remaining = await listProfileBrowserPids(profileDir);
+  remaining.forEach((row) => killPid(row.pid, 'SIGKILL'));
+
+  if (remaining.length > 0) {
+    console.warn(
+      `[SessionManager] Force-killed browser processes for session ${sessionId}: ${remaining.map((row) => row.pid).join(', ')}`
+    );
+  }
+
+  return [...new Set([...initialPids, ...remaining.map((row) => row.pid)])];
+}
+
+async function closeBrowserArtifacts(sessionId, { page = null, context = null, browser = null } = {}) {
+  const profileDir = getSessionProfileDir(sessionId);
+  const closeFailures = [];
+
+  const pageError = await closeWithTimeout(page, 'page', sessionId);
+  if (pageError) closeFailures.push(pageError);
+
+  const contextError = await closeWithTimeout(context, 'context', sessionId);
+  if (contextError) closeFailures.push(contextError);
+
+  const browserError = await closeWithTimeout(browser, 'browser', sessionId);
+  if (browserError) closeFailures.push(browserError);
+
+  const forceKilledPids = await forceTerminateProfileBrowsers(sessionId, profileDir);
+
+  return {
+    closeFailures,
+    forceKilledPids,
+  };
 }
 
 async function summarizeContextCookies(context) {
@@ -421,10 +562,6 @@ function extractCUser(normalized) {
   }
   const match = normalized.cookies.find((cookie) => String(cookie?.name) === 'c_user');
   return match?.value?.toString().trim() || '';
-}
-
-async function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function normalizeText(text) {
@@ -844,15 +981,11 @@ async function closeSessionRuntime(sessionId, { nextStatus = null, suspendedAt =
   clearSessionTimers(session);
 
   try {
-    if (session.page) {
-      await session.page.close().catch(() => {});
-    }
-    if (session.context) {
-      await session.context.close().catch(() => {});
-    }
-    if (session.browser) {
-      await session.browser.close().catch(() => {});
-    }
+    await closeBrowserArtifacts(sessionId, {
+      page: session.page,
+      context: session.context,
+      browser: session.browser,
+    });
   } catch (error) {
     console.warn(`[SessionManager] close runtime failed for session ${sessionId}:`, error?.message || String(error));
   }
@@ -1373,15 +1506,11 @@ async function recreateSessionFromMemory(sessionId) {
     if (session.activityTimer) {
       clearInterval(session.activityTimer);
     }
-    if (session.page) {
-      await session.page.close().catch(() => {});
-    }
-    if (session.context) {
-      await session.context.close().catch(() => {});
-    }
-    if (session.browser) {
-      await session.browser.close().catch(() => {});
-    }
+    await closeBrowserArtifacts(sessionId, {
+      page: session.page,
+      context: session.context,
+      browser: session.browser,
+    });
   } catch {
     // Ignore timer cleanup errors
   }
@@ -1805,9 +1934,7 @@ export async function createSession(
       setProgress(finalCUser, 'create:error', { sessionId, error: error?.message || error?.toString() });
       // Cleanup on error
       if (activityTimer) clearInterval(activityTimer);
-      if (page) await page.close().catch(() => {});
-      if (context) await context.close().catch(() => {});
-      if (browser) await browser.close().catch(() => {});
+      await closeBrowserArtifacts(sessionId, { page, context, browser });
 
       if (error instanceof InvalidInputError || error instanceof AutomationError) {
         throw error;
@@ -2010,9 +2137,7 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
       await releaseBrowserSlot(browserReservationKey);
     }
     if (!persist) {
-      if (page) await page.close().catch(() => {});
-      if (context) await context.close().catch(() => {});
-      if (browser) await browser.close().catch(() => {});
+      await closeBrowserArtifacts(tempSessionId, { page, context, browser });
       await cleanupProfile(tempSessionId);
     }
   }
@@ -2054,8 +2179,7 @@ export async function validateProxy(proxy = null, options = {}) {
     }
     throw new BrowserCrashError(`Validate proxy failed: ${error.message}`);
   } finally {
-    if (context) await context.close().catch(() => {});
-    if (browser) await browser.close().catch(() => {});
+    await closeBrowserArtifacts(tempSessionId, { context, browser });
     if (browserSlotReserved) {
       await releaseBrowserSlot(browserReservationKey);
     }
@@ -2435,16 +2559,11 @@ export async function destroySession(sessionId, options = {}) {
       clearTimeout(session.idleTimer);
     }
 
-    // Close page, context, and browser
-    if (session.page) {
-      await session.page.close().catch(() => {});
-    }
-    if (session.context) {
-      await session.context.close().catch(() => {});
-    }
-    if (session.browser) {
-      await session.browser.close().catch(() => {});
-    }
+    await closeBrowserArtifacts(sessionId, {
+      page: session.page,
+      context: session.context,
+      browser: session.browser,
+    });
   } catch (error) {
     console.warn(`[SessionManager] Error destroying session ${sessionId}:`, error.message);
   } finally {
@@ -2533,17 +2652,24 @@ export async function sendMessageForSession(
 
 export async function checkSessionForSession(
   sessionId,
-  { requestId = null, flowTimeoutMs = null, recoverableRetryAttempts = null, flowMaxAttempts = null } = {}
+  {
+    requestId = null,
+    flowTimeoutMs = null,
+    recoverableRetryAttempts = null,
+    flowMaxAttempts = null,
+    priority = 'normal',
+    browserPoolOptions = {},
+  } = {}
 ) {
   return withSessionLock(sessionId, async () => {
     throwIfSessionRestricted(sessionId, 'check_cached');
-    await ensureSessionActive(sessionId);
+    await ensureSessionActive(sessionId, { browserPoolOptions });
     const effectiveFlowTimeoutMs =
       Number.isFinite(Number(flowTimeoutMs)) && Number(flowTimeoutMs) > 0
         ? Number(flowTimeoutMs)
         : config.flowTimeoutMs;
     const executeCheckFlow = async (label) => {
-      const activeSession = await ensureSessionActive(sessionId);
+      const activeSession = await ensureSessionActive(sessionId, { browserPoolOptions });
       touchSession(sessionId);
       const result = await withTimeout(
         checkSessionFlow(activeSession.page, {
@@ -2575,7 +2701,7 @@ export async function checkSessionForSession(
     });
     settleSessionAfterFlow(sessionId);
     return { ok: true, ...(result || {}) };
-  });
+  }, { priority });
 }
 
 /**

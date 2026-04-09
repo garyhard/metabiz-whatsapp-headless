@@ -174,6 +174,8 @@ async function executeJob(job) {
     case 'check_session': {
       const result = await checkSessionForSession(job.targetSessionId, {
         requestId: job.requestId || null,
+        priority: job.payload?.priority || 'normal',
+        browserPoolOptions: { lane: job.payload?.browserPoolLane || 'default' },
       });
       return {
         ok: true,
@@ -184,6 +186,8 @@ async function executeJob(job) {
     case 'resume_check': {
       const result = await checkSessionForSession(job.targetSessionId, {
         requestId: job.requestId || null,
+        priority: job.payload?.priority || 'normal',
+        browserPoolOptions: { lane: job.payload?.browserPoolLane || 'default' },
       });
       return {
         ok: true,
