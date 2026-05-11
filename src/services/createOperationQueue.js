@@ -53,7 +53,18 @@ function workerStallThresholdMs() {
 function getCreateQueueConcurrency() {
   const configuredConcurrency = Math.max(1, Number(config.createQueue?.concurrency) || 1);
   const configuredBatchSize = Math.max(1, Number(config.createQueue?.batchSize) || 1);
-  return Math.max(configuredConcurrency, configuredBatchSize);
+  const configured = Math.max(configuredConcurrency, configuredBatchSize);
+  const maxConcurrency = Math.max(1, Number(config.createQueue?.maxConcurrency) || 1);
+  return Math.min(configured, maxConcurrency);
+}
+
+function resolveCreateFlowTimeoutMs(requestedTimeoutMs = null) {
+  const configuredTimeoutMs = Math.max(1, Number(config.createQueue?.flowTimeoutMs) || config.flowTimeoutMs);
+  const requested = Number(requestedTimeoutMs);
+  if (!Number.isFinite(requested) || requested <= 0) {
+    return configuredTimeoutMs;
+  }
+  return Math.min(requested, configuredTimeoutMs);
 }
 
 function backoffMs(attempt, baseMs, maxMs) {
@@ -108,6 +119,7 @@ function isRetryableCreateError(errorResult) {
     'captcha_required',
     'account_restricted',
     'session_not_found',
+    'flow_timeout',
   ].includes(code);
 }
 
@@ -136,10 +148,7 @@ function serializeCreateOperation(operation) {
 
 async function executeOperation(operation) {
   const payload = operation.payload || {};
-  const flowTimeoutMs =
-    Number.isFinite(Number(payload.flowTimeoutMs)) && Number(payload.flowTimeoutMs) > 0
-      ? Number(payload.flowTimeoutMs)
-      : null;
+  const flowTimeoutMs = resolveCreateFlowTimeoutMs(payload.flowTimeoutMs);
   const recoverableRetryAttempts =
     Number.isFinite(Number(payload.recoverableRetryAttempts)) && Number(payload.recoverableRetryAttempts) >= 0
       ? Number(payload.recoverableRetryAttempts)
@@ -369,7 +378,10 @@ export function getCreateOperationQueueWorkerStatus(now = Date.now()) {
     activeOperations: activeOperations.size,
     pollIntervalMs: Math.max(1, Number(config.createQueue.pollIntervalMs) || 1),
     batchSize: Math.max(1, Number(config.createQueue.batchSize) || 1),
+    configuredConcurrency: Math.max(1, Number(config.createQueue?.concurrency) || 1),
+    maxConcurrency: Math.max(1, Number(config.createQueue?.maxConcurrency) || 1),
     concurrency: getCreateQueueConcurrency(),
+    flowTimeoutMs: resolveCreateFlowTimeoutMs(),
     oldestActiveAgeMs,
     lastPumpStartedAt,
     lastPumpFinishedAt,
@@ -406,6 +418,10 @@ export function enqueueCreateOperation({
 
 export function getCreateOperation(operationId) {
   return sessionStore.getCreateOperation(String(operationId || ''));
+}
+
+export function getCreateOperationByRequestId(requestId) {
+  return sessionStore.getCreateOperationByRequestId(String(requestId || ''));
 }
 
 export function serializeCreateOperationResponse(operation) {

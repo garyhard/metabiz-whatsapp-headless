@@ -347,7 +347,8 @@ function exportDbBuffer() {
 }
 
 function getTempDbPath() {
-  return `${DB_PATH}.tmp`;
+  const suffix = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return `${DB_PATH}.${suffix}.tmp`;
 }
 
 function fsyncParentDirSync(filePath) {

@@ -8,6 +8,8 @@ import { normalizeRequestId } from '../services/automation.js';
 import {
   enqueueCreateOperation,
   getCreateOperation,
+  getCreateOperationByRequestId,
+  getCreateOperationQueueWorkerStatus,
   serializeCreateOperationResponse,
 } from '../services/createOperationQueue.js';
 import { InvalidInputError } from '../errors.js';
@@ -73,6 +75,27 @@ router.post('/', async (req, res, next) => {
     }
 
     const normalizedRequestId = normalizeRequestId('create-operation', requestId);
+    const existingOperation = normalizedRequestId ? getCreateOperationByRequestId(normalizedRequestId) : null;
+    if (existingOperation) {
+      return res.status(202).json({
+        ok: true,
+        accepted: true,
+        created: false,
+        operation: serializeCreateOperationResponse(existingOperation),
+      });
+    }
+
+    const queueStatus = getCreateOperationQueueWorkerStatus(Date.now());
+    if (queueStatus.stalled) {
+      return res.status(503).json({
+        ok: false,
+        accepted: false,
+        error: 'Meta create queue is temporarily overloaded. Please retry after current create operations finish.',
+        errorCode: 'create_queue_stalled',
+        queue: queueStatus,
+      });
+    }
+
     const { operation, created } = enqueueCreateOperation({
       requestId: normalizedRequestId,
       cUser,
