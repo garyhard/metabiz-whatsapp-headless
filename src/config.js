@@ -34,6 +34,14 @@ function parseConcurrency(value, fallback) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
+function capConcurrency(configured, hardLimit) {
+  const safeConfigured = Number(configured);
+  const safeHardLimit = Number(hardLimit);
+  if (!Number.isFinite(safeHardLimit) || safeHardLimit <= 0) return safeConfigured;
+  if (!Number.isFinite(safeConfigured) || safeConfigured <= 0) return safeHardLimit;
+  return Math.min(safeConfigured, safeHardLimit);
+}
+
 function parseBoolean(value, fallback = false) {
   if (value == null) return fallback;
   const normalized = String(value).trim().toLowerCase();
@@ -72,7 +80,10 @@ export const config = {
   flowTimeoutMs: Number.isFinite(FLOW_TIMEOUT_MS) && FLOW_TIMEOUT_MS > 0 ? FLOW_TIMEOUT_MS : 60000,
   flowRecoverableRetryAttempts: parseNonNegativeInt(process.env.FLOW_RECOVERABLE_RETRY_ATTEMPTS, 2),
   flowRecoverableRetryDelayMs: parsePositiveInt(process.env.FLOW_RECOVERABLE_RETRY_DELAY_MS, 1500),
-  maxActiveBrowsers: parseNonNegativeInt(process.env.MAX_ACTIVE_BROWSERS, 0),
+  maxActiveBrowsers: capConcurrency(
+    parseNonNegativeInt(process.env.MAX_ACTIVE_BROWSERS, 0),
+    parseNonNegativeInt(process.env.MAX_ACTIVE_BROWSERS_HARD_LIMIT, 12)
+  ),
   browserPoolWaitMs: Number.isFinite(BROWSER_POOL_WAIT_MS) && BROWSER_POOL_WAIT_MS >= 0
     ? BROWSER_POOL_WAIT_MS
     : 30000,
@@ -86,6 +97,8 @@ export const config = {
     ? SEND_RELOAD_IDLE_MINUTES * 60 * 1000
     : 0,
   sendConcurrency: parseConcurrency(process.env.SEND_CONCURRENCY, 1),
+  sendConcurrencyConfigured: parseConcurrency(process.env.SEND_CONCURRENCY, 1),
+  sendConcurrencyMax: parsePositiveInt(process.env.SEND_CONCURRENCY_MAX, 12),
   sessionLockWaitTimeoutMs: parseNonNegativeInt(process.env.SESSION_LOCK_WAIT_TIMEOUT_MS, 90000),
   storePersistDebounceMs: parseNonNegativeInt(process.env.SESSION_STORE_PERSIST_DEBOUNCE_MS, 50),
   priorityHighStreakLimit: parsePositiveInt(process.env.MESSAGE_PRIORITY_HIGH_STREAK_LIMIT, 3),

@@ -62,6 +62,15 @@ function blockWebhookDelivery(untilMs, reason, now = Date.now()) {
 
 function workerConcurrencyLimit() {
   const configured = Number(config.sendConcurrency);
+  const maxConcurrency = Math.max(1, Number(config.sendConcurrencyMax) || 1);
+  if (!Number.isFinite(configured) || configured <= 0) {
+    return maxConcurrency;
+  }
+  return Math.max(1, Math.min(configured, maxConcurrency));
+}
+
+function configuredWorkerConcurrencyLimit() {
+  const configured = Number(config.sendConcurrencyConfigured ?? config.sendConcurrency);
   if (!Number.isFinite(configured) || configured <= 0) {
     return Number.POSITIVE_INFINITY;
   }
@@ -698,6 +707,7 @@ export function stopMessageQueueWorker() {
 
 export function getMessageQueueWorkerStatus(now = Date.now()) {
   const concurrencyLimit = workerConcurrencyLimit();
+  const configuredConcurrencyLimit = configuredWorkerConcurrencyLimit();
   let oldestActiveJobAgeMs = null;
   for (const meta of activeJobs.values()) {
     const ageMs = meta?.startedAt ? Math.max(0, now - meta.startedAt) : null;
@@ -721,6 +731,8 @@ export function getMessageQueueWorkerStatus(now = Date.now()) {
     prewarmingSessions: warmingSessions.size,
     prewarmingSessionIds: Array.from(warmingSessions.values()),
     oldestActiveJobAgeMs,
+    configuredConcurrencyLimit: Number.isFinite(configuredConcurrencyLimit) ? configuredConcurrencyLimit : null,
+    maxConcurrencyLimit: Math.max(1, Number(config.sendConcurrencyMax) || 1),
     concurrencyLimit: Number.isFinite(concurrencyLimit) ? concurrencyLimit : null,
     pollIntervalMs: Math.max(1, Number(config.queue.pollIntervalMs) || 1),
     batchSize: Math.max(1, Number(config.queue.batchSize) || 1),
