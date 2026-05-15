@@ -26,6 +26,12 @@ const SAVE_LOGIN_INFO_HINTS = normalizeList([
 ]);
 const NOT_NOW_LABELS = normalizeList(['not now', 'nanti', 'tidak sekarang', 'jangan sekarang', 'skip', 'lewati']);
 const INBOX_DISMISS_LABELS = normalizeList(['dismiss', 'tutup', 'close', 'abaikan']);
+const AUTOMATED_BEHAVIOR_NOTICE_HINTS = normalizeList([
+  'we suspect automated behavior on your account',
+  'to prevent your account from being temporarily restricted or permanently disabled',
+  'make sure that no other users or tools have access to your account',
+]);
+const AUTOMATED_BEHAVIOR_DISMISS_LABELS = normalizeList(['dismiss']);
 const CONNECT_INSTAGRAM_HINTS = normalizeList(['connect to instagram', 'hubungkan ke instagram']);
 const TWO_FACTOR_TEXT_HINTS = normalizeList([
   'try another way',
@@ -269,6 +275,29 @@ async function dismissSaveLoginInfo(page, label = 'Automation') {
     }
   } catch {
     // ignore dismissal errors
+  }
+  return false;
+}
+
+export async function dismissAutomatedBehaviorNotice(page, label = 'Automation') {
+  try {
+    const bodyText = normalizeText(await page.evaluate(() => document.body?.innerText || ''));
+    if (!AUTOMATED_BEHAVIOR_NOTICE_HINTS.some((hint) => bodyText.includes(hint))) {
+      return false;
+    }
+
+    const clicked = await clickFirstMatchingText(page, AUTOMATED_BEHAVIOR_DISMISS_LABELS, {
+      selector: '[role="button"],button,a,[role="link"]',
+    });
+    if (!clicked) {
+      return false;
+    }
+
+    await sleep(500);
+    console.log(`[${label}] Dismissed automated behavior notice`);
+    return true;
+  } catch {
+    // Ignore prompt dismissal failures
   }
   return false;
 }
@@ -2310,6 +2339,9 @@ async function detectAccountRestricted(page, label = 'Automation', cUser = 'unkn
 }
 
 async function ensureOnInbox(page, label = 'Automation', { twofaSecret = null, cUser = 'unknown' } = {}) {
+  await dismissSaveLoginInfo(page, label);
+  await dismissAutomatedBehaviorNotice(page, label);
+
   let url = page.url();
   if (isBadAuthUrl(url)) {
     const resolved = await resolveTwoFactorChallenge(page, { twofaSecret, label, cUser });
@@ -2341,11 +2373,18 @@ async function ensureOnInbox(page, label = 'Automation', { twofaSecret = null, c
       }
       nextUrl = page.url();
     }
+    const dismissedAutomatedBehavior = await dismissAutomatedBehaviorNotice(page, label);
+    if (dismissedAutomatedBehavior && !nextUrl.includes('business.facebook.com')) {
+      await page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
+      await sleep(800);
+      nextUrl = page.url();
+    }
     if (!nextUrl.includes('business.facebook.com') || (!nextUrl.includes('inbox') && !nextUrl.includes('messages'))) {
       throw new AutomationError(`${label}: Unexpected URL after reload: ${nextUrl}`, { url: nextUrl });
     }
   }
   await dismissSaveLoginInfo(page, label);
+  await dismissAutomatedBehaviorNotice(page, label);
   await dismissInboxBlockingPrompts(page, label);
   await detectAccountRestricted(page, label, cUser);
   const needNewCookiesDetails = await getNeedNewCookiesDetailsIfPresent(page, label, { cUser });

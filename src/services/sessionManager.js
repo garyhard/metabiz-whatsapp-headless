@@ -5,7 +5,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { createBrowser } from './browserFactory.js';
 import { normalizeCookiesInput, parseCookieString, toPlaywrightCookies, toPlaywrightCookiesFromJson } from '../utils/cookies.js';
-import { sendMessage, checkSessionFlow, captureDebugScreenshot, detectNeedNewCookiesPage, resolveTwoFactorIfNeeded } from './automation.js';
+import { sendMessage, checkSessionFlow, captureDebugScreenshot, detectNeedNewCookiesPage, dismissAutomatedBehaviorNotice, resolveTwoFactorIfNeeded } from './automation.js';
 import { SessionNotFoundError, InvalidInputError, BrowserCrashError, FlowTimeoutError, AutomationError } from '../errors.js';
 import { config } from '../config.js';
 import { sessionStore } from './sessionStore.js';
@@ -1777,6 +1777,7 @@ export async function createSession(
       let authCheck = null;
       for (let attempt = 1; attempt <= 3; attempt += 1) {
         await dismissSaveLoginInfo(page);
+        await dismissAutomatedBehaviorNotice(page, 'CreateSession');
         try {
           await resolveTwoFactorIfNeeded(page, {
             twofaSecret: normalizedTwofaSecret,
@@ -1798,6 +1799,7 @@ export async function createSession(
             await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
             await page.waitForTimeout(1500);
             await dismissSaveLoginInfo(page);
+            await dismissAutomatedBehaviorNotice(page, 'CreateSession');
           } catch (error) {
             console.warn(`[SessionManager] Auth retry reload failed: ${error.message}`);
           }
@@ -2041,6 +2043,7 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
     );
     await page.waitForTimeout(1500);
     await dismissSaveLoginInfo(page);
+    await dismissAutomatedBehaviorNotice(page, 'ValidateCookies');
     try {
       await resolveTwoFactorIfNeeded(page, {
         twofaSecret: normalizedTwofaSecret,
