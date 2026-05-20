@@ -1458,8 +1458,10 @@ function isAuthRelatedError(error) {
   return (
     type === 'account_restricted' ||
     type === 'need_new_cookies' ||
+    type === 'captcha_required' ||
     message.includes('redirected to auth') ||
     message.includes('checkpoint') ||
+    message.includes('captcha') ||
     message.includes('login') ||
     message.includes('twofactor') ||
     message.includes('account restricted') ||
@@ -1893,6 +1895,61 @@ async function getNeedNewCookiesDetailsIfPresent(page, label = 'Automation', ext
     return null;
   }
   return collectNeedNewCookiesDetails(page, label, extraDetails);
+}
+
+async function getAuthBlockDetailsIfPresent(page, label = 'Automation', { cUser = 'unknown', stage = null } = {}) {
+  const needNewCookiesDetails = await getNeedNewCookiesDetailsIfPresent(page, label, { cUser, stage });
+  if (needNewCookiesDetails) {
+    return needNewCookiesDetails;
+  }
+
+  if (await detectCaptchaCheckpoint(page)) {
+    const details = await collectCaptchaCheckpointDetails(page, label, cUser);
+    return {
+      ...(details || {}),
+      type: 'captcha_required',
+      reason: 'captcha_checkpoint',
+      stage,
+      cUser,
+    };
+  }
+
+  const url = page.url();
+  const badAuthUrl = isBadAuthUrl(url);
+  let hasLoginForm = false;
+  try {
+    hasLoginForm = await page.evaluate(() => (
+      !!document.querySelector('input[name="email"], input#email, input[name="pass"], #pass') ||
+      !!document.querySelector('[data-testid="royal_login_form"], form[action*="login"]')
+    ));
+  } catch {
+    hasLoginForm = false;
+  }
+
+  if (!badAuthUrl && !hasLoginForm) {
+    return null;
+  }
+
+  const debug = await captureDebugScreenshot(page, 'auth-blocked', cUser).catch(() => null);
+  return {
+    type: 'need_new_cookies',
+    reason: badAuthUrl ? 'auth_url' : 'login_form',
+    stage,
+    url,
+    screenshotPath: debug?.path || null,
+    debugPath: debug?.path || null,
+    cUser,
+  };
+}
+
+async function throwIfAuthBlocked(page, label = 'Automation', { cUser = 'unknown', stage = null } = {}) {
+  const details = await getAuthBlockDetailsIfPresent(page, label, { cUser, stage });
+  if (!details) {
+    return;
+  }
+  const type = String(details.type || '').toLowerCase();
+  const reason = String(details.reason || type || 'auth_blocked');
+  throw new AutomationError(`${label}: Auth blocked (${reason})`, details);
 }
 
 async function findCaptchaInput(page) {
@@ -3801,15 +3858,30 @@ export async function checkSessionFlow(
   const refreshForCheck = async (label) => {
     console.log(`[Automation] Refreshing page for check${label ? ` (${label})` : ''}...`);
     try {
+      await throwIfAuthBlocked(page, 'Check', {
+        cUser,
+        stage: 'check_session.before_reload',
+      });
       await page.reload({ waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
       await sleep(1500);
+      await throwIfAuthBlocked(page, 'Check', {
+        cUser,
+        stage: 'check_session.after_reload',
+      });
       await ensureInboxReady(page, 'Check', { twofaSecret });
       console.log('[Automation] ✓ Page refreshed');
       logStep('check:refresh_ok', { label });
     } catch (error) {
+      if (isAuthRelatedError(error)) {
+        throw error;
+      }
       console.warn(`[Automation] Refresh failed: ${error.message}. Retrying...`);
       await page.reload({ waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
       await sleep(1500);
+      await throwIfAuthBlocked(page, 'Check', {
+        cUser,
+        stage: 'check_session.after_reload_retry',
+      });
       await ensureInboxReady(page, 'Check', { twofaSecret });
       console.log('[Automation] ✓ Page refreshed (retry)');
       logStep('check:refresh_retry_ok', { label });
@@ -3817,6 +3889,10 @@ export async function checkSessionFlow(
   };
 
   const runCheck = async () => {
+    await throwIfAuthBlocked(page, 'Check', {
+      cUser,
+      stage: 'check_session.before_indicators',
+    });
     const inboxReady = await waitFor(
       page,
       async () => {

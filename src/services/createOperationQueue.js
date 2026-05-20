@@ -360,6 +360,7 @@ export function startCreateOperationQueueWorker() {
   if (workerStarted) return;
   workerStarted = true;
   stopRequested = false;
+  sessionStore.requeueStaleProcessingCreateOperations(0);
   console.log('[CreateOperationQueue] worker started');
   schedulePump(0);
 }

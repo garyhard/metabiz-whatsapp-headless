@@ -124,6 +124,23 @@ function prewarmDuringCreate() {
   return config.queue.prewarmDuringCreate === true;
 }
 
+function messageJobNeedsBrowser(sessionId) {
+  const session = getSessionInfo(sessionId);
+  return !session?.liveBrowser;
+}
+
+function sendColdBrowserSlotsRemaining() {
+  const browserPool = getBrowserPoolStatus();
+  if (browserPool.availableSlots == null) {
+    return null;
+  }
+
+  const remaining = Number(browserPool.availableSlots || 0)
+    - countActiveSessionsAwaitingBrowser()
+    - createReservedBrowserSlots();
+  return Math.max(0, remaining);
+}
+
 function pruneStaleActiveJobs(now = Date.now()) {
   const thresholdMs = workerStallThresholdMs();
   for (const [task, meta] of activeJobs.entries()) {
@@ -623,7 +640,7 @@ function prewarmQueuedSessions() {
 
   const browserPool = getBrowserPoolStatus();
   const activeBrowserDemand = countActiveSessionsAwaitingBrowser();
-  const reservedForCreate = demand.active ? createReservedBrowserSlots() : 0;
+  const reservedForCreate = createReservedBrowserSlots();
   const availableSlots = browserPool.availableSlots == null
     ? null
     : Math.max(0, Number(browserPool.availableSlots || 0) - activeBrowserDemand - reservedForCreate);
@@ -678,6 +695,7 @@ export async function pumpQueue() {
     const jobs = [];
     const preferredSessionIds = buildPreferredClaimSessionIds(Date.now(), claimLimit);
     let preferredSessionIndex = 0;
+    let coldBrowserSlotsRemaining = sendColdBrowserSlotsRemaining();
 
     while (!stopRequested && jobs.length < claimLimit) {
       const now = Date.now();
@@ -689,8 +707,11 @@ export async function pumpQueue() {
         job = sessionStore.claimNextMessageJob(now, preferredSessionId, true);
       }
 
-      if (!job) {
+      if (!job && (coldBrowserSlotsRemaining == null || coldBrowserSlotsRemaining > 0)) {
         job = sessionStore.claimNextMessageJob(now);
+        if (job && messageJobNeedsBrowser(job.sessionId) && coldBrowserSlotsRemaining != null) {
+          coldBrowserSlotsRemaining = Math.max(0, coldBrowserSlotsRemaining - 1);
+        }
       }
 
       if (!job) {
@@ -739,6 +760,7 @@ export function startMessageQueueWorker() {
   webhookBlockedUntil = 0;
   lastWebhookFailureAt = null;
   lastWebhookFailureReason = null;
+  sessionStore.requeueStaleProcessingMessageJobs(0);
   console.log('[MessageQueue] worker started');
   schedulePump(0);
 }
@@ -755,7 +777,7 @@ export function getMessageQueueWorkerStatus(now = Date.now()) {
   const configuredConcurrencyLimit = configuredWorkerConcurrencyLimit();
   const demand = createDemand(now);
   const createActive = demand.active;
-  const createReservedSlots = createActive ? createReservedBrowserSlots() : 0;
+  const createReservedSlots = createReservedBrowserSlots();
   let oldestActiveJobAgeMs = null;
   for (const meta of activeJobs.values()) {
     const ageMs = meta?.startedAt ? Math.max(0, now - meta.startedAt) : null;
