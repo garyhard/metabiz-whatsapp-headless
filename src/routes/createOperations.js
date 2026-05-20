@@ -3,6 +3,7 @@
  */
 
 import express from 'express';
+import { config } from '../config.js';
 import { normalizeCookiesInput } from '../utils/cookies.js';
 import { normalizeRequestId } from '../services/automation.js';
 import {
@@ -86,7 +87,7 @@ router.post('/', async (req, res, next) => {
     }
 
     const queueStatus = getCreateOperationQueueWorkerStatus(Date.now());
-    if (queueStatus.stalled) {
+    if (queueStatus.stalled && config.createQueue.rejectWhenStalled) {
       return res.status(503).json({
         ok: false,
         accepted: false,
@@ -115,6 +116,13 @@ router.post('/', async (req, res, next) => {
       accepted: true,
       created,
       operation: serializeCreateOperationResponse(operation),
+      queue: queueStatus.stalled
+        ? {
+          acceptedWhileDegraded: true,
+          warning: 'Create queue is degraded, but the operation was accepted and will remain queued.',
+          status: queueStatus,
+        }
+        : undefined,
     });
   } catch (error) {
     if (error instanceof InvalidInputError) {

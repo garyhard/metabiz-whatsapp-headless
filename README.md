@@ -80,8 +80,15 @@ PROXY_PASSWORD=your-proxy-password
 - `DEV_MODE` (optional): Set to `true` to preserve sessions across server restarts (default: `false`)
 - `HEADLESS` (optional): Set to `false` to run browser in visible mode for debugging (default: `true`)
 - `IDLE_TIMEOUT_MINUTES` (optional): Suspend browser session yang idle setelah N menit. Session tetap tersimpan di store dan akan dihidupkan lagi saat dipakai (default config: `0`, contoh env production saat ini: `120`)
-- `MAX_ACTIVE_BROWSERS` (optional): Batas jumlah browser live sekaligus. `0` berarti unlimited. Saat limit penuh, service akan suspend session aktif yang paling lama idle sebelum membuka browser baru (default: `0`)
+- `MAX_ACTIVE_BROWSERS` (optional): Batas jumlah browser live sekaligus. `0` berarti pakai hard limit. Saat limit penuh, service akan suspend session aktif yang paling lama idle sebelum membuka browser baru (default hard limit: `24`)
 - `BROWSER_POOL_WAIT_MS` (optional): Waktu tunggu maksimum saat limit browser aktif penuh dan belum ada session idle yang bisa dievict (default: `30000`)
+- `META_CREATE_QUEUE_BATCH_SIZE` (optional): Jumlah create Meta yang bisa di-claim per pump (default: `6`)
+- `META_CREATE_QUEUE_CONCURRENCY` (optional): Jumlah create Meta paralel yang ditargetkan worker (default: `3`)
+- `META_CREATE_QUEUE_MAX_CONCURRENCY` (optional): Batas atas paralel create Meta walaupun batch/concurrency dinaikkan (default: `6`)
+- `META_CREATE_QUEUE_PROCESSING_TIMEOUT_MS` (optional): Batas umur create operation sebelum dianggap stale/stalled (default: `900000`)
+- `META_CREATE_BROWSER_EXTRA_CAPACITY` (optional): Slot browser tambahan khusus lane create di atas limit normal (default: `4`)
+- `META_CREATE_BROWSER_POOL_WAIT_MS` (optional): Waktu tunggu lane create saat pool browser penuh (default: `60000`)
+- `META_CREATE_QUEUE_REJECT_WHEN_STALLED` (optional): Set `true` untuk mengembalikan HTTP 503 saat create queue stalled. Default `false`, jadi request create tetap diterima dan masuk antrian.
 - `PROXY_SERVER` (optional): Proxy server URL. Formats:
   - `http://proxy.example.com:8080` - HTTP proxy (most common)
   - `https://proxy.example.com:8080` - HTTP proxy with TLS encryption

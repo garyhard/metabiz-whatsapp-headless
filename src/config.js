@@ -82,7 +82,7 @@ export const config = {
   flowRecoverableRetryDelayMs: parsePositiveInt(process.env.FLOW_RECOVERABLE_RETRY_DELAY_MS, 1500),
   maxActiveBrowsers: capConcurrency(
     parseNonNegativeInt(process.env.MAX_ACTIVE_BROWSERS, 0),
-    parseNonNegativeInt(process.env.MAX_ACTIVE_BROWSERS_HARD_LIMIT, 12)
+    parseNonNegativeInt(process.env.MAX_ACTIVE_BROWSERS_HARD_LIMIT, 24)
   ),
   browserPoolWaitMs: Number.isFinite(BROWSER_POOL_WAIT_MS) && BROWSER_POOL_WAIT_MS >= 0
     ? BROWSER_POOL_WAIT_MS
@@ -133,16 +133,17 @@ export const config = {
   },
   createQueue: {
     pollIntervalMs: parsePositiveInt(process.env.META_CREATE_QUEUE_POLL_INTERVAL_MS, 1500),
-    batchSize: parsePositiveInt(process.env.META_CREATE_QUEUE_BATCH_SIZE, 1),
-    concurrency: parsePositiveInt(process.env.META_CREATE_QUEUE_CONCURRENCY, 1),
-    maxConcurrency: parsePositiveInt(process.env.META_CREATE_QUEUE_MAX_CONCURRENCY, 2),
+    batchSize: parsePositiveInt(process.env.META_CREATE_QUEUE_BATCH_SIZE, 6),
+    concurrency: parsePositiveInt(process.env.META_CREATE_QUEUE_CONCURRENCY, 3),
+    maxConcurrency: parsePositiveInt(process.env.META_CREATE_QUEUE_MAX_CONCURRENCY, 6),
     maxAttempts: parsePositiveInt(process.env.META_CREATE_QUEUE_MAX_ATTEMPTS, 1),
     retryBaseMs: parsePositiveInt(process.env.META_CREATE_QUEUE_RETRY_BASE_MS, 30000),
     retryMaxMs: parsePositiveInt(process.env.META_CREATE_QUEUE_RETRY_MAX_MS, 300000),
-    flowTimeoutMs: parsePositiveInt(process.env.META_CREATE_FLOW_TIMEOUT_MS, 180000),
-    processingTimeoutMs: parsePositiveInt(process.env.META_CREATE_QUEUE_PROCESSING_TIMEOUT_MS, 240000),
-    browserExtraCapacity: parseNonNegativeInt(process.env.META_CREATE_BROWSER_EXTRA_CAPACITY, 1),
-    browserPoolWaitMs: parseNonNegativeInt(process.env.META_CREATE_BROWSER_POOL_WAIT_MS, 15000),
+    flowTimeoutMs: parsePositiveInt(process.env.META_CREATE_FLOW_TIMEOUT_MS, 300000),
+    processingTimeoutMs: parsePositiveInt(process.env.META_CREATE_QUEUE_PROCESSING_TIMEOUT_MS, 900000),
+    browserExtraCapacity: parseNonNegativeInt(process.env.META_CREATE_BROWSER_EXTRA_CAPACITY, 4),
+    browserPoolWaitMs: parseNonNegativeInt(process.env.META_CREATE_BROWSER_POOL_WAIT_MS, 60000),
+    rejectWhenStalled: parseBoolean(process.env.META_CREATE_QUEUE_REJECT_WHEN_STALLED, false),
   },
   proxy: defaultProxy,
   texts: {
