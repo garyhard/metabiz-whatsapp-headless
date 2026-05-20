@@ -139,10 +139,11 @@ export const config = {
     batchSize: parsePositiveInt(process.env.META_CREATE_QUEUE_BATCH_SIZE, 6),
     concurrency: parsePositiveInt(process.env.META_CREATE_QUEUE_CONCURRENCY, 3),
     maxConcurrency: parsePositiveInt(process.env.META_CREATE_QUEUE_MAX_CONCURRENCY, 6),
-    maxAttempts: parsePositiveInt(process.env.META_CREATE_QUEUE_MAX_ATTEMPTS, 1),
-    retryBaseMs: parsePositiveInt(process.env.META_CREATE_QUEUE_RETRY_BASE_MS, 30000),
-    retryMaxMs: parsePositiveInt(process.env.META_CREATE_QUEUE_RETRY_MAX_MS, 300000),
+    maxAttempts: parsePositiveInt(process.env.META_CREATE_QUEUE_MAX_ATTEMPTS, 5),
+    retryBaseMs: parsePositiveInt(process.env.META_CREATE_QUEUE_RETRY_BASE_MS, 5000),
+    retryMaxMs: parsePositiveInt(process.env.META_CREATE_QUEUE_RETRY_MAX_MS, 30000),
     flowTimeoutMs: parsePositiveInt(process.env.META_CREATE_FLOW_TIMEOUT_MS, 300000),
+    validateTimeoutMs: parsePositiveInt(process.env.META_CREATE_VALIDATE_TIMEOUT_MS, 90000),
     processingTimeoutMs: parsePositiveInt(process.env.META_CREATE_QUEUE_PROCESSING_TIMEOUT_MS, 900000),
     browserExtraCapacity: parseNonNegativeInt(process.env.META_CREATE_BROWSER_EXTRA_CAPACITY, 4),
     browserPoolWaitMs: parseNonNegativeInt(process.env.META_CREATE_BROWSER_POOL_WAIT_MS, 60000),
@@ -168,6 +169,8 @@ export const config = {
   browser: {
     // Allow non-headless mode for debugging (set HEADLESS=false in .env)
     headless: process.env.HEADLESS !== 'false',
+    launchTimeoutMs: parsePositiveInt(process.env.BROWSER_LAUNCH_TIMEOUT_MS, 60000),
+    newPageTimeoutMs: parsePositiveInt(process.env.BROWSER_NEW_PAGE_TIMEOUT_MS, 30000),
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',

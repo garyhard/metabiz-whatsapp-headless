@@ -72,6 +72,25 @@ function getCreateQueueConcurrency() {
   return Math.min(configured, maxConcurrency);
 }
 
+
+function resolveCreateValidateTimeoutMs() {
+  return Math.max(1, Number(config.createQueue?.validateTimeoutMs) || 90000);
+}
+
+function withCreateOperationTimeout(promise, timeoutMs, label) {
+  if (!timeoutMs || timeoutMs <= 0) return promise;
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new FlowTimeoutError(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    timeout,
+  ]);
+}
+
 function resolveCreateFlowTimeoutMs(requestedTimeoutMs = null) {
   const configuredTimeoutMs = Math.max(1, Number(config.createQueue?.flowTimeoutMs) || config.flowTimeoutMs);
   const requested = Number(requestedTimeoutMs);
@@ -176,15 +195,22 @@ async function executeOperation(operation) {
       await validateProxy(payload.proxy, { browserPoolLane: 'create' });
     }
 
-    sessionStore.markCreateOperationProgress(operation.id, 'create.validate_cookies', 'Validating cookies.');
-    const validationResult = await validateCookies(payload.cookies, payload.proxy || null, {
-      persist: true,
-      freshBrowser: true,
-      twofaSecret: payload.twofaSecret || null,
-      skipProxyValidation: payload.proxy && payload.validateProxyFirst !== false,
-      navigationRetries: 0,
-      browserPoolLane: 'create',
+    const validateTimeoutMs = resolveCreateValidateTimeoutMs();
+    sessionStore.markCreateOperationProgress(operation.id, 'create.validate_cookies', 'Validating cookies.', {
+      validateTimeoutMs,
     });
+    const validationResult = await withCreateOperationTimeout(
+      validateCookies(payload.cookies, payload.proxy || null, {
+        persist: true,
+        freshBrowser: true,
+        twofaSecret: payload.twofaSecret || null,
+        skipProxyValidation: payload.proxy && payload.validateProxyFirst !== false,
+        navigationRetries: 0,
+        browserPoolLane: 'create',
+      }),
+      validateTimeoutMs,
+      'Validate cookies'
+    );
     partialResult.validation = validationResult;
     createdSessionId = validationResult?.sessionId ? String(validationResult.sessionId) : null;
 
@@ -254,7 +280,7 @@ async function processOperation(operation) {
     const partialResult = error?.partialResult || null;
     const errorResult = buildErrorResult(error, partialResult);
     const message = errorResult.error;
-    const maxAttempts = Math.max(1, Number(operation.maxAttempts) || config.createQueue.maxAttempts);
+    const maxAttempts = Math.max(1, Number(operation.maxAttempts) || 0, Number(config.createQueue.maxAttempts) || 1);
     const attempts = Math.max(1, Number(operation.attempts) || 1);
     const retryable = isRetryableCreateError(errorResult);
 
@@ -399,6 +425,7 @@ export function getCreateOperationQueueWorkerStatus(now = Date.now()) {
     maxConcurrency: Math.max(1, Number(config.createQueue?.maxConcurrency) || 1),
     concurrency: getCreateQueueConcurrency(),
     flowTimeoutMs: resolveCreateFlowTimeoutMs(),
+    validateTimeoutMs: resolveCreateValidateTimeoutMs(),
     oldestActiveAgeMs,
     lastPumpStartedAt,
     lastPumpFinishedAt,

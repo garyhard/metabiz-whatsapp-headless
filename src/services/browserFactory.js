@@ -11,6 +11,33 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+
+function elapsedMs(startedAt) {
+  return Date.now() - startedAt;
+}
+
+function stageTimeout(promise, ms, stage, sessionId, context = null) {
+  if (!ms || ms <= 0) return promise;
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(`Browser ${stage} timed out after ${ms}ms`);
+      error.stage = stage;
+      error.sessionId = sessionId;
+      reject(error);
+    }, ms);
+  });
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    timeout,
+  ]).catch(async (error) => {
+    if (context) {
+      await context.close().catch(() => {});
+    }
+    throw error;
+  });
+}
+
 /**
  * Create a browser instance with unique fingerprint and persistent context
  * @param {string} sessionId - Unique session identifier
@@ -19,6 +46,7 @@ const __dirname = path.dirname(__filename);
  * @returns {Promise<{browser: Browser, context: BrowserContext, page: Page, fingerprint: Object}>}
  */
 export async function createBrowser(sessionId, existingFingerprint = null, proxy = null) {
+  const startedAt = Date.now();
   const fingerprint = existingFingerprint || generateFingerprint();
   const userDataDir = path.join(__dirname, '../../profiles', `session-${sessionId}`);
 
@@ -60,16 +88,31 @@ export async function createBrowser(sessionId, existingFingerprint = null, proxy
   }
 
   // Create persistent context with fingerprint
-  const context = await chromium.launchPersistentContext(userDataDir, {
-    headless: config.browser.headless,
-    args: launchArgs,
-    ignoreHTTPSErrors: true,
-    ...contextOptions,
-  });
+  console.log(`[BrowserFactory] launchPersistentContext:start session=${sessionId} timeout_ms=${config.browser.launchTimeoutMs}`);
+  let context = null;
+  try {
+    context = await stageTimeout(
+      chromium.launchPersistentContext(userDataDir, {
+        headless: config.browser.headless,
+        args: launchArgs,
+        ignoreHTTPSErrors: true,
+        timeout: config.browser.launchTimeoutMs,
+        ...contextOptions,
+      }),
+      config.browser.launchTimeoutMs + 5000,
+      'launchPersistentContext',
+      sessionId
+    );
+    console.log(`[BrowserFactory] launchPersistentContext:ready session=${sessionId} elapsed_ms=${elapsedMs(startedAt)}`);
+  } catch (error) {
+    console.error(`[BrowserFactory] launchPersistentContext:error session=${sessionId} elapsed_ms=${elapsedMs(startedAt)} error=${error?.message || String(error)}`);
+    throw error;
+  }
   const browser = context.browser();
 
   // Override navigator and other properties to create unique fingerprint
-  await context.addInitScript((fingerprint) => {
+  console.log(`[BrowserFactory] addInitScript:start session=${sessionId}`);
+  await stageTimeout(context.addInitScript((fingerprint) => {
     // Override navigator properties
     Object.defineProperty(navigator, 'platform', {
       get: () => fingerprint.platform,
@@ -146,10 +189,20 @@ export async function createBrowser(sessionId, existingFingerprint = null, proxy
       csi: function () {},
       app: {},
     };
-  }, fingerprint);
+  }, fingerprint), 10000, 'addInitScript', sessionId, context);
+  console.log(`[BrowserFactory] addInitScript:ready session=${sessionId} elapsed_ms=${elapsedMs(startedAt)}`);
 
   // Create a new page
-  const page = await context.newPage();
+  console.log(`[BrowserFactory] newPage:start session=${sessionId} timeout_ms=${config.browser.newPageTimeoutMs}`);
+  const page = await stageTimeout(
+    context.newPage(),
+    config.browser.newPageTimeoutMs,
+    'newPage',
+    sessionId,
+    context
+  );
+  console.log(`[BrowserFactory] newPage:ready session=${sessionId} elapsed_ms=${elapsedMs(startedAt)}`);
+  console.log(`[BrowserFactory] createBrowser:ready session=${sessionId} elapsed_ms=${elapsedMs(startedAt)}`);
 
   return {
     browser,

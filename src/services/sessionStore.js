@@ -2048,18 +2048,23 @@ export const sessionStore = {
 
   requeueStaleProcessingCreateOperations(timeoutMs = 900000) {
     const now = Date.now();
-    const threshold = now - Math.max(1000, Number(timeoutMs) || 900000);
+    const parsedTimeout = Number(timeoutMs);
+    const effectiveTimeoutMs = Number.isFinite(parsedTimeout)
+      ? Math.max(0, parsedTimeout)
+      : 900000;
+    const threshold = now - effectiveTimeoutMs;
     runStatement(`
       UPDATE create_operations
       SET status = 'queued',
           next_retry_at = :now,
           updated_at = :now
-      WHERE status = 'processing' AND updated_at < :threshold
+      WHERE status = 'processing' AND updated_at <= :threshold
     `, {
       ':now': now,
       ':threshold': threshold,
     });
   },
+
 
   clearAll() {
     runStatement('DELETE FROM sessions', {});
