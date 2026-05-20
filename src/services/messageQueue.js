@@ -63,10 +63,15 @@ function blockWebhookDelivery(untilMs, reason, now = Date.now()) {
 function workerConcurrencyLimit() {
   const configured = Number(config.sendConcurrency);
   const maxConcurrency = Math.max(1, Number(config.sendConcurrencyMax) || 1);
-  if (!Number.isFinite(configured) || configured <= 0) {
-    return maxConcurrency;
+  const baseLimit = (!Number.isFinite(configured) || configured <= 0)
+    ? maxConcurrency
+    : Math.max(1, Math.min(configured, maxConcurrency));
+  if (!createDemandActive()) {
+    return baseLimit;
   }
-  return Math.max(1, Math.min(configured, maxConcurrency));
+
+  const createLimit = Math.max(1, Number(config.sendConcurrencyMaxDuringCreate) || 1);
+  return Math.max(1, Math.min(baseLimit, createLimit));
 }
 
 function configuredWorkerConcurrencyLimit() {
@@ -78,6 +83,7 @@ function configuredWorkerConcurrencyLimit() {
 }
 
 function hasAvailableWorkerCapacity() {
+  pruneStaleActiveJobs();
   const limit = workerConcurrencyLimit();
   if (!Number.isFinite(limit)) {
     return true;
@@ -86,6 +92,7 @@ function hasAvailableWorkerCapacity() {
 }
 
 function nextClaimLimit(maxBatch) {
+  pruneStaleActiveJobs();
   const limit = workerConcurrencyLimit();
   if (!Number.isFinite(limit)) {
     return maxBatch;
@@ -99,6 +106,36 @@ function workerStallThresholdMs() {
     (Number(config.queue.pollIntervalMs) || 0) * 4,
     30000
   );
+}
+
+function createDemand(now = Date.now()) {
+  return sessionStore.createOperationDemand(now);
+}
+
+function createDemandActive(now = Date.now()) {
+  return createDemand(now).active;
+}
+
+function createReservedBrowserSlots() {
+  return Math.max(0, Number(config.queue.createReservedBrowserSlots) || 0);
+}
+
+function prewarmDuringCreate() {
+  return config.queue.prewarmDuringCreate === true;
+}
+
+function pruneStaleActiveJobs(now = Date.now()) {
+  const thresholdMs = workerStallThresholdMs();
+  for (const [task, meta] of activeJobs.entries()) {
+    const ageMs = meta?.startedAt ? Math.max(0, now - meta.startedAt) : null;
+    if (ageMs == null || ageMs <= thresholdMs) {
+      continue;
+    }
+    activeJobs.delete(task);
+    console.warn(
+      `[MessageQueue] detached stale active slot job=${meta?.id || 'unknown'} session=${meta?.sessionId || 'unknown'} age_ms=${ageMs}`
+    );
+  }
 }
 
 function sessionBurstSize() {
@@ -127,6 +164,7 @@ function clearBurstSession() {
 }
 
 function countActiveSessionsAwaitingBrowser() {
+  pruneStaleActiveJobs();
   const pendingSessionIds = new Set();
   for (const meta of activeJobs.values()) {
     const sessionId = String(meta?.sessionId || '').trim();
@@ -578,12 +616,17 @@ function prewarmQueuedSessions() {
   if (!sessionPrewarmEnabled()) {
     return 0;
   }
+  const demand = createDemand();
+  if (demand.active && !prewarmDuringCreate()) {
+    return 0;
+  }
 
   const browserPool = getBrowserPoolStatus();
   const activeBrowserDemand = countActiveSessionsAwaitingBrowser();
+  const reservedForCreate = demand.active ? createReservedBrowserSlots() : 0;
   const availableSlots = browserPool.availableSlots == null
     ? null
-    : Math.max(0, Number(browserPool.availableSlots || 0) - activeBrowserDemand);
+    : Math.max(0, Number(browserPool.availableSlots || 0) - activeBrowserDemand - reservedForCreate);
   if (availableSlots != null && availableSlots <= 0) {
     return 0;
   }
@@ -623,6 +666,7 @@ export async function pumpQueue() {
   if (stopRequested) return;
   if (pumping) return;
 
+  pruneStaleActiveJobs();
   pumping = true;
   lastPumpStartedAt = Date.now();
   lastPumpError = null;
@@ -706,8 +750,12 @@ export function stopMessageQueueWorker() {
 }
 
 export function getMessageQueueWorkerStatus(now = Date.now()) {
+  pruneStaleActiveJobs(now);
   const concurrencyLimit = workerConcurrencyLimit();
   const configuredConcurrencyLimit = configuredWorkerConcurrencyLimit();
+  const demand = createDemand(now);
+  const createActive = demand.active;
+  const createReservedSlots = createActive ? createReservedBrowserSlots() : 0;
   let oldestActiveJobAgeMs = null;
   for (const meta of activeJobs.values()) {
     const ageMs = meta?.startedAt ? Math.max(0, now - meta.startedAt) : null;
@@ -728,6 +776,11 @@ export function getMessageQueueWorkerStatus(now = Date.now()) {
     pumping,
     stalled,
     activeJobs: activeJobs.size,
+    createDemand: demand,
+    createThrottleActive: createActive,
+    sendConcurrencyMaxDuringCreate: Math.max(1, Number(config.sendConcurrencyMaxDuringCreate) || 1),
+    createReservedBrowserSlots: createReservedSlots,
+    prewarmDuringCreate: prewarmDuringCreate(),
     prewarmingSessions: warmingSessions.size,
     prewarmingSessionIds: Array.from(warmingSessions.values()),
     oldestActiveJobAgeMs,

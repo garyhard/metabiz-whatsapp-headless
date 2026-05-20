@@ -50,6 +50,20 @@ function workerStallThresholdMs() {
   );
 }
 
+function pruneStaleActiveOperations(now = Date.now()) {
+  const thresholdMs = workerStallThresholdMs();
+  for (const [task, meta] of activeOperations.entries()) {
+    const ageMs = meta?.startedAt ? Math.max(0, now - meta.startedAt) : null;
+    if (ageMs == null || ageMs <= thresholdMs) {
+      continue;
+    }
+    activeOperations.delete(task);
+    console.warn(
+      `[CreateOperationQueue] detached stale active slot operation=${meta?.id || 'unknown'} age_ms=${ageMs}`
+    );
+  }
+}
+
 function getCreateQueueConcurrency() {
   const configuredConcurrency = Math.max(1, Number(config.createQueue?.concurrency) || 1);
   const configuredBatchSize = Math.max(1, Number(config.createQueue?.batchSize) || 1);
@@ -290,6 +304,7 @@ export async function pumpCreateOperationQueue() {
   if (stopRequested) return;
   if (pumping) return;
 
+  pruneStaleActiveOperations();
   pumping = true;
   lastPumpStartedAt = Date.now();
   lastPumpError = null;
@@ -356,6 +371,7 @@ export function stopCreateOperationQueueWorker() {
 }
 
 export function getCreateOperationQueueWorkerStatus(now = Date.now()) {
+  pruneStaleActiveOperations(now);
   let oldestActiveAgeMs = null;
   for (const meta of activeOperations.values()) {
     const ageMs = meta?.startedAt ? Math.max(0, now - meta.startedAt) : null;

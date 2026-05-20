@@ -1905,6 +1905,29 @@ export const sessionStore = {
     return !!row;
   },
 
+  createOperationDemand(now = Date.now()) {
+    const row = getRow(`
+      SELECT
+        SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) AS processing_count,
+        SUM(CASE WHEN status = 'queued' AND next_retry_at <= :now THEN 1 ELSE 0 END) AS runnable_count,
+        SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued_count
+      FROM create_operations
+      WHERE status IN ('queued', 'processing')
+    `, {
+      ':now': now,
+    }) || {};
+
+    const processingCount = Number(row.processing_count || 0);
+    const runnableCount = Number(row.runnable_count || 0);
+    const queuedCount = Number(row.queued_count || 0);
+    return {
+      processingCount,
+      runnableCount,
+      queuedCount,
+      active: processingCount > 0 || runnableCount > 0,
+    };
+  },
+
   claimNextCreateOperation(now = Date.now()) {
     const row = getNextRunnableCreateOperationRow(now);
     if (!row || !row.id) return null;

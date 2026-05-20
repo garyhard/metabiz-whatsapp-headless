@@ -100,6 +100,9 @@ PROXY_PASSWORD=your-proxy-password
 - `MESSAGE_QUEUE_BATCH_SIZE` (optional): Max jobs per pump (default: `5`)
 - `MESSAGE_QUEUE_SESSION_BURST_SIZE` (optional): Prioritas sticky per session untuk reuse browser. `5` berarti satu session diprioritaskan sampai 5 job sebelum pindah ke session lain (default: `5`)
 - `SEND_CONCURRENCY` (optional): Batas paralel kirim lintas session. `10` untuk fixed 10 paralel, `0`/`all` untuk semua browser aktif (default: `1`). Queue hanya akan mengaktifkan maksimal satu job `processing` per `session_id`, jadi job dalam session yang sama tetap antri.
+- `SEND_CONCURRENCY_MAX_DURING_CREATE` (optional): Batas paralel kirim saat ada create Meta queued/processing supaya create/check-session dan send tidak saling makan kapasitas (default: `6`)
+- `MESSAGE_QUEUE_CREATE_RESERVED_BROWSER_SLOTS` (optional): Jumlah browser slot default yang disisihkan untuk create Meta saat ada create queued/processing (default: `12`)
+- `MESSAGE_QUEUE_PREWARM_DURING_CREATE` (optional): Set `true` kalau send prewarm tetap boleh jalan saat create aktif. Default `false`.
 - `MESSAGE_QUEUE_MAX_ATTEMPTS` (optional): Retry attempts per job (default: `5`)
 - `MESSAGE_QUEUE_RETRY_BASE_MS` (optional): Base retry delay (default: `30000`)
 - `MESSAGE_QUEUE_RETRY_MAX_MS` (optional): Max retry delay (default: `300000`)
