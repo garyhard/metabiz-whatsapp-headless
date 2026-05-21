@@ -77,20 +77,6 @@ function resolveCreateValidateTimeoutMs() {
   return Math.max(1, Number(config.createQueue?.validateTimeoutMs) || 90000);
 }
 
-function withCreateOperationTimeout(promise, timeoutMs, label) {
-  if (!timeoutMs || timeoutMs <= 0) return promise;
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => {
-      reject(new FlowTimeoutError(`${label} timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-  });
-  return Promise.race([
-    promise.finally(() => clearTimeout(timer)),
-    timeout,
-  ]);
-}
-
 function resolveCreateFlowTimeoutMs(requestedTimeoutMs = null) {
   const configuredTimeoutMs = Math.max(1, Number(config.createQueue?.flowTimeoutMs) || config.flowTimeoutMs);
   const requested = Number(requestedTimeoutMs);
@@ -199,18 +185,15 @@ async function executeOperation(operation) {
     sessionStore.markCreateOperationProgress(operation.id, 'create.validate_cookies', 'Validating cookies.', {
       validateTimeoutMs,
     });
-    const validationResult = await withCreateOperationTimeout(
-      validateCookies(payload.cookies, payload.proxy || null, {
-        persist: true,
-        freshBrowser: true,
-        twofaSecret: payload.twofaSecret || null,
-        skipProxyValidation: payload.proxy && payload.validateProxyFirst !== false,
-        navigationRetries: 0,
-        browserPoolLane: 'create',
-      }),
+    const validationResult = await validateCookies(payload.cookies, payload.proxy || null, {
+      persist: true,
+      freshBrowser: true,
+      twofaSecret: payload.twofaSecret || null,
+      skipProxyValidation: payload.proxy && payload.validateProxyFirst !== false,
+      navigationRetries: 0,
+      browserPoolLane: 'create',
       validateTimeoutMs,
-      'Validate cookies'
-    );
+    });
     partialResult.validation = validationResult;
     createdSessionId = validationResult?.sessionId ? String(validationResult.sessionId) : null;
 
@@ -235,6 +218,7 @@ async function executeOperation(operation) {
       flowMaxAttempts: 1,
       priority: 'high',
       browserPoolOptions: { lane: 'create' },
+      skipInitialReload: true,
     });
     partialResult.check = checkResult;
 

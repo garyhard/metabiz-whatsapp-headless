@@ -3834,7 +3834,14 @@ export async function sendMessage(
  */
 export async function checkSessionFlow(
   page,
-  { sessionId = null, cUser = null, twofaSecret = null, requestId = null, maxAttempts: maxAttemptsOverride = null } = {}
+  {
+    sessionId = null,
+    cUser = null,
+    twofaSecret = null,
+    requestId = null,
+    maxAttempts: maxAttemptsOverride = null,
+    skipInitialReload = false,
+  } = {}
 ) {
   console.log('[Automation] ========================================');
   console.log('[Automation] Starting WhatsApp session check');
@@ -3925,7 +3932,10 @@ export async function checkSessionFlow(
   let lastError = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      if (attempt === 1) {
+      if (attempt === 1 && skipInitialReload) {
+        await ensureInboxReady(page, 'Check', { twofaSecret, cUser });
+        logStep('check:reload_skipped', { reason: 'already_validated' });
+      } else if (attempt === 1) {
         await refreshForCheck('initial');
       } else if (attempt === 3) {
         await refreshForCheck('reload retry');

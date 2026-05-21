@@ -70,6 +70,38 @@ function workerStallThresholdMs() {
   );
 }
 
+function sessionFlowJobTimeoutMs(job) {
+  const payload = job?.payload && typeof job.payload === 'object' ? job.payload : {};
+  const requested = Number(payload.jobTimeoutMs || payload.flowTimeoutMs);
+  if (Number.isFinite(requested) && requested > 0) {
+    return requested;
+  }
+
+  return Math.max(
+    Number(config.sessionQueue.processingTimeoutMs) || 0,
+    (Number(config.sessionQueue.pollIntervalMs) || 0) * 4,
+    30000
+  );
+}
+
+function withSessionFlowJobTimeout(promise, timeoutMs, job) {
+  if (!timeoutMs || timeoutMs <= 0) return promise;
+
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const type = job?.jobType || 'unknown';
+      const id = job?.id || 'unknown';
+      reject(new FlowTimeoutError(`Session flow job ${type} timed out after ${timeoutMs}ms (id=${id})`));
+    }, timeoutMs);
+  });
+
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    timeout,
+  ]);
+}
+
 function backoffMs(attempt, baseMs, maxMs) {
   const safeAttempt = Math.max(1, Number(attempt) || 1);
   const exp = baseMs * (2 ** (safeAttempt - 1));
@@ -240,7 +272,8 @@ async function executeJob(job) {
 
 async function processJob(job) {
   try {
-    const result = await executeJob(job);
+    const timeoutMs = sessionFlowJobTimeoutMs(job);
+    const result = await withSessionFlowJobTimeout(executeJob(job), timeoutMs, job);
     const updatedJob = sessionStore.markSessionFlowJobCompleted(job.id, result || {});
     if (updatedJob?.status !== 'completed') {
       console.warn(
@@ -256,7 +289,9 @@ async function processJob(job) {
     const message = errorResult.error;
     const maxAttempts = Math.max(1, Number(job.maxAttempts) || config.sessionQueue.maxAttempts);
     const attempts = Math.max(1, Number(job.attempts) || 1);
-    const retryable = isRetryableSessionFlowError(errorResult);
+    const retryable =
+      isRetryableSessionFlowError(errorResult) &&
+      !(job.jobType === 'create_session' && errorResult.errorCode === 'flow_timeout');
 
     if (!retryable || attempts >= maxAttempts) {
       const updatedJob = sessionStore.markSessionFlowJobError(job.id, message, errorResult.errorCode, errorResult);

@@ -741,11 +741,18 @@ async function verifyProxyConnection(context, proxyConfig, cUser = null) {
   }
 }
 
-function withTimeout(promise, ms, label) {
+function withTimeout(promise, ms, label, onTimeout = null) {
   if (!ms || ms <= 0) return promise;
   let timer;
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => {
+      if (typeof onTimeout === 'function') {
+        try {
+          onTimeout();
+        } catch {
+          // Timeout callbacks are best-effort cleanup signals.
+        }
+      }
       reject(new FlowTimeoutError(`${label} timed out after ${ms}ms`));
     }, ms);
   });
@@ -1968,6 +1975,10 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
       : 2;
   const browserPoolLane = String(options?.browserPoolLane || '').trim().toLowerCase();
   const normalizedTwofaSecret = String(options?.twofaSecret || '').trim() || null;
+  const validationTimeoutMs =
+    Number.isFinite(Number(options?.validateTimeoutMs)) && Number(options.validateTimeoutMs) > 0
+      ? Number(options.validateTimeoutMs)
+      : 0;
   if (normalized.format === 'string') {
     if (!normalized.raw || !String(normalized.raw).trim()) {
       throw new InvalidInputError('Cookies are required');
@@ -1990,8 +2001,10 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
   let context = null;
   let page = null;
   let activityTimer = null;
+  let sessionPersisted = false;
+  let validationTimedOut = false;
 
-  try {
+  const runValidation = async () => {
     logStep('validateCookies:start', { cUser });
     setProgress(cUser, 'validate:start');
     const storedFingerprint = freshBrowser ? null : sessionStore.getFingerprint(cUser);
@@ -2085,6 +2098,9 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
       sessionStore.saveFingerprint(cUser, browserInstance.fingerprint);
     }
     setProgress(cUser, 'validate:ok');
+    if (validationTimedOut) {
+      throw new FlowTimeoutError(`Validate cookies timed out after ${validationTimeoutMs}ms`);
+    }
     if (persist) {
       activityTimer = startActivitySimulation(page, tempSessionId);
       const sessionData = {
@@ -2120,11 +2136,18 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
         status: 'active',
         lastActivity: sessionData.lastActivity,
       });
+      sessionPersisted = true;
       logStep('validateCookies:persisted', { cUser, sessionId: tempSessionId });
       setProgress(cUser, 'validate:done', { sessionId: tempSessionId });
       return { ok: true, cUser, sessionId: tempSessionId, reused: false };
     }
     return { ok: true, cUser };
+  };
+
+  try {
+    return await withTimeout(runValidation(), validationTimeoutMs, 'Validate cookies', () => {
+      validationTimedOut = true;
+    });
   } catch (error) {
     logStep('validateCookies:error', { cUser, error: error?.message || error?.toString() });
     setProgress(cUser, 'validate:error', { error: error?.message || error?.toString() });
@@ -2134,12 +2157,15 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
     if (error instanceof InvalidInputError) {
       throw error;
     }
+    if (error instanceof FlowTimeoutError) {
+      throw error;
+    }
     throw new BrowserCrashError(`Validate cookies failed: ${error.message}`);
   } finally {
     if (browserSlotReserved) {
       await releaseBrowserSlot(browserReservationKey);
     }
-    if (!persist) {
+    if (!persist || !sessionPersisted) {
       await closeBrowserArtifacts(tempSessionId, { page, context, browser });
       await cleanupProfile(tempSessionId);
     }
@@ -2662,6 +2688,7 @@ export async function checkSessionForSession(
     flowMaxAttempts = null,
     priority = 'normal',
     browserPoolOptions = {},
+    skipInitialReload = false,
   } = {}
 ) {
   return withSessionLock(sessionId, async () => {
@@ -2680,6 +2707,7 @@ export async function checkSessionForSession(
           cUser: activeSession.cUser || null,
           twofaSecret: activeSession.twofaSecret || null,
           requestId,
+          skipInitialReload,
           maxAttempts:
             Number.isFinite(Number(flowMaxAttempts)) && Number(flowMaxAttempts) > 0
               ? Number(flowMaxAttempts)

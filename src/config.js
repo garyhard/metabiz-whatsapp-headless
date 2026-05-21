@@ -142,7 +142,7 @@ export const config = {
     maxAttempts: parsePositiveInt(process.env.META_CREATE_QUEUE_MAX_ATTEMPTS, 5),
     retryBaseMs: parsePositiveInt(process.env.META_CREATE_QUEUE_RETRY_BASE_MS, 5000),
     retryMaxMs: parsePositiveInt(process.env.META_CREATE_QUEUE_RETRY_MAX_MS, 30000),
-    flowTimeoutMs: parsePositiveInt(process.env.META_CREATE_FLOW_TIMEOUT_MS, 300000),
+    flowTimeoutMs: parsePositiveInt(process.env.META_CREATE_FLOW_TIMEOUT_MS, 90000),
     validateTimeoutMs: parsePositiveInt(process.env.META_CREATE_VALIDATE_TIMEOUT_MS, 90000),
     processingTimeoutMs: parsePositiveInt(process.env.META_CREATE_QUEUE_PROCESSING_TIMEOUT_MS, 900000),
     browserExtraCapacity: parseNonNegativeInt(process.env.META_CREATE_BROWSER_EXTRA_CAPACITY, 4),
