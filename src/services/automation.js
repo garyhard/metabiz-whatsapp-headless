@@ -215,6 +215,20 @@ const NEED_NEW_COOKIES_TEMP_BLOCK_REASON_HINTS = normalizeList([
   'fitur ini untuk sementara tidak tersedia',
   'dilarang menggunakan fitur ini untuk sementara',
 ]);
+const BUSINESS_ACCESS_MISSING_HINTS = normalizeList([
+  'unable to access meta business suite with this account',
+  'does not have access to any facebook pages or instagram accounts',
+  'that can be managed in meta business suite',
+  'create a facebook page',
+  'log in with instagram',
+  'log in with another account',
+  'tidak dapat mengakses meta business suite dengan akun ini',
+  'tidak memiliki akses ke halaman facebook atau akun instagram',
+  'yang dapat dikelola di meta business suite',
+  'buat halaman facebook',
+  'masuk dengan instagram',
+  'masuk dengan akun lain',
+]);
 const OPEN_WHATSAPP_MODAL_LABELS = uniqueNormalizedList([
   ...(config?.texts?.openWhatsappModal || []),
   'send a message on whatsapp',
@@ -1737,25 +1751,31 @@ async function hasCaptchaMismatchMessage(page) {
 
 export async function detectNeedNewCookiesPage(page) {
   try {
-    return await page.evaluate(({ hints, videoHints, identityHints, tempBlockTitleHints, tempBlockReasonHints }) => {
+    return await page.evaluate(({ hints, videoHints, identityHints, tempBlockTitleHints, tempBlockReasonHints, businessAccessMissingHints }) => {
       const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase();
       const matchedHints = hints.filter((hint) => text.includes(hint));
+      const matchedBusinessAccessMissingHints = businessAccessMissingHints.filter((hint) => text.includes(hint));
       const hasStrongVideoHint = videoHints.some((hint) => text.includes(hint));
       const hasIdentityHint = identityHints.some((hint) => text.includes(hint));
       const matchedTempBlockTitleHints = tempBlockTitleHints.filter((hint) => text.includes(hint));
       const matchedTempBlockReasonHints = tempBlockReasonHints.filter((hint) => text.includes(hint));
       const hasTempBlockTitleHint = matchedTempBlockTitleHints.length > 0;
       const hasTempBlockReasonHint = matchedTempBlockReasonHints.length > 0;
+      const businessAccessMissingDetected = matchedBusinessAccessMissingHints.length >= 2;
       const identityVerificationDetected = hasStrongVideoHint && hasIdentityHint;
       const temporaryBlockDetected = hasTempBlockTitleHint && hasTempBlockReasonHint;
+      const reason =
+        businessAccessMissingDetected ? 'business_access_missing' :
+          (identityVerificationDetected ? 'identity_verification' : (temporaryBlockDetected ? 'temporary_block' : null));
       return {
-        detected: identityVerificationDetected || temporaryBlockDetected,
+        detected: businessAccessMissingDetected || identityVerificationDetected || temporaryBlockDetected,
         matchedHints: [
           ...matchedHints,
+          ...matchedBusinessAccessMissingHints,
           ...matchedTempBlockTitleHints,
           ...matchedTempBlockReasonHints,
         ],
-        reason: identityVerificationDetected ? 'identity_verification' : (temporaryBlockDetected ? 'temporary_block' : null),
+        reason,
       };
     }, {
       hints: NEED_NEW_COOKIES_TEXT_HINTS,
@@ -1763,6 +1783,7 @@ export async function detectNeedNewCookiesPage(page) {
       identityHints: NEED_NEW_COOKIES_IDENTITY_HINTS,
       tempBlockTitleHints: NEED_NEW_COOKIES_TEMP_BLOCK_TITLE_HINTS,
       tempBlockReasonHints: NEED_NEW_COOKIES_TEMP_BLOCK_REASON_HINTS,
+      businessAccessMissingHints: BUSINESS_ACCESS_MISSING_HINTS,
     });
   } catch {
     return { detected: false, matchedHints: [], reason: null };
@@ -2446,7 +2467,11 @@ async function ensureOnInbox(page, label = 'Automation', { twofaSecret = null, c
   await detectAccountRestricted(page, label, cUser);
   const needNewCookiesDetails = await getNeedNewCookiesDetailsIfPresent(page, label, { cUser });
   if (needNewCookiesDetails) {
-    throw new AutomationError(`${label}: Need new cookies`, needNewCookiesDetails);
+    const reason = String(needNewCookiesDetails.reason || needNewCookiesDetails.indicator || '');
+    const message = reason === 'business_access_missing'
+      ? `${label}: Meta Business Suite access missing`
+      : `${label}: Need new cookies`;
+    throw new AutomationError(message, needNewCookiesDetails);
   }
 }
 
@@ -3917,6 +3942,15 @@ export async function checkSessionFlow(
     ).catch(() => null);
 
     if (!inboxReady) {
+      const needNewCookiesDetails = await getNeedNewCookiesDetailsIfPresent(page, 'Check', { cUser });
+      if (needNewCookiesDetails) {
+        const reason = String(needNewCookiesDetails.reason || needNewCookiesDetails.indicator || '');
+        const message = reason === 'business_access_missing'
+          ? 'Check: Meta Business Suite access missing'
+          : 'Check: Need new cookies';
+        throw new AutomationError(message, needNewCookiesDetails);
+      }
+
       throw new AutomationError('Check: Inbox indicators not found', {
         type: 'inbox_not_ready',
         reason: 'inbox_indicators_not_found',
