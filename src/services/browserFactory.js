@@ -38,6 +38,18 @@ function stageTimeout(promise, ms, stage, sessionId, context = null) {
   });
 }
 
+function buildLaunchArgs(proxy = null) {
+  const args = Array.isArray(config.browser.args) ? [...config.browser.args] : [];
+  const rendererLimit = Number(config.browser.rendererProcessLimit);
+  if (Number.isFinite(rendererLimit) && rendererLimit > 0) {
+    args.push(`--renderer-process-limit=${Math.floor(rendererLimit)}`);
+  }
+  if (proxy && proxy.server) {
+    args.push('--proxy-bypass-list=<-loopback>');
+  }
+  return [...new Set(args)];
+}
+
 /**
  * Create a browser instance with unique fingerprint and persistent context
  * @param {string} sessionId - Unique session identifier
@@ -64,11 +76,7 @@ export async function createBrowser(sessionId, existingFingerprint = null, proxy
     },
   };
 
-  const launchArgs = Array.isArray(config.browser.args) ? [...config.browser.args] : [];
-  if (proxy && proxy.server) {
-    launchArgs.push(`--proxy-server=${proxy.server}`);
-    launchArgs.push('--proxy-bypass-list=<-loopback>');
-  }
+  const launchArgs = buildLaunchArgs(proxy);
 
   // Add proxy if provided
   if (proxy && proxy.server) {

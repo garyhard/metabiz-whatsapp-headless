@@ -4,8 +4,9 @@
 
 import dotenv from 'dotenv';
 
-// Load environment variables from .env file
-dotenv.config();
+// The PM2 process manager can keep stale env values across reloads.
+// Production .env is the source of truth for runtime tuning.
+dotenv.config({ override: true });
 
 const API_KEY = process.env.API_KEY;
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -81,7 +82,7 @@ export const config = {
   flowRecoverableRetryAttempts: parseNonNegativeInt(process.env.FLOW_RECOVERABLE_RETRY_ATTEMPTS, 2),
   flowRecoverableRetryDelayMs: parsePositiveInt(process.env.FLOW_RECOVERABLE_RETRY_DELAY_MS, 1500),
   maxActiveBrowsers: capConcurrency(
-    parseNonNegativeInt(process.env.MAX_ACTIVE_BROWSERS, 0),
+    parseNonNegativeInt(process.env.MAX_ACTIVE_BROWSERS, 16),
     parseNonNegativeInt(process.env.MAX_ACTIVE_BROWSERS_HARD_LIMIT, 24)
   ),
   browserPoolWaitMs: Number.isFinite(BROWSER_POOL_WAIT_MS) && BROWSER_POOL_WAIT_MS >= 0
@@ -98,8 +99,8 @@ export const config = {
     : 0,
   sendConcurrency: parseConcurrency(process.env.SEND_CONCURRENCY, 1),
   sendConcurrencyConfigured: parseConcurrency(process.env.SEND_CONCURRENCY, 1),
-  sendConcurrencyMax: parsePositiveInt(process.env.SEND_CONCURRENCY_MAX, 12),
-  sendConcurrencyMaxDuringCreate: parsePositiveInt(process.env.SEND_CONCURRENCY_MAX_DURING_CREATE, 6),
+  sendConcurrencyMax: parsePositiveInt(process.env.SEND_CONCURRENCY_MAX, 8),
+  sendConcurrencyMaxDuringCreate: parsePositiveInt(process.env.SEND_CONCURRENCY_MAX_DURING_CREATE, 2),
   sessionLockWaitTimeoutMs: parseNonNegativeInt(process.env.SESSION_LOCK_WAIT_TIMEOUT_MS, 90000),
   storePersistDebounceMs: parseNonNegativeInt(process.env.SESSION_STORE_PERSIST_DEBOUNCE_MS, 50),
   priorityHighStreakLimit: parsePositiveInt(process.env.MESSAGE_PRIORITY_HIGH_STREAK_LIMIT, 3),
@@ -108,9 +109,9 @@ export const config = {
     batchSize: parsePositiveInt(process.env.MESSAGE_QUEUE_BATCH_SIZE, 5),
     sessionBurstSize: parsePositiveInt(process.env.MESSAGE_QUEUE_SESSION_BURST_SIZE, 5),
     sessionPrewarmEnabled: parseBoolean(process.env.MESSAGE_QUEUE_SESSION_PREWARM_ENABLED, true),
-    sessionPrewarmLimit: parsePositiveInt(process.env.MESSAGE_QUEUE_SESSION_PREWARM_LIMIT, 5),
-    sessionPrewarmIdleTimeoutMs: parseNonNegativeInt(process.env.MESSAGE_QUEUE_SESSION_PREWARM_IDLE_TIMEOUT_MS, 90000),
-    createReservedBrowserSlots: parseNonNegativeInt(process.env.MESSAGE_QUEUE_CREATE_RESERVED_BROWSER_SLOTS, 12),
+    sessionPrewarmLimit: parsePositiveInt(process.env.MESSAGE_QUEUE_SESSION_PREWARM_LIMIT, 2),
+    sessionPrewarmIdleTimeoutMs: parseNonNegativeInt(process.env.MESSAGE_QUEUE_SESSION_PREWARM_IDLE_TIMEOUT_MS, 45000),
+    createReservedBrowserSlots: parseNonNegativeInt(process.env.MESSAGE_QUEUE_CREATE_RESERVED_BROWSER_SLOTS, 8),
     prewarmDuringCreate: parseBoolean(process.env.MESSAGE_QUEUE_PREWARM_DURING_CREATE, false),
     maxAttempts: parsePositiveInt(process.env.MESSAGE_QUEUE_MAX_ATTEMPTS, 5),
     retryBaseMs: parsePositiveInt(process.env.MESSAGE_QUEUE_RETRY_BASE_MS, 30000),
@@ -136,17 +137,17 @@ export const config = {
   },
   createQueue: {
     pollIntervalMs: parsePositiveInt(process.env.META_CREATE_QUEUE_POLL_INTERVAL_MS, 1500),
-    batchSize: parsePositiveInt(process.env.META_CREATE_QUEUE_BATCH_SIZE, 6),
-    concurrency: parsePositiveInt(process.env.META_CREATE_QUEUE_CONCURRENCY, 3),
-    maxConcurrency: parsePositiveInt(process.env.META_CREATE_QUEUE_MAX_CONCURRENCY, 6),
+    batchSize: parsePositiveInt(process.env.META_CREATE_QUEUE_BATCH_SIZE, 2),
+    concurrency: parsePositiveInt(process.env.META_CREATE_QUEUE_CONCURRENCY, 2),
+    maxConcurrency: parsePositiveInt(process.env.META_CREATE_QUEUE_MAX_CONCURRENCY, 2),
     maxAttempts: parsePositiveInt(process.env.META_CREATE_QUEUE_MAX_ATTEMPTS, 5),
     retryBaseMs: parsePositiveInt(process.env.META_CREATE_QUEUE_RETRY_BASE_MS, 5000),
     retryMaxMs: parsePositiveInt(process.env.META_CREATE_QUEUE_RETRY_MAX_MS, 30000),
-    flowTimeoutMs: parsePositiveInt(process.env.META_CREATE_FLOW_TIMEOUT_MS, 90000),
+    flowTimeoutMs: parsePositiveInt(process.env.META_CREATE_FLOW_TIMEOUT_MS, 120000),
     validateTimeoutMs: parsePositiveInt(process.env.META_CREATE_VALIDATE_TIMEOUT_MS, 90000),
     processingTimeoutMs: parsePositiveInt(process.env.META_CREATE_QUEUE_PROCESSING_TIMEOUT_MS, 900000),
-    browserExtraCapacity: parseNonNegativeInt(process.env.META_CREATE_BROWSER_EXTRA_CAPACITY, 4),
-    browserPoolWaitMs: parseNonNegativeInt(process.env.META_CREATE_BROWSER_POOL_WAIT_MS, 60000),
+    browserExtraCapacity: parseNonNegativeInt(process.env.META_CREATE_BROWSER_EXTRA_CAPACITY, 2),
+    browserPoolWaitMs: parseNonNegativeInt(process.env.META_CREATE_BROWSER_POOL_WAIT_MS, 90000),
     rejectWhenStalled: parseBoolean(process.env.META_CREATE_QUEUE_REJECT_WHEN_STALLED, false),
   },
   proxy: defaultProxy,
@@ -171,14 +172,26 @@ export const config = {
     headless: process.env.HEADLESS !== 'false',
     launchTimeoutMs: parsePositiveInt(process.env.BROWSER_LAUNCH_TIMEOUT_MS, 60000),
     newPageTimeoutMs: parsePositiveInt(process.env.BROWSER_NEW_PAGE_TIMEOUT_MS, 30000),
+    rendererProcessLimit: parseNonNegativeInt(process.env.BROWSER_RENDERER_PROCESS_LIMIT, 3),
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
+      '--no-first-run',
+      '--no-default-browser-check',
+      '--disable-background-networking',
+      '--disable-component-update',
+      '--disable-default-apps',
+      '--disable-extensions',
+      '--disable-sync',
+      '--metrics-recording-only',
       '--disable-dev-shm-usage',
       '--disable-accelerated-2d-canvas',
       '--disable-gpu',
       '--disable-web-security',
-      '--disable-features=IsolateOrigins,site-per-process',
+      '--disable-popup-blocking',
+      '--hide-scrollbars',
+      '--mute-audio',
+      '--disable-features=AcceptCHFrame,AutoDeElevate,GlobalMediaControls,IsolateOrigins,LensOverlay,MediaRouter,OptimizationHints,PaintHolding,site-per-process,Translate',
     ],
   },
 };
