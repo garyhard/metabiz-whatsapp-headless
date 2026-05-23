@@ -1638,7 +1638,7 @@ export const sessionStore = {
         COALESCE(oldest_runnable_queued_created_at, 9223372036854775807) ASC,
         COALESCE(oldest_processing_updated_at, 9223372036854775807) ASC,
         COALESCE(oldest_queued_created_at, 9223372036854775807) ASC,
-        session_id ASC
+        q.session_id ASC
       LIMIT :limit
     `, {
       ':now': now,
