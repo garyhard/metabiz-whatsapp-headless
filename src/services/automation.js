@@ -2498,13 +2498,35 @@ async function waitForMainSpinner(page, { timeoutMs = 30000 } = {}) {
 
 async function ensureInboxReady(page, label = 'Automation', options = {}) {
   await ensureOnInbox(page, label, options);
-  const spinnerOk = await waitForMainSpinner(page, { timeoutMs: SPINNER_TIMEOUT_MS });
+  let spinnerOk = await waitForMainSpinner(page, { timeoutMs: SPINNER_TIMEOUT_MS });
+  let spinnerRefreshAttempted = false;
+  if (!spinnerOk && options.refreshOnSpinnerTimeout !== false) {
+    spinnerRefreshAttempted = true;
+    console.warn(`[${label}] Inbox spinner still visible after ${SPINNER_TIMEOUT_MS}ms; refreshing once`);
+    try {
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
+      await sleep(1500);
+      await ensureOnInbox(page, label, options);
+      spinnerOk = await waitForMainSpinner(page, { timeoutMs: SPINNER_TIMEOUT_MS });
+    } catch (error) {
+      throw new AutomationError(`${label}: Inbox refresh after spinner timeout failed`, {
+        type: 'inbox_not_ready',
+        reason: 'spinner_refresh_failed',
+        stage: 'ensure_inbox_ready.spinner_refresh',
+        label,
+        url: page.url(),
+        error: error?.message || String(error),
+      });
+    }
+  }
   if (!spinnerOk) {
     throw new AutomationError(`${label}: Inbox still loading (spinner timeout)`, {
       type: 'inbox_not_ready',
-      reason: 'spinner_timeout',
+      reason: spinnerRefreshAttempted ? 'spinner_timeout_after_refresh' : 'spinner_timeout',
       stage: 'ensure_inbox_ready.spinner',
       label,
+      spinnerWaitMs: SPINNER_TIMEOUT_MS,
+      spinnerRefreshAttempted,
       url: page.url(),
     });
   }
