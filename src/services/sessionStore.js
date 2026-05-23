@@ -46,6 +46,9 @@ db.exec(`
     restricted INTEGER NOT NULL DEFAULT 0,
     restriction_details_json TEXT,
     restriction_detected_at INTEGER,
+    queue_blocked_until INTEGER,
+    queue_block_reason TEXT,
+    queue_blocked_at INTEGER,
     last_activity INTEGER,
     created_at INTEGER,
     updated_at INTEGER
@@ -156,6 +159,24 @@ try {
 
 try {
   db.exec('ALTER TABLE sessions ADD COLUMN restriction_detected_at INTEGER');
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE sessions ADD COLUMN queue_blocked_until INTEGER');
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE sessions ADD COLUMN queue_block_reason TEXT');
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE sessions ADD COLUMN queue_blocked_at INTEGER');
 } catch {
   // Column already exists.
 }
@@ -308,18 +329,21 @@ function migrateSessionsTableDropCUserUnique() {
         restricted INTEGER NOT NULL DEFAULT 0,
         restriction_details_json TEXT,
         restriction_detected_at INTEGER,
+        queue_blocked_until INTEGER,
+        queue_block_reason TEXT,
+        queue_blocked_at INTEGER,
         last_activity INTEGER,
         created_at INTEGER,
         updated_at INTEGER
       );
       INSERT INTO sessions_new (
         session_id, c_user, cookie_format, cookies, fingerprint, proxy, twofa_secret, status,
-        restricted, restriction_details_json, restriction_detected_at,
+        restricted, restriction_details_json, restriction_detected_at, queue_blocked_until, queue_block_reason, queue_blocked_at,
         last_activity, created_at, updated_at
       )
       SELECT
         session_id, c_user, cookie_format, cookies, fingerprint, proxy, twofa_secret, status,
-        0, NULL, NULL,
+        0, NULL, NULL, NULL, NULL, NULL,
         last_activity, created_at, updated_at
       FROM sessions;
       DROP TABLE sessions;
@@ -548,13 +572,33 @@ function buildExcludedSessionSql(excludedSessionIds = [], params = {}) {
   return `AND q.session_id NOT IN (${placeholders.join(', ')})`;
 }
 
-function getNextRunnableMessageJobRow(now = Date.now(), preferredSessionId = null, onlyPreferredSession = false, excludedSessionIds = []) {
+function buildSessionStatusSql(statuses = [], params = {}) {
+  const normalizedStatuses = Array.from(new Set(
+    Array.isArray(statuses)
+      ? statuses.map((status) => String(status || '').trim()).filter(Boolean)
+      : []
+  ));
+  if (normalizedStatuses.length <= 0) {
+    return '';
+  }
+
+  const placeholders = normalizedStatuses.map((status, index) => {
+    const key = `:session_status_${index}`;
+    params[key] = status;
+    return key;
+  });
+  return `AND COALESCE(s.status, 'missing') IN (${placeholders.join(', ')})`;
+}
+
+function getNextRunnableMessageJobRow(now = Date.now(), preferredSessionId = null, onlyPreferredSession = false, excludedSessionIds = [], options = {}) {
   const preferredSession = preferredSessionId ? String(preferredSessionId) : null;
   const normalizedExcludedSessionIds = Array.isArray(excludedSessionIds)
     ? excludedSessionIds.map((id) => String(id || '').trim()).filter(Boolean)
     : [];
   const params = { ':now': now };
   const excludedSessionSql = buildExcludedSessionSql(normalizedExcludedSessionIds, params);
+  const sessionStatusSql = buildSessionStatusSql(options?.sessionStatuses, params);
+  const queueBlockedSql = "AND (s.queue_blocked_until IS NULL OR s.queue_blocked_until <= :now)";
   if (preferredSession) {
     if (normalizedExcludedSessionIds.includes(preferredSession)) {
       return null;
@@ -562,10 +606,13 @@ function getNextRunnableMessageJobRow(now = Date.now(), preferredSessionId = nul
     const preferredRow = getRow(`
       SELECT q.id
       FROM message_jobs q
+      LEFT JOIN sessions s ON s.session_id = q.session_id
       WHERE q.session_id = :session_id
         AND q.status = 'queued'
         AND q.next_retry_at <= :now
         ${excludedSessionSql}
+        ${sessionStatusSql}
+        ${queueBlockedSql}
         AND NOT EXISTS (
           SELECT 1
           FROM message_jobs p
@@ -589,16 +636,22 @@ function getNextRunnableMessageJobRow(now = Date.now(), preferredSessionId = nul
   return getRow(`
     SELECT q.id
     FROM message_jobs q
+    LEFT JOIN sessions s ON s.session_id = q.session_id
     WHERE q.status = 'queued'
       AND q.next_retry_at <= :now
       ${excludedSessionSql}
+      ${sessionStatusSql}
+      ${queueBlockedSql}
       AND NOT EXISTS (
         SELECT 1
         FROM message_jobs p
         WHERE p.session_id = q.session_id
           AND p.status = 'processing'
       )
-    ORDER BY ${messageJobPriorityOrderSql('q.priority')} ASC, q.created_at ASC
+    ORDER BY
+      ${messageJobPriorityOrderSql('q.priority')} ASC,
+      CASE COALESCE(s.status, 'missing') WHEN 'active' THEN 0 WHEN 'suspended' THEN 1 ELSE 2 END ASC,
+      q.created_at ASC
     LIMIT 1
   `, params);
 }
@@ -719,6 +772,9 @@ function normalizeRow(row) {
     restricted: Number(row.restricted || 0) === 1,
     restrictionDetails: deserializeSafe(row.restriction_details_json),
     restrictionDetectedAt: row.restriction_detected_at ? Number(row.restriction_detected_at) : null,
+    queueBlockedUntil: row.queue_blocked_until ? Number(row.queue_blocked_until) : null,
+    queueBlockReason: row.queue_block_reason || null,
+    queueBlockedAt: row.queue_blocked_at ? Number(row.queue_blocked_at) : null,
     lastActivity: row.last_activity,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -760,6 +816,7 @@ function normalizeMessageJobSessionRow(row) {
   if (!row) return null;
   return {
     sessionId: row.session_id,
+    sessionStatus: row.session_status || null,
     totalJobs: Number(row.total_jobs || 0),
     queuedCount: Number(row.queued_count || 0),
     runnableQueuedCount: Number(row.runnable_queued_count || 0),
@@ -958,6 +1015,106 @@ export const sessionStore = {
     });
   },
 
+  blockQueuedWorkForSession(sessionId, reason = 'unknown', blockedUntil = Date.now()) {
+    const now = Date.now();
+    runStatement(`
+      UPDATE sessions
+      SET queue_blocked_until = :queue_blocked_until,
+          queue_block_reason = :queue_block_reason,
+          queue_blocked_at = :queue_blocked_at,
+          updated_at = :updated_at
+      WHERE session_id = :session_id
+    `, {
+      ':session_id': sessionId,
+      ':queue_blocked_until': Math.max(now, Number(blockedUntil) || now),
+      ':queue_block_reason': String(reason || 'unknown'),
+      ':queue_blocked_at': now,
+      ':updated_at': now,
+    });
+  },
+
+  clearQueuedWorkBlock(sessionId) {
+    const now = Date.now();
+    runStatement(`
+      UPDATE sessions
+      SET queue_blocked_until = NULL,
+          queue_block_reason = NULL,
+          queue_blocked_at = NULL,
+          updated_at = :updated_at
+      WHERE session_id = :session_id
+    `, {
+      ':session_id': sessionId,
+      ':updated_at': now,
+    });
+  },
+
+  clearExpiredQueuedWorkBlocks(now = Date.now()) {
+    const stale = getRow(`
+      SELECT COUNT(*) AS count
+      FROM sessions
+      WHERE queue_blocked_until IS NOT NULL
+        AND queue_blocked_until <= :now
+    `, { ':now': now });
+    if (Number(stale?.count || 0) <= 0) {
+      return 0;
+    }
+
+    return runStatementWithChanges(`
+      UPDATE sessions
+      SET queue_blocked_until = NULL,
+          queue_block_reason = NULL,
+          queue_blocked_at = NULL,
+          updated_at = :updated_at
+      WHERE queue_blocked_until IS NOT NULL
+        AND queue_blocked_until <= :now
+    `, {
+      ':now': now,
+      ':updated_at': now,
+    });
+  },
+
+  getQueuedWorkBlock(sessionId, now = Date.now()) {
+    const row = getRow(`
+      SELECT session_id, queue_blocked_until, queue_block_reason, queue_blocked_at
+      FROM sessions
+      WHERE session_id = :session_id
+        AND queue_blocked_until IS NOT NULL
+        AND queue_blocked_until > :now
+      LIMIT 1
+    `, {
+      ':session_id': String(sessionId || ''),
+      ':now': now,
+    });
+    if (!row) return null;
+
+    return {
+      sessionId: row.session_id,
+      reason: row.queue_block_reason || 'unknown',
+      blockedAt: row.queue_blocked_at ? Number(row.queue_blocked_at) : null,
+      blockedUntil: Number(row.queue_blocked_until || 0),
+      remainingMs: Math.max(0, Number(row.queue_blocked_until || 0) - now),
+      persisted: true,
+    };
+  },
+
+  listQueuedWorkBlocks(now = Date.now()) {
+    const rows = getRows(`
+      SELECT session_id, queue_blocked_until, queue_block_reason, queue_blocked_at
+      FROM sessions
+      WHERE queue_blocked_until IS NOT NULL
+        AND queue_blocked_until > :now
+      ORDER BY queue_blocked_until ASC
+    `, { ':now': now });
+    return rows.map((row) => ({
+      sessionId: row.session_id,
+      reason: row.queue_block_reason || 'unknown',
+      blockedAt: row.queue_blocked_at ? Number(row.queue_blocked_at) : null,
+      blockedUntil: Number(row.queue_blocked_until || 0),
+      remainingMs: Math.max(0, Number(row.queue_blocked_until || 0) - now),
+      persisted: true,
+    }));
+  },
+
   markSessionRestricted(sessionId, details, detectedAt = Date.now()) {
     const now = Date.now();
     runStatement(`
@@ -1085,13 +1242,13 @@ export const sessionStore = {
     return normalizeMessageJobRow(row);
   },
 
-  hasRunnableMessageJob(now = Date.now(), preferredSessionId = null, onlyPreferredSession = false, excludedSessionIds = []) {
-    const row = getNextRunnableMessageJobRow(now, preferredSessionId, onlyPreferredSession, excludedSessionIds);
+  hasRunnableMessageJob(now = Date.now(), preferredSessionId = null, onlyPreferredSession = false, excludedSessionIds = [], options = {}) {
+    const row = getNextRunnableMessageJobRow(now, preferredSessionId, onlyPreferredSession, excludedSessionIds, options);
     return !!row;
   },
 
-  claimNextMessageJob(now = Date.now(), preferredSessionId = null, onlyPreferredSession = false, excludedSessionIds = []) {
-    const row = getNextRunnableMessageJobRow(now, preferredSessionId, onlyPreferredSession, excludedSessionIds);
+  claimNextMessageJob(now = Date.now(), preferredSessionId = null, onlyPreferredSession = false, excludedSessionIds = [], options = {}) {
+    const row = getNextRunnableMessageJobRow(now, preferredSessionId, onlyPreferredSession, excludedSessionIds, options);
     if (!row || !row.id) return null;
 
     const changes = runStatementWithChanges(`
@@ -1459,20 +1616,23 @@ export const sessionStore = {
     const maxRows = Math.max(1, Number(limit) || 100);
     const rows = getRows(`
       SELECT
-        session_id,
+        q.session_id,
+        COALESCE(s.status, 'missing') AS session_status,
         COUNT(*) AS total_jobs,
-        SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued_count,
-        SUM(CASE WHEN status = 'queued' AND next_retry_at <= :now THEN 1 ELSE 0 END) AS runnable_queued_count,
-        SUM(CASE WHEN status = 'queued' AND next_retry_at > :now THEN 1 ELSE 0 END) AS delayed_queued_count,
-        SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) AS processing_count,
-        MIN(CASE WHEN status = 'queued' THEN created_at END) AS oldest_queued_created_at,
-        MIN(CASE WHEN status = 'queued' AND next_retry_at <= :now THEN created_at END) AS oldest_runnable_queued_created_at,
-        MIN(CASE WHEN status = 'processing' THEN updated_at END) AS oldest_processing_updated_at,
-        MAX(updated_at) AS latest_updated_at
-      FROM message_jobs
-      WHERE status IN ('queued', 'processing')
-      GROUP BY session_id
+        SUM(CASE WHEN q.status = 'queued' THEN 1 ELSE 0 END) AS queued_count,
+        SUM(CASE WHEN q.status = 'queued' AND q.next_retry_at <= :now THEN 1 ELSE 0 END) AS runnable_queued_count,
+        SUM(CASE WHEN q.status = 'queued' AND q.next_retry_at > :now THEN 1 ELSE 0 END) AS delayed_queued_count,
+        SUM(CASE WHEN q.status = 'processing' THEN 1 ELSE 0 END) AS processing_count,
+        MIN(CASE WHEN q.status = 'queued' THEN q.created_at END) AS oldest_queued_created_at,
+        MIN(CASE WHEN q.status = 'queued' AND q.next_retry_at <= :now THEN q.created_at END) AS oldest_runnable_queued_created_at,
+        MIN(CASE WHEN q.status = 'processing' THEN q.updated_at END) AS oldest_processing_updated_at,
+        MAX(q.updated_at) AS latest_updated_at
+      FROM message_jobs q
+      LEFT JOIN sessions s ON s.session_id = q.session_id
+      WHERE q.status IN ('queued', 'processing')
+      GROUP BY q.session_id
       ORDER BY
+        CASE COALESCE(s.status, 'missing') WHEN 'active' THEN 0 WHEN 'suspended' THEN 1 ELSE 2 END ASC,
         runnable_queued_count DESC,
         processing_count DESC,
         COALESCE(oldest_runnable_queued_created_at, 9223372036854775807) ASC,

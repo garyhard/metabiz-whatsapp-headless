@@ -114,6 +114,7 @@ export const config = {
     createReservedBrowserSlots: parseNonNegativeInt(process.env.MESSAGE_QUEUE_CREATE_RESERVED_BROWSER_SLOTS, 8),
     prewarmDuringCreate: parseBoolean(process.env.MESSAGE_QUEUE_PREWARM_DURING_CREATE, false),
     unhealthySessionCooldownMs: parseNonNegativeInt(process.env.MESSAGE_QUEUE_UNHEALTHY_SESSION_COOLDOWN_MS, 600000),
+    coldSessionClaimLimit: parseNonNegativeInt(process.env.MESSAGE_QUEUE_COLD_SESSION_CLAIM_LIMIT, 2),
     maxAttempts: parsePositiveInt(process.env.MESSAGE_QUEUE_MAX_ATTEMPTS, 5),
     retryBaseMs: parsePositiveInt(process.env.MESSAGE_QUEUE_RETRY_BASE_MS, 30000),
     retryMaxMs: parsePositiveInt(process.env.MESSAGE_QUEUE_RETRY_MAX_MS, 300000),

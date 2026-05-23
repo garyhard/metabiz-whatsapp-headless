@@ -181,6 +181,10 @@ function sessionPrewarmIdleTimeoutMs() {
   return Math.max(0, Number(config.queue.sessionPrewarmIdleTimeoutMs) || 0);
 }
 
+function coldSessionClaimLimit() {
+  return Math.max(0, Number(config.queue.coldSessionClaimLimit) || 0);
+}
+
 function hasActiveBurst() {
   return !!burstSessionId && burstRemaining > 0;
 }
@@ -709,6 +713,8 @@ export async function pumpQueue() {
     const jobs = [];
     const preferredSessionIds = buildPreferredClaimSessionIds(Date.now(), claimLimit);
     const blockedSessionIds = listQueuedWorkSessionBlocks().map((entry) => entry.sessionId);
+    const maxColdClaims = coldSessionClaimLimit();
+    let coldSessionClaims = 0;
     let preferredSessionIndex = 0;
     let coldBrowserSlotsRemaining = sendColdBrowserSlotsRemaining();
 
@@ -722,10 +728,33 @@ export async function pumpQueue() {
         job = sessionStore.claimNextMessageJob(now, preferredSessionId, true, blockedSessionIds);
       }
 
-      if (!job && (coldBrowserSlotsRemaining == null || coldBrowserSlotsRemaining > 0)) {
-        job = sessionStore.claimNextMessageJob(now, null, false, blockedSessionIds);
+      if (!job) {
+        job = sessionStore.claimNextMessageJob(
+          now,
+          null,
+          false,
+          blockedSessionIds,
+          { sessionStatuses: ['active'] }
+        );
+      }
+
+      if (
+        !job &&
+        coldSessionClaims < maxColdClaims &&
+        (coldBrowserSlotsRemaining == null || coldBrowserSlotsRemaining > 0)
+      ) {
+        job = sessionStore.claimNextMessageJob(
+          now,
+          null,
+          false,
+          blockedSessionIds,
+          { sessionStatuses: ['suspended', 'missing'] }
+        );
         if (job && messageJobNeedsBrowser(job.sessionId) && coldBrowserSlotsRemaining != null) {
           coldBrowserSlotsRemaining = Math.max(0, coldBrowserSlotsRemaining - 1);
+        }
+        if (job) {
+          coldSessionClaims += 1;
         }
       }
 
@@ -756,8 +785,9 @@ export async function pumpQueue() {
   if (stopRequested) return;
   const now = Date.now();
   clearWebhookBlock(now);
+  const blockedSessionIds = listQueuedWorkSessionBlocks(now).map((entry) => entry.sessionId);
   if (
-    (hasAvailableWorkerCapacity() && sessionStore.hasRunnableMessageJob(now)) ||
+    (hasAvailableWorkerCapacity() && sessionStore.hasRunnableMessageJob(now, null, false, blockedSessionIds)) ||
     (webhookEnabled() && sessionStore.hasPendingWebhook(now) && !webhookBlocked(now))
   ) {
     schedulePump(0);
@@ -823,6 +853,7 @@ export function getMessageQueueWorkerStatus(now = Date.now()) {
     prewarmDuringCreate: prewarmDuringCreate(),
     queuedWorkCooldownSessionCount: blockedSessions.length,
     queuedWorkCooldownSessionIds: blockedSessions.map((entry) => entry.sessionId),
+    coldSessionClaimLimit: coldSessionClaimLimit(),
     prewarmingSessions: warmingSessions.size,
     prewarmingSessionIds: Array.from(warmingSessions.values()),
     oldestActiveJobAgeMs,

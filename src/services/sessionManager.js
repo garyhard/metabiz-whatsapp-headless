@@ -1378,6 +1378,7 @@ function pruneQueuedWorkSessionCooldowns(now = Date.now()) {
       queuedWorkSessionCooldowns.delete(sessionId);
     }
   }
+  sessionStore.clearExpiredQueuedWorkBlocks(now);
 }
 
 export function blockSessionForQueuedWork(sessionId, reason = 'unknown', cooldownMs = null) {
@@ -1397,8 +1398,10 @@ export function blockSessionForQueuedWork(sessionId, reason = 'unknown', cooldow
     blockedAt: now,
     blockedUntil: now + durationMs,
     durationMs,
+    persisted: false,
   };
   queuedWorkSessionCooldowns.set(targetSessionId, entry);
+  sessionStore.blockQueuedWorkForSession(targetSessionId, entry.reason, entry.blockedUntil);
   return entry;
 }
 
@@ -1408,7 +1411,9 @@ export function getQueuedWorkSessionBlock(sessionId, now = Date.now()) {
 
   pruneQueuedWorkSessionCooldowns(now);
   const entry = queuedWorkSessionCooldowns.get(targetSessionId);
-  if (!entry) return null;
+  if (!entry) {
+    return sessionStore.getQueuedWorkBlock(targetSessionId, now);
+  }
 
   return {
     ...entry,
@@ -1418,7 +1423,17 @@ export function getQueuedWorkSessionBlock(sessionId, now = Date.now()) {
 
 export function listQueuedWorkSessionBlocks(now = Date.now()) {
   pruneQueuedWorkSessionCooldowns(now);
-  return Array.from(queuedWorkSessionCooldowns.values()).map((entry) => ({
+  const blocksBySessionId = new Map();
+  sessionStore.listQueuedWorkBlocks(now).forEach((entry) => {
+    blocksBySessionId.set(entry.sessionId, entry);
+  });
+  Array.from(queuedWorkSessionCooldowns.values()).forEach((entry) => {
+    blocksBySessionId.set(entry.sessionId, {
+      ...entry,
+      remainingMs: Math.max(0, entry.blockedUntil - now),
+    });
+  });
+  return Array.from(blocksBySessionId.values()).map((entry) => ({
     ...entry,
     remainingMs: Math.max(0, entry.blockedUntil - now),
   }));
