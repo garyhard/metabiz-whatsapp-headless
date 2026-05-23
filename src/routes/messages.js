@@ -6,6 +6,7 @@ import express from 'express';
 import {
   getAllSessionIds,
   getBrowserPoolStatus,
+  getQueuedWorkSessionBlock,
   getSessionInfo,
   sendMessageForSession,
   restoreSessionFromStore,
@@ -138,6 +139,16 @@ function buildQueueWarmupState(group, sessionSnapshot, remainingSlots) {
   }
   if (Number(group?.processingCount || 0) > 0) {
     return { eligible: false, reason: 'processing_in_progress' };
+  }
+  const queueBlock = getQueuedWorkSessionBlock(group?.sessionId);
+  if (queueBlock) {
+    return {
+      eligible: false,
+      reason: 'queue_cooldown',
+      blockedUntil: queueBlock.blockedUntil,
+      remainingMs: queueBlock.remainingMs,
+      blockReason: queueBlock.reason,
+    };
   }
   if (sessionSnapshot?.liveBrowser) {
     return { eligible: false, reason: 'already_live_browser' };

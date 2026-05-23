@@ -530,15 +530,42 @@ function messageJobPriorityOrderSql(columnName = 'q.priority') {
   return `CASE ${columnName} WHEN 'high' THEN 0 WHEN 'normal' THEN 1 WHEN 'low' THEN 2 ELSE 1 END`;
 }
 
-function getNextRunnableMessageJobRow(now = Date.now(), preferredSessionId = null, onlyPreferredSession = false) {
+function buildExcludedSessionSql(excludedSessionIds = [], params = {}) {
+  const normalizedIds = Array.from(new Set(
+    Array.isArray(excludedSessionIds)
+      ? excludedSessionIds.map((id) => String(id || '').trim()).filter(Boolean)
+      : []
+  ));
+  if (normalizedIds.length <= 0) {
+    return '';
+  }
+
+  const placeholders = normalizedIds.map((id, index) => {
+    const key = `:excluded_session_${index}`;
+    params[key] = id;
+    return key;
+  });
+  return `AND q.session_id NOT IN (${placeholders.join(', ')})`;
+}
+
+function getNextRunnableMessageJobRow(now = Date.now(), preferredSessionId = null, onlyPreferredSession = false, excludedSessionIds = []) {
   const preferredSession = preferredSessionId ? String(preferredSessionId) : null;
+  const normalizedExcludedSessionIds = Array.isArray(excludedSessionIds)
+    ? excludedSessionIds.map((id) => String(id || '').trim()).filter(Boolean)
+    : [];
+  const params = { ':now': now };
+  const excludedSessionSql = buildExcludedSessionSql(normalizedExcludedSessionIds, params);
   if (preferredSession) {
+    if (normalizedExcludedSessionIds.includes(preferredSession)) {
+      return null;
+    }
     const preferredRow = getRow(`
       SELECT q.id
       FROM message_jobs q
       WHERE q.session_id = :session_id
         AND q.status = 'queued'
         AND q.next_retry_at <= :now
+        ${excludedSessionSql}
         AND NOT EXISTS (
           SELECT 1
           FROM message_jobs p
@@ -548,8 +575,8 @@ function getNextRunnableMessageJobRow(now = Date.now(), preferredSessionId = nul
       ORDER BY ${messageJobPriorityOrderSql('q.priority')} ASC, q.created_at ASC
       LIMIT 1
     `, {
+      ...params,
       ':session_id': preferredSession,
-      ':now': now,
     });
     if (preferredRow?.id) {
       return preferredRow;
@@ -564,6 +591,7 @@ function getNextRunnableMessageJobRow(now = Date.now(), preferredSessionId = nul
     FROM message_jobs q
     WHERE q.status = 'queued'
       AND q.next_retry_at <= :now
+      ${excludedSessionSql}
       AND NOT EXISTS (
         SELECT 1
         FROM message_jobs p
@@ -572,7 +600,7 @@ function getNextRunnableMessageJobRow(now = Date.now(), preferredSessionId = nul
       )
     ORDER BY ${messageJobPriorityOrderSql('q.priority')} ASC, q.created_at ASC
     LIMIT 1
-  `, { ':now': now });
+  `, params);
 }
 
 function getNextRunnableSessionFlowJobRow(now = Date.now()) {
@@ -1057,13 +1085,13 @@ export const sessionStore = {
     return normalizeMessageJobRow(row);
   },
 
-  hasRunnableMessageJob(now = Date.now(), preferredSessionId = null, onlyPreferredSession = false) {
-    const row = getNextRunnableMessageJobRow(now, preferredSessionId, onlyPreferredSession);
+  hasRunnableMessageJob(now = Date.now(), preferredSessionId = null, onlyPreferredSession = false, excludedSessionIds = []) {
+    const row = getNextRunnableMessageJobRow(now, preferredSessionId, onlyPreferredSession, excludedSessionIds);
     return !!row;
   },
 
-  claimNextMessageJob(now = Date.now(), preferredSessionId = null, onlyPreferredSession = false) {
-    const row = getNextRunnableMessageJobRow(now, preferredSessionId, onlyPreferredSession);
+  claimNextMessageJob(now = Date.now(), preferredSessionId = null, onlyPreferredSession = false, excludedSessionIds = []) {
+    const row = getNextRunnableMessageJobRow(now, preferredSessionId, onlyPreferredSession, excludedSessionIds);
     if (!row || !row.id) return null;
 
     const changes = runStatementWithChanges(`

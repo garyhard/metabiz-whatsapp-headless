@@ -212,6 +212,7 @@ const sessionBusyCounts = new Map();
 // Simple per-c_user mutex to serialize creation/check flow for the same account
 const cUserLocks = new Map();
 const pendingBrowserReservations = new Set();
+const queuedWorkSessionCooldowns = new Map();
 let browserPoolLock = Promise.resolve();
 
 const BROWSER_POOL_POLL_MS = 500;
@@ -1356,6 +1357,7 @@ async function suspendSession(sessionId) {
 
 async function suspendUnhealthySession(sessionId, reason = 'unknown') {
   try {
+    blockSessionForQueuedWork(sessionId, reason);
     await suspendSession(sessionId);
     logStep('session:suspended:unhealthy', { sessionId, reason });
   } catch (error) {
@@ -1364,6 +1366,62 @@ async function suspendUnhealthySession(sessionId, reason = 'unknown') {
       error?.message || String(error)
     );
   }
+}
+
+function queueUnhealthySessionCooldownMs() {
+  return Math.max(0, Number(config.queue.unhealthySessionCooldownMs) || 0);
+}
+
+function pruneQueuedWorkSessionCooldowns(now = Date.now()) {
+  for (const [sessionId, entry] of queuedWorkSessionCooldowns.entries()) {
+    if (!entry?.blockedUntil || entry.blockedUntil <= now) {
+      queuedWorkSessionCooldowns.delete(sessionId);
+    }
+  }
+}
+
+export function blockSessionForQueuedWork(sessionId, reason = 'unknown', cooldownMs = null) {
+  const targetSessionId = String(sessionId || '').trim();
+  if (!targetSessionId) return null;
+
+  const durationMs = cooldownMs == null ? queueUnhealthySessionCooldownMs() : Math.max(0, Number(cooldownMs) || 0);
+  if (durationMs <= 0) {
+    queuedWorkSessionCooldowns.delete(targetSessionId);
+    return null;
+  }
+
+  const now = Date.now();
+  const entry = {
+    sessionId: targetSessionId,
+    reason: String(reason || 'unknown'),
+    blockedAt: now,
+    blockedUntil: now + durationMs,
+    durationMs,
+  };
+  queuedWorkSessionCooldowns.set(targetSessionId, entry);
+  return entry;
+}
+
+export function getQueuedWorkSessionBlock(sessionId, now = Date.now()) {
+  const targetSessionId = String(sessionId || '').trim();
+  if (!targetSessionId) return null;
+
+  pruneQueuedWorkSessionCooldowns(now);
+  const entry = queuedWorkSessionCooldowns.get(targetSessionId);
+  if (!entry) return null;
+
+  return {
+    ...entry,
+    remainingMs: Math.max(0, entry.blockedUntil - now),
+  };
+}
+
+export function listQueuedWorkSessionBlocks(now = Date.now()) {
+  pruneQueuedWorkSessionCooldowns(now);
+  return Array.from(queuedWorkSessionCooldowns.values()).map((entry) => ({
+    ...entry,
+    remainingMs: Math.max(0, entry.blockedUntil - now),
+  }));
 }
 
 async function ensureSessionActive(sessionId, options = {}) {
@@ -1439,6 +1497,11 @@ export async function warmSessionForQueuedWork(sessionId, { holdMs = null } = {}
   }
 
   return withSessionLock(targetSessionId, async () => {
+    const block = getQueuedWorkSessionBlock(targetSessionId);
+    if (block) {
+      return { ok: false, warmed: false, reason: 'queue_cooldown', block, session: getSessionInfo(targetSessionId) };
+    }
+
     const loadedSession = sessions.get(targetSessionId);
     if (loadedSession) {
       hydrateStoredRestrictedState(targetSessionId, loadedSession);

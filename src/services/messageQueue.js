@@ -7,7 +7,9 @@ import crypto from 'crypto';
 import { sessionStore } from './sessionStore.js';
 import {
   getBrowserPoolStatus,
+  getQueuedWorkSessionBlock,
   getSessionInfo,
+  listQueuedWorkSessionBlocks,
   restoreSessionFromStore,
   sendMessageForSession,
   warmSessionForQueuedWork,
@@ -116,7 +118,14 @@ function createDemandActive(now = Date.now()) {
   return createDemand(now).active;
 }
 
-function createReservedBrowserSlots() {
+function createReservedBrowserSlots(now = Date.now()) {
+  if (!createDemandActive(now)) {
+    return 0;
+  }
+  return Math.max(0, Number(config.queue.createReservedBrowserSlots) || 0);
+}
+
+function configuredCreateReservedBrowserSlots() {
   return Math.max(0, Number(config.queue.createReservedBrowserSlots) || 0);
 }
 
@@ -134,10 +143,11 @@ function sendColdBrowserSlotsRemaining() {
   if (browserPool.availableSlots == null) {
     return null;
   }
+  const now = Date.now();
 
   const remaining = Number(browserPool.availableSlots || 0)
     - countActiveSessionsAwaitingBrowser()
-    - createReservedBrowserSlots();
+    - createReservedBrowserSlots(now);
   return Math.max(0, remaining);
 }
 
@@ -224,6 +234,9 @@ function buildPreferredClaimSessionIds(now = Date.now(), claimLimit = 1) {
       continue;
     }
     if (Number(group?.processingCount || 0) > 0) {
+      continue;
+    }
+    if (getQueuedWorkSessionBlock(group.sessionId, now)) {
       continue;
     }
     const sessionInfo = getSessionInfo(group.sessionId);
@@ -580,6 +593,7 @@ function canPrewarmSessionGroup(group, browserSlotsRemaining) {
   if (!group || !group.sessionId) return false;
   if (Number(group.runnableQueuedCount || 0) <= 0) return false;
   if (Number(group.processingCount || 0) > 0) return false;
+  if (getQueuedWorkSessionBlock(group.sessionId)) return false;
 
   const sessionInfo = getSessionInfo(group.sessionId);
   if (sessionInfo?.liveBrowser) return false;
@@ -694,6 +708,7 @@ export async function pumpQueue() {
     const claimLimit = nextClaimLimit(maxBatch);
     const jobs = [];
     const preferredSessionIds = buildPreferredClaimSessionIds(Date.now(), claimLimit);
+    const blockedSessionIds = listQueuedWorkSessionBlocks().map((entry) => entry.sessionId);
     let preferredSessionIndex = 0;
     let coldBrowserSlotsRemaining = sendColdBrowserSlotsRemaining();
 
@@ -704,11 +719,11 @@ export async function pumpQueue() {
       while (!job && preferredSessionIndex < preferredSessionIds.length) {
         const preferredSessionId = preferredSessionIds[preferredSessionIndex];
         preferredSessionIndex += 1;
-        job = sessionStore.claimNextMessageJob(now, preferredSessionId, true);
+        job = sessionStore.claimNextMessageJob(now, preferredSessionId, true, blockedSessionIds);
       }
 
       if (!job && (coldBrowserSlotsRemaining == null || coldBrowserSlotsRemaining > 0)) {
-        job = sessionStore.claimNextMessageJob(now);
+        job = sessionStore.claimNextMessageJob(now, null, false, blockedSessionIds);
         if (job && messageJobNeedsBrowser(job.sessionId) && coldBrowserSlotsRemaining != null) {
           coldBrowserSlotsRemaining = Math.max(0, coldBrowserSlotsRemaining - 1);
         }
@@ -777,7 +792,9 @@ export function getMessageQueueWorkerStatus(now = Date.now()) {
   const configuredConcurrencyLimit = configuredWorkerConcurrencyLimit();
   const demand = createDemand(now);
   const createActive = demand.active;
-  const createReservedSlots = createReservedBrowserSlots();
+  const createReservedSlots = createReservedBrowserSlots(now);
+  const configuredCreateReservedSlots = configuredCreateReservedBrowserSlots();
+  const blockedSessions = listQueuedWorkSessionBlocks(now);
   let oldestActiveJobAgeMs = null;
   for (const meta of activeJobs.values()) {
     const ageMs = meta?.startedAt ? Math.max(0, now - meta.startedAt) : null;
@@ -802,7 +819,10 @@ export function getMessageQueueWorkerStatus(now = Date.now()) {
     createThrottleActive: createActive,
     sendConcurrencyMaxDuringCreate: Math.max(1, Number(config.sendConcurrencyMaxDuringCreate) || 1),
     createReservedBrowserSlots: createReservedSlots,
+    configuredCreateReservedBrowserSlots: configuredCreateReservedSlots,
     prewarmDuringCreate: prewarmDuringCreate(),
+    queuedWorkCooldownSessionCount: blockedSessions.length,
+    queuedWorkCooldownSessionIds: blockedSessions.map((entry) => entry.sessionId),
     prewarmingSessions: warmingSessions.size,
     prewarmingSessionIds: Array.from(warmingSessions.values()),
     oldestActiveJobAgeMs,
