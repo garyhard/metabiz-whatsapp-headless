@@ -263,6 +263,11 @@ const REPLY_INPUT_HINTS = normalizeList([
   'whatsapp',
 ]);
 
+function positiveMs(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 async function dismissSaveLoginInfo(page, label = 'Automation') {
   try {
     const dialog = await findFirstVisible(page, '[role="dialog"], [aria-modal="true"]');
@@ -2416,7 +2421,12 @@ async function detectAccountRestricted(page, label = 'Automation', cUser = 'unkn
   }
 }
 
-async function ensureOnInbox(page, label = 'Automation', { twofaSecret = null, cUser = 'unknown' } = {}) {
+async function ensureOnInbox(page, label = 'Automation', {
+  twofaSecret = null,
+  cUser = 'unknown',
+  reloadTimeoutMs = RELOAD_TIMEOUT_MS,
+} = {}) {
+  const effectiveReloadTimeoutMs = positiveMs(reloadTimeoutMs, RELOAD_TIMEOUT_MS);
   await dismissSaveLoginInfo(page, label);
   await dismissAutomatedBehaviorNotice(page, label);
 
@@ -2436,7 +2446,7 @@ async function ensureOnInbox(page, label = 'Automation', { twofaSecret = null, c
   const isMessages = url.includes('messages');
   if (!isBusiness || (!isInbox && !isMessages)) {
     try {
-      await page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
+      await page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: effectiveReloadTimeoutMs });
     } catch (error) {
       throw new AutomationError(`${label}: Unexpected URL after reload: ${url}`, { url });
     }
@@ -2453,7 +2463,7 @@ async function ensureOnInbox(page, label = 'Automation', { twofaSecret = null, c
     }
     const dismissedAutomatedBehavior = await dismissAutomatedBehaviorNotice(page, label);
     if (dismissedAutomatedBehavior && !nextUrl.includes('business.facebook.com')) {
-      await page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
+      await page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: effectiveReloadTimeoutMs });
       await sleep(800);
       nextUrl = page.url();
     }
@@ -2497,18 +2507,27 @@ async function waitForMainSpinner(page, { timeoutMs = 30000 } = {}) {
 }
 
 async function ensureInboxReady(page, label = 'Automation', options = {}) {
-  await ensureOnInbox(page, label, options);
-  let spinnerOk = await waitForMainSpinner(page, { timeoutMs: SPINNER_TIMEOUT_MS });
+  const spinnerTimeoutMs = positiveMs(options.spinnerTimeoutMs, SPINNER_TIMEOUT_MS);
+  const reloadTimeoutMs = positiveMs(options.reloadTimeoutMs, RELOAD_TIMEOUT_MS);
+  await ensureOnInbox(page, label, { ...options, reloadTimeoutMs });
+  let spinnerOk = await waitForMainSpinner(page, { timeoutMs: spinnerTimeoutMs });
   let spinnerRefreshAttempted = false;
   if (!spinnerOk && options.refreshOnSpinnerTimeout !== false) {
+    await throwIfAuthBlocked(page, label, {
+      cUser: options.cUser || 'unknown',
+      stage: 'ensure_inbox_ready.spinner_before_refresh',
+    });
     spinnerRefreshAttempted = true;
-    console.warn(`[${label}] Inbox spinner still visible after ${SPINNER_TIMEOUT_MS}ms; refreshing once`);
+    console.warn(`[${label}] Inbox spinner still visible after ${spinnerTimeoutMs}ms; refreshing once`);
     try {
-      await page.reload({ waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: reloadTimeoutMs });
       await sleep(1500);
-      await ensureOnInbox(page, label, options);
-      spinnerOk = await waitForMainSpinner(page, { timeoutMs: SPINNER_TIMEOUT_MS });
+      await ensureOnInbox(page, label, { ...options, reloadTimeoutMs });
+      spinnerOk = await waitForMainSpinner(page, { timeoutMs: spinnerTimeoutMs });
     } catch (error) {
+      if (isAuthRelatedError(error)) {
+        throw error;
+      }
       throw new AutomationError(`${label}: Inbox refresh after spinner timeout failed`, {
         type: 'inbox_not_ready',
         reason: 'spinner_refresh_failed',
@@ -2516,6 +2535,8 @@ async function ensureInboxReady(page, label = 'Automation', options = {}) {
         label,
         url: page.url(),
         error: error?.message || String(error),
+        spinnerWaitMs: spinnerTimeoutMs,
+        reloadTimeoutMs,
       });
     }
   }
@@ -2525,7 +2546,7 @@ async function ensureInboxReady(page, label = 'Automation', options = {}) {
       reason: spinnerRefreshAttempted ? 'spinner_timeout_after_refresh' : 'spinner_timeout',
       stage: 'ensure_inbox_ready.spinner',
       label,
-      spinnerWaitMs: SPINNER_TIMEOUT_MS,
+      spinnerWaitMs: spinnerTimeoutMs,
       spinnerRefreshAttempted,
       url: page.url(),
     });
@@ -3888,6 +3909,9 @@ export async function checkSessionFlow(
     requestId = null,
     maxAttempts: maxAttemptsOverride = null,
     skipInitialReload = false,
+    reloadTimeoutMs = RELOAD_TIMEOUT_MS,
+    spinnerTimeoutMs = SPINNER_TIMEOUT_MS,
+    inboxIndicatorTimeoutMs = 10000,
   } = {}
 ) {
   console.log('[Automation] ========================================');
@@ -3906,6 +3930,9 @@ export async function checkSessionFlow(
       ? Number(maxAttemptsOverride)
       : 3;
   const backoffMs = [2000, 5000, 10000];
+  const effectiveReloadTimeoutMs = positiveMs(reloadTimeoutMs, RELOAD_TIMEOUT_MS);
+  const effectiveSpinnerTimeoutMs = positiveMs(spinnerTimeoutMs, SPINNER_TIMEOUT_MS);
+  const effectiveInboxIndicatorTimeoutMs = positiveMs(inboxIndicatorTimeoutMs, 10000);
   const shouldRetry = (error) =>
     error instanceof AutomationError && !isAuthRelatedError(error);
 
@@ -3916,13 +3943,18 @@ export async function checkSessionFlow(
         cUser,
         stage: 'check_session.before_reload',
       });
-      await page.reload({ waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: effectiveReloadTimeoutMs });
       await sleep(1500);
       await throwIfAuthBlocked(page, 'Check', {
         cUser,
         stage: 'check_session.after_reload',
       });
-      await ensureInboxReady(page, 'Check', { twofaSecret });
+      await ensureInboxReady(page, 'Check', {
+        twofaSecret,
+        cUser,
+        reloadTimeoutMs: effectiveReloadTimeoutMs,
+        spinnerTimeoutMs: effectiveSpinnerTimeoutMs,
+      });
       console.log('[Automation] ✓ Page refreshed');
       logStep('check:refresh_ok', { label });
     } catch (error) {
@@ -3930,13 +3962,18 @@ export async function checkSessionFlow(
         throw error;
       }
       console.warn(`[Automation] Refresh failed: ${error.message}. Retrying...`);
-      await page.reload({ waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: effectiveReloadTimeoutMs });
       await sleep(1500);
       await throwIfAuthBlocked(page, 'Check', {
         cUser,
         stage: 'check_session.after_reload_retry',
       });
-      await ensureInboxReady(page, 'Check', { twofaSecret });
+      await ensureInboxReady(page, 'Check', {
+        twofaSecret,
+        cUser,
+        reloadTimeoutMs: effectiveReloadTimeoutMs,
+        spinnerTimeoutMs: effectiveSpinnerTimeoutMs,
+      });
       console.log('[Automation] ✓ Page refreshed (retry)');
       logStep('check:refresh_retry_ok', { label });
     }
@@ -3960,7 +3997,7 @@ export async function checkSessionFlow(
         }).catch(() => false);
         return ready ? true : null;
       },
-      { timeoutMs: 10000, intervalMs: 300 }
+      { timeoutMs: effectiveInboxIndicatorTimeoutMs, intervalMs: 300 }
     ).catch(() => null);
 
     if (!inboxReady) {
@@ -3989,7 +4026,12 @@ export async function checkSessionFlow(
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       if (attempt === 1 && skipInitialReload) {
-        await ensureInboxReady(page, 'Check', { twofaSecret, cUser });
+        await ensureInboxReady(page, 'Check', {
+          twofaSecret,
+          cUser,
+          reloadTimeoutMs: effectiveReloadTimeoutMs,
+          spinnerTimeoutMs: effectiveSpinnerTimeoutMs,
+        });
         logStep('check:reload_skipped', { reason: 'already_validated' });
       } else if (attempt === 1) {
         await refreshForCheck('initial');

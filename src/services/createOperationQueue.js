@@ -86,6 +86,32 @@ function resolveCreateFlowTimeoutMs(requestedTimeoutMs = null) {
   return Math.min(requested, configuredTimeoutMs);
 }
 
+function resolveCreateCheckFlowTimeoutMs(requestedTimeoutMs = null) {
+  const flowTimeoutMs = resolveCreateFlowTimeoutMs(requestedTimeoutMs);
+  const checkTimeoutMs = Math.max(1, Number(config.createQueue?.checkFlowTimeoutMs) || flowTimeoutMs);
+  return Math.min(flowTimeoutMs, checkTimeoutMs);
+}
+
+function resolveCreateCheckFlowAttempts() {
+  return Math.max(1, Number(config.createQueue?.checkFlowAttempts) || 1);
+}
+
+function resolveCreateCheckRecoverableRetryAttempts(payloadValue = null) {
+  const requested = Number(payloadValue);
+  if (Number.isFinite(requested) && requested >= 0) {
+    return requested;
+  }
+  return Math.max(0, Number(config.createQueue?.checkRecoverableRetryAttempts) || 0);
+}
+
+function resolveCreateCheckOptions() {
+  return {
+    reloadTimeoutMs: Math.max(1, Number(config.createQueue?.checkReloadTimeoutMs) || 20000),
+    spinnerTimeoutMs: Math.max(1, Number(config.createQueue?.checkSpinnerTimeoutMs) || 10000),
+    inboxIndicatorTimeoutMs: Math.max(1, Number(config.createQueue?.checkIndicatorTimeoutMs) || 7000),
+  };
+}
+
 function backoffMs(attempt, baseMs, maxMs) {
   const safeAttempt = Math.max(1, Number(attempt) || 1);
   const exp = baseMs * (2 ** (safeAttempt - 1));
@@ -99,6 +125,7 @@ function deriveErrorCode(error, message) {
     if (detailsType === 'need_new_cookies') return 'need_new_cookies';
     if (detailsType === 'captcha_required') return 'captcha_required';
     if (detailsType === 'account_restricted') return 'account_restricted';
+    if (detailsType === 'inbox_not_ready') return 'inbox_not_ready';
   }
 
   if (error instanceof InvalidInputError) return 'invalid_input';
@@ -139,6 +166,7 @@ function isRetryableCreateError(errorResult) {
     'account_restricted',
     'session_not_found',
     'flow_timeout',
+    'inbox_not_ready',
   ].includes(code);
 }
 
@@ -167,11 +195,10 @@ function serializeCreateOperation(operation) {
 
 async function executeOperation(operation) {
   const payload = operation.payload || {};
-  const flowTimeoutMs = resolveCreateFlowTimeoutMs(payload.flowTimeoutMs);
-  const recoverableRetryAttempts =
-    Number.isFinite(Number(payload.recoverableRetryAttempts)) && Number(payload.recoverableRetryAttempts) >= 0
-      ? Number(payload.recoverableRetryAttempts)
-      : null;
+  const checkFlowTimeoutMs = resolveCreateCheckFlowTimeoutMs(payload.flowTimeoutMs);
+  const checkFlowAttempts = resolveCreateCheckFlowAttempts();
+  const checkOptions = resolveCreateCheckOptions();
+  const checkRecoverableRetryAttempts = resolveCreateCheckRecoverableRetryAttempts(payload.recoverableRetryAttempts);
   const partialResult = {};
   let createdSessionId = null;
 
@@ -208,17 +235,21 @@ async function executeOperation(operation) {
       {
         sessionId: validationResult.sessionId,
         cUser: validationResult.cUser || null,
+        flowTimeoutMs: checkFlowTimeoutMs,
+        flowMaxAttempts: checkFlowAttempts,
+        ...checkOptions,
       }
     );
 
     const checkResult = await checkSessionForSession(validationResult.sessionId, {
       requestId: payload.requestId || operation.requestId || null,
-      flowTimeoutMs,
-      recoverableRetryAttempts,
-      flowMaxAttempts: 1,
+      flowTimeoutMs: checkFlowTimeoutMs,
+      recoverableRetryAttempts: checkRecoverableRetryAttempts,
+      flowMaxAttempts: checkFlowAttempts,
       priority: 'high',
       browserPoolOptions: { lane: 'create' },
       skipInitialReload: true,
+      checkOptions,
     });
     partialResult.check = checkResult;
 
@@ -409,6 +440,10 @@ export function getCreateOperationQueueWorkerStatus(now = Date.now()) {
     maxConcurrency: Math.max(1, Number(config.createQueue?.maxConcurrency) || 1),
     concurrency: getCreateQueueConcurrency(),
     flowTimeoutMs: resolveCreateFlowTimeoutMs(),
+    checkFlowTimeoutMs: resolveCreateCheckFlowTimeoutMs(),
+    checkFlowAttempts: resolveCreateCheckFlowAttempts(),
+    checkRecoverableRetryAttempts: resolveCreateCheckRecoverableRetryAttempts(),
+    checkOptions: resolveCreateCheckOptions(),
     validateTimeoutMs: resolveCreateValidateTimeoutMs(),
     oldestActiveAgeMs,
     lastPumpStartedAt,

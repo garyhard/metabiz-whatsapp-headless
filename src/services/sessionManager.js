@@ -2767,6 +2767,7 @@ export async function checkSessionForSession(
     priority = 'normal',
     browserPoolOptions = {},
     skipInitialReload = false,
+    checkOptions = {},
   } = {}
 ) {
   return withSessionLock(sessionId, async () => {
@@ -2790,6 +2791,7 @@ export async function checkSessionForSession(
             Number.isFinite(Number(flowMaxAttempts)) && Number(flowMaxAttempts) > 0
               ? Number(flowMaxAttempts)
               : undefined,
+          ...(checkOptions && typeof checkOptions === 'object' && !Array.isArray(checkOptions) ? checkOptions : {}),
         }),
         effectiveFlowTimeoutMs,
         label
