@@ -170,6 +170,26 @@ function isRetryableCreateError(errorResult) {
   ].includes(code);
 }
 
+function isDeferredCreateCheckError(error, errorResult) {
+  if (config.createQueue?.allowDeferredCheckOnInboxTimeout !== true) return false;
+
+  const code = String(errorResult?.errorCode || '').toLowerCase();
+  const detailsType = String(errorResult?.details?.type || error?.details?.type || '').toLowerCase();
+  const reason = String(errorResult?.details?.reason || error?.details?.reason || '').toLowerCase();
+  const message = String(errorResult?.error || error?.message || '').toLowerCase();
+
+  return (
+    error instanceof FlowTimeoutError ||
+    code === 'flow_timeout' ||
+    code === 'inbox_not_ready' ||
+    detailsType === 'inbox_not_ready' ||
+    reason.includes('spinner_timeout') ||
+    reason.includes('spinner_refresh_failed') ||
+    message.includes('inbox refresh after spinner timeout') ||
+    message.includes('inbox still loading')
+  );
+}
+
 function serializeCreateOperation(operation) {
   if (!operation) return null;
   return {
@@ -241,16 +261,37 @@ async function executeOperation(operation) {
       }
     );
 
-    const checkResult = await checkSessionForSession(validationResult.sessionId, {
-      requestId: payload.requestId || operation.requestId || null,
-      flowTimeoutMs: checkFlowTimeoutMs,
-      recoverableRetryAttempts: checkRecoverableRetryAttempts,
-      flowMaxAttempts: checkFlowAttempts,
-      priority: 'high',
-      browserPoolOptions: { lane: 'create' },
-      skipInitialReload: true,
-      checkOptions,
-    });
+    let checkResult = null;
+    try {
+      checkResult = await checkSessionForSession(validationResult.sessionId, {
+        requestId: payload.requestId || operation.requestId || null,
+        flowTimeoutMs: checkFlowTimeoutMs,
+        recoverableRetryAttempts: checkRecoverableRetryAttempts,
+        flowMaxAttempts: checkFlowAttempts,
+        priority: 'high',
+        browserPoolOptions: { lane: 'create' },
+        skipInitialReload: true,
+        checkOptions,
+      });
+    } catch (checkError) {
+      const checkErrorResult = buildErrorResult(checkError);
+      if (!isDeferredCreateCheckError(checkError, checkErrorResult)) {
+        throw checkError;
+      }
+
+      console.warn(
+        `[CreateOperationQueue] deferring create session check session=${validationResult.sessionId} ` +
+        `requestId=${operation.requestId || payload.requestId || 'unknown'} ` +
+        `error=${checkErrorResult.error}`
+      );
+      checkResult = {
+        ...checkErrorResult,
+        ok: false,
+        status: 'deferred',
+        deferred: true,
+        warning: 'Meta inbox check was deferred because the inbox stayed loading after cookie validation.',
+      };
+    }
     partialResult.check = checkResult;
 
     return {
@@ -258,6 +299,7 @@ async function executeOperation(operation) {
       sessionId: validationResult.sessionId,
       cUser: validationResult.cUser || null,
       fingerprint: validationResult.fingerprint || null,
+      checkDeferred: checkResult?.deferred === true,
       validation: validationResult,
       check: checkResult || {},
     };
