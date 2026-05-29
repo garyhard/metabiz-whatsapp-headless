@@ -68,7 +68,7 @@ function workerConcurrencyLimit() {
   const baseLimit = (!Number.isFinite(configured) || configured <= 0)
     ? maxConcurrency
     : Math.max(1, Math.min(configured, maxConcurrency));
-  if (!createDemandActive()) {
+  if (!createDemandActive() || createSlotBorrowWindowActive()) {
     return baseLimit;
   }
 
@@ -118,8 +118,41 @@ function createDemandActive(now = Date.now()) {
   return createDemand(now).active;
 }
 
+function hourInTimezone(now, timeZone) {
+  const zone = String(timeZone || '').trim() || 'Asia/Jakarta';
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: zone,
+    hour: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date(now));
+  const value = parts.find((part) => part.type === 'hour')?.value;
+  const parsed = parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed % 24 : null;
+}
+
+function createSlotBorrowWindowActive(now = Date.now()) {
+  const startHour = config.queue.createSlotBorrowStartHour;
+  const endHour = config.queue.createSlotBorrowEndHour;
+  if (!Number.isInteger(startHour) || !Number.isInteger(endHour) || startHour === endHour) {
+    return false;
+  }
+
+  const hour = hourInTimezone(now, config.queue.createSlotBorrowTimezone);
+  if (hour == null) {
+    return false;
+  }
+
+  if (startHour < endHour) {
+    return hour >= startHour && hour < endHour;
+  }
+  return hour >= startHour || hour < endHour;
+}
+
 function createReservedBrowserSlots(now = Date.now()) {
   if (!createDemandActive(now)) {
+    return 0;
+  }
+  if (createSlotBorrowWindowActive(now)) {
     return 0;
   }
   return Math.max(0, Number(config.queue.createReservedBrowserSlots) || 0);
@@ -824,6 +857,7 @@ export function getMessageQueueWorkerStatus(now = Date.now()) {
   const createActive = demand.active;
   const createReservedSlots = createReservedBrowserSlots(now);
   const configuredCreateReservedSlots = configuredCreateReservedBrowserSlots();
+  const createSlotBorrowActive = createSlotBorrowWindowActive(now);
   const blockedSessions = listQueuedWorkSessionBlocks(now);
   let oldestActiveJobAgeMs = null;
   for (const meta of activeJobs.values()) {
@@ -846,7 +880,13 @@ export function getMessageQueueWorkerStatus(now = Date.now()) {
     stalled,
     activeJobs: activeJobs.size,
     createDemand: demand,
-    createThrottleActive: createActive,
+    createThrottleActive: createActive && !createSlotBorrowActive,
+    createSlotBorrowActive,
+    createSlotBorrowWindow: {
+      timezone: config.queue.createSlotBorrowTimezone,
+      startHour: config.queue.createSlotBorrowStartHour,
+      endHour: config.queue.createSlotBorrowEndHour,
+    },
     sendConcurrencyMaxDuringCreate: Math.max(1, Number(config.sendConcurrencyMaxDuringCreate) || 1),
     createReservedBrowserSlots: createReservedSlots,
     configuredCreateReservedBrowserSlots: configuredCreateReservedSlots,

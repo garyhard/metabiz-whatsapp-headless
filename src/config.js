@@ -27,6 +27,11 @@ function parseNonNegativeInt(value, fallback) {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
+function parseHour(value, fallback) {
+  const parsed = parseInt(String(value || ''), 10);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 23 ? parsed : fallback;
+}
+
 function parseConcurrency(value, fallback) {
   const raw = String(value || '').trim().toLowerCase();
   if (!raw) return fallback;
@@ -112,6 +117,9 @@ export const config = {
     sessionPrewarmLimit: parsePositiveInt(process.env.MESSAGE_QUEUE_SESSION_PREWARM_LIMIT, 2),
     sessionPrewarmIdleTimeoutMs: parseNonNegativeInt(process.env.MESSAGE_QUEUE_SESSION_PREWARM_IDLE_TIMEOUT_MS, 45000),
     createReservedBrowserSlots: parseNonNegativeInt(process.env.MESSAGE_QUEUE_CREATE_RESERVED_BROWSER_SLOTS, 8),
+    createSlotBorrowTimezone: String(process.env.MESSAGE_QUEUE_CREATE_SLOT_BORROW_TIMEZONE || 'Asia/Jakarta').trim(),
+    createSlotBorrowStartHour: parseHour(process.env.MESSAGE_QUEUE_CREATE_SLOT_BORROW_START_HOUR, null),
+    createSlotBorrowEndHour: parseHour(process.env.MESSAGE_QUEUE_CREATE_SLOT_BORROW_END_HOUR, null),
     prewarmDuringCreate: parseBoolean(process.env.MESSAGE_QUEUE_PREWARM_DURING_CREATE, false),
     unhealthySessionCooldownMs: parseNonNegativeInt(process.env.MESSAGE_QUEUE_UNHEALTHY_SESSION_COOLDOWN_MS, 600000),
     coldSessionClaimLimit: parseNonNegativeInt(process.env.MESSAGE_QUEUE_COLD_SESSION_CLAIM_LIMIT, 2),
