@@ -119,6 +119,26 @@ function backoffMs(attempt, baseMs, maxMs) {
   return Math.min(exp + jitter, maxMs);
 }
 
+function isTransientNetworkErrorMessage(message) {
+  const lowered = String(message || '').toLowerCase();
+  return [
+    'err_tunnel_connection_failed',
+    'tunnel connection failed',
+    'err_proxy_connection_failed',
+    'err_connection_reset',
+    'err_connection_closed',
+    'err_connection_refused',
+    'err_connection_timed_out',
+    'err_timed_out',
+    'err_internet_disconnected',
+    'err_name_not_resolved',
+    'socket hang up',
+    'econnreset',
+    'econnrefused',
+    'etimedout',
+  ].some((fragment) => lowered.includes(fragment));
+}
+
 function deriveErrorCode(error, message) {
   const detailsType = String(error?.details?.type || '').trim().toLowerCase();
   if (detailsType) {
@@ -131,10 +151,12 @@ function deriveErrorCode(error, message) {
   if (error instanceof InvalidInputError) return 'invalid_input';
   if (error instanceof SessionNotFoundError) return 'session_not_found';
   if (error instanceof FlowTimeoutError) return 'flow_timeout';
+
+  const lowered = String(message || '').toLowerCase();
+  if (isTransientNetworkErrorMessage(lowered)) return 'transient_network';
   if (error instanceof BrowserCrashError) return 'browser_crash';
   if (error instanceof AutomationError) return 'automation_error';
 
-  const lowered = String(message || '').toLowerCase();
   if (lowered.includes('account restricted')) return 'account_restricted';
   if (lowered.includes('captcha')) return 'captcha_required';
   if (lowered.includes('need new cookies')) return 'need_new_cookies';
