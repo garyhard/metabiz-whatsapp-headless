@@ -699,9 +699,10 @@ function prewarmQueuedSessions() {
     return 0;
   }
 
+  const remainingWarmupCapacity = Math.max(0, sessionPrewarmLimit() - warmingSessions.size);
   const warmupLimit = availableSlots == null
-    ? sessionPrewarmLimit()
-    : Math.min(sessionPrewarmLimit(), availableSlots);
+    ? remainingWarmupCapacity
+    : Math.min(remainingWarmupCapacity, availableSlots);
   if (warmupLimit <= 0) {
     return 0;
   }
