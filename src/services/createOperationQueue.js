@@ -77,6 +77,10 @@ function resolveCreateValidateTimeoutMs() {
   return Math.max(1, Number(config.createQueue?.validateTimeoutMs) || 90000);
 }
 
+function resolveCreateValidateTwofaInputTimeoutMs() {
+  return Math.max(1, Number(config.createQueue?.validateTwofaInputTimeoutMs) || 10000);
+}
+
 function resolveCreateFlowTimeoutMs(requestedTimeoutMs = null) {
   const configuredTimeoutMs = Math.max(1, Number(config.createQueue?.flowTimeoutMs) || config.flowTimeoutMs);
   const requested = Number(requestedTimeoutMs);
@@ -146,6 +150,7 @@ function deriveErrorCode(error, message) {
     if (detailsType === 'captcha_required') return 'captcha_required';
     if (detailsType === 'account_restricted') return 'account_restricted';
     if (detailsType === 'inbox_not_ready') return 'inbox_not_ready';
+    if (detailsType === 'twofa_input_not_found') return 'twofa_input_not_found';
   }
 
   if (error instanceof InvalidInputError) return 'invalid_input';
@@ -160,6 +165,8 @@ function deriveErrorCode(error, message) {
   if (lowered.includes('account restricted')) return 'account_restricted';
   if (lowered.includes('captcha')) return 'captcha_required';
   if (lowered.includes('need new cookies')) return 'need_new_cookies';
+  if (lowered.includes('two-factor code input not found')) return 'twofa_input_not_found';
+  if (lowered.includes('two-factor challenge detected but twofasecret is missing')) return 'twofa_secret_missing';
   return null;
 }
 
@@ -185,6 +192,8 @@ function isRetryableCreateError(errorResult) {
     'invalid_input',
     'need_new_cookies',
     'captcha_required',
+    'twofa_input_not_found',
+    'twofa_secret_missing',
     'account_restricted',
     'session_not_found',
     'flow_timeout',
@@ -251,8 +260,10 @@ async function executeOperation(operation) {
     }
 
     const validateTimeoutMs = resolveCreateValidateTimeoutMs();
+    const validateTwofaInputTimeoutMs = resolveCreateValidateTwofaInputTimeoutMs();
     sessionStore.markCreateOperationProgress(operation.id, 'create.validate_cookies', 'Validating cookies.', {
       validateTimeoutMs,
+      validateTwofaInputTimeoutMs,
     });
     const validationResult = await validateCookies(payload.cookies, payload.proxy || null, {
       persist: true,
@@ -262,6 +273,7 @@ async function executeOperation(operation) {
       navigationRetries: 0,
       browserPoolLane: 'create',
       validateTimeoutMs,
+      twofaInputTimeoutMs: validateTwofaInputTimeoutMs,
     });
     partialResult.validation = validationResult;
     createdSessionId = validationResult?.sessionId ? String(validationResult.sessionId) : null;

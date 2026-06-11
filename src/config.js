@@ -155,6 +155,7 @@ export const config = {
     retryMaxMs: parsePositiveInt(process.env.META_CREATE_QUEUE_RETRY_MAX_MS, 30000),
     flowTimeoutMs: parsePositiveInt(process.env.META_CREATE_FLOW_TIMEOUT_MS, 120000),
     validateTimeoutMs: parsePositiveInt(process.env.META_CREATE_VALIDATE_TIMEOUT_MS, 90000),
+    validateTwofaInputTimeoutMs: parsePositiveInt(process.env.META_CREATE_VALIDATE_TWOFA_INPUT_TIMEOUT_MS, 10000),
     checkFlowTimeoutMs: parsePositiveInt(process.env.META_CREATE_CHECK_FLOW_TIMEOUT_MS, 30000),
     checkFlowAttempts: parsePositiveInt(process.env.META_CREATE_CHECK_FLOW_ATTEMPTS, 1),
     checkReloadTimeoutMs: parsePositiveInt(process.env.META_CREATE_CHECK_RELOAD_TIMEOUT_MS, 20000),

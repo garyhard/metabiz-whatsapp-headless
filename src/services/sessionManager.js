@@ -2057,6 +2057,10 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
     Number.isFinite(Number(options?.validateTimeoutMs)) && Number(options.validateTimeoutMs) > 0
       ? Number(options.validateTimeoutMs)
       : 0;
+  const twofaInputTimeoutMs =
+    Number.isFinite(Number(options?.twofaInputTimeoutMs)) && Number(options.twofaInputTimeoutMs) > 0
+      ? Number(options.twofaInputTimeoutMs)
+      : null;
   if (normalized.format === 'string') {
     if (!normalized.raw || !String(normalized.raw).trim()) {
       throw new InvalidInputError('Cookies are required');
@@ -2140,6 +2144,7 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
         twofaSecret: normalizedTwofaSecret,
         label: 'ValidateCookies',
         cUser,
+        inputTimeoutMs: twofaInputTimeoutMs || undefined,
       });
     } catch (error) {
       throw new InvalidInputError(error.message, error?.details || null);

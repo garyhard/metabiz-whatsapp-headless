@@ -2179,7 +2179,15 @@ async function resolveCaptchaCheckpointIfPresent(page, label = 'Automation', cUs
   throw new AutomationError(`${label}: Captcha checkpoint detected`, result?.details || null);
 }
 
-async function resolveTwoFactorChallenge(page, { twofaSecret = null, label = 'Automation', cUser = 'unknown' } = {}) {
+async function resolveTwoFactorChallenge(
+  page,
+  {
+    twofaSecret = null,
+    label = 'Automation',
+    cUser = 'unknown',
+    inputTimeoutMs = 25000,
+  } = {}
+) {
   const challengeDetected = await hasTwoFactorChallenge(page);
   if (!challengeDetected) return false;
 
@@ -2274,7 +2282,7 @@ async function resolveTwoFactorChallenge(page, { twofaSecret = null, label = 'Au
 
       return null;
     },
-    { timeoutMs: 25000, intervalMs: 250 }
+    { timeoutMs: positiveMs(inputTimeoutMs, 25000), intervalMs: 250 }
   ).catch(() => null);
 
   if (input === 'resolved') {
@@ -2288,7 +2296,7 @@ async function resolveTwoFactorChallenge(page, { twofaSecret = null, label = 'Au
 
   if (input === 'captcha') {
     await resolveCaptchaCheckpointIfPresent(page, label, cUser);
-    return resolveTwoFactorChallenge(page, { twofaSecret, label, cUser });
+    return resolveTwoFactorChallenge(page, { twofaSecret, label, cUser, inputTimeoutMs });
   }
 
   if (input === 'restricted') {
