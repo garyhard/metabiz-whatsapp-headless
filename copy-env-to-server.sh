@@ -1,12 +1,15 @@
 #!/bin/bash
 #
 # Copy .env.production to server shared dir (mirrors ~/waha-web workflow)
-# Usage: ./copy-env-to-server.sh
+# Usage:
+#   ./copy-env-to-server.sh
+#   METABIZ_DEPLOY_HOSTS=143.198.219.81,168.144.132.171 ./copy-env-to-server.sh
 #
 
 set -euo pipefail
 
-SERVER="wahaweb"
+IFS=',' read -r -a SERVERS <<< "${METABIZ_DEPLOY_HOSTS:-143.198.219.81,168.144.132.171}"
+USER="${METABIZ_DEPLOY_USER:-waha}"
 REMOTE_PATH="/opt/metabiz-whatsapp-headless/shared"
 
 if [ ! -f .env.production ]; then
@@ -16,10 +19,15 @@ if [ ! -f .env.production ]; then
 fi
 
 echo "📋 Copying environment file to server..."
-ssh "${SERVER}" "mkdir -p ${REMOTE_PATH}"
-scp .env.production "${SERVER}:${REMOTE_PATH}/.env"
+for SERVER in "${SERVERS[@]}"; do
+  SERVER="$(echo "${SERVER}" | xargs)"
+  [ -n "${SERVER}" ] || continue
+
+  TARGET="${USER}@${SERVER}"
+  ssh "${TARGET}" "mkdir -p ${REMOTE_PATH}"
+  scp .env.production "${TARGET}:${REMOTE_PATH}/.env"
+done
 
 echo "✅ Environment file copied successfully!"
 echo "   ${REMOTE_PATH}/.env"
-
 

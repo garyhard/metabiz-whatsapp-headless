@@ -7,6 +7,10 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || process
 const REPO_URL = GITHUB_TOKEN
   ? `https://x-access-token:${GITHUB_TOKEN}@github.com/garyhard/metabiz-whatsapp-headless.git`
   : 'git@github.com:garyhard/metabiz-whatsapp-headless.git';
+const DEPLOY_HOSTS = (process.env.METABIZ_DEPLOY_HOSTS || '143.198.219.81,168.144.132.171')
+  .split(',')
+  .map((host) => host.trim())
+  .filter(Boolean);
 
 module.exports = {
   apps: [
@@ -31,9 +35,8 @@ module.exports = {
   deploy: {
     production: {
       user: 'waha',
-      host: ['wahaweb'], // Uses SSH config alias
+      host: DEPLOY_HOSTS,
       ref: 'origin/main',
-      // TODO: replace with your repo
       repo: REPO_URL,
       path: '/opt/metabiz-whatsapp-headless',
       'pre-setup': 'mkdir -p /opt/metabiz-whatsapp-headless/shared/{logs,profiles} && echo "⚠️  Remember to copy .env.production to /opt/metabiz-whatsapp-headless/shared/.env before first deploy"',
