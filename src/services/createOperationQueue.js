@@ -143,6 +143,14 @@ function isTransientNetworkErrorMessage(message) {
   ].some((fragment) => lowered.includes(fragment));
 }
 
+function isBrowserCapacityErrorMessage(message) {
+  const lowered = String(message || '').toLowerCase();
+  return (
+    lowered.includes('active browser limit reached') ||
+    lowered.includes('no idle session could be suspended')
+  );
+}
+
 function deriveErrorCode(error, message) {
   const detailsType = String(error?.details?.type || '').trim().toLowerCase();
   if (detailsType) {
@@ -158,6 +166,7 @@ function deriveErrorCode(error, message) {
   if (error instanceof FlowTimeoutError) return 'flow_timeout';
 
   const lowered = String(message || '').toLowerCase();
+  if (isBrowserCapacityErrorMessage(lowered)) return 'browser_capacity';
   if (isTransientNetworkErrorMessage(lowered)) return 'transient_network';
   if (error instanceof BrowserCrashError) return 'browser_crash';
   if (error instanceof AutomationError) return 'automation_error';
@@ -188,6 +197,8 @@ function buildErrorResult(error, partialResult = null, fallbackMessage = null) {
 
 function isRetryableCreateError(errorResult) {
   const code = String(errorResult?.errorCode || '').toLowerCase();
+  if (code === 'browser_capacity') return true;
+
   return ![
     'invalid_input',
     'need_new_cookies',
@@ -199,6 +210,10 @@ function isRetryableCreateError(errorResult) {
     'flow_timeout',
     'inbox_not_ready',
   ].includes(code);
+}
+
+function shouldDeferCreateCapacityError(errorResult) {
+  return String(errorResult?.errorCode || '').toLowerCase() === 'browser_capacity';
 }
 
 function isDeferredCreateCheckError(error, errorResult) {
@@ -374,8 +389,9 @@ async function processOperation(operation) {
     const maxAttempts = Math.max(1, Number(operation.maxAttempts) || 0, Number(config.createQueue.maxAttempts) || 1);
     const attempts = Math.max(1, Number(operation.attempts) || 1);
     const retryable = isRetryableCreateError(errorResult);
+    const deferForCapacity = shouldDeferCreateCapacityError(errorResult);
 
-    if (!retryable || attempts >= maxAttempts) {
+    if (!retryable || (attempts >= maxAttempts && !deferForCapacity)) {
       const updated = sessionStore.markCreateOperationError(
         operation.id,
         message,
@@ -395,7 +411,11 @@ async function processOperation(operation) {
       return;
     }
 
-    const retryDelay = backoffMs(attempts, config.createQueue.retryBaseMs, config.createQueue.retryMaxMs);
+    const retryDelay = backoffMs(
+      deferForCapacity ? Math.min(attempts, maxAttempts) : attempts,
+      config.createQueue.retryBaseMs,
+      config.createQueue.retryMaxMs
+    );
     const retryAt = Date.now() + retryDelay;
     const updated = sessionStore.markCreateOperationRetry(
       operation.id,
@@ -412,7 +432,8 @@ async function processOperation(operation) {
       return;
     }
     console.warn(
-      `[CreateOperationQueue] retry id=${operation.id} attempts=${attempts}/${maxAttempts} retry_in_ms=${retryDelay}`
+      `[CreateOperationQueue] retry id=${operation.id} attempts=${attempts}/${maxAttempts} ` +
+      `defer_for_capacity=${deferForCapacity} retry_in_ms=${retryDelay}`
     );
   }
 }
