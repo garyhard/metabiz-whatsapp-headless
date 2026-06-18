@@ -147,9 +147,9 @@ export const config = {
   },
   createQueue: {
     pollIntervalMs: parsePositiveInt(process.env.META_CREATE_QUEUE_POLL_INTERVAL_MS, 1500),
-    batchSize: parsePositiveInt(process.env.META_CREATE_QUEUE_BATCH_SIZE, 2),
-    concurrency: parsePositiveInt(process.env.META_CREATE_QUEUE_CONCURRENCY, 2),
-    maxConcurrency: parsePositiveInt(process.env.META_CREATE_QUEUE_MAX_CONCURRENCY, 2),
+    batchSize: parsePositiveInt(process.env.META_CREATE_QUEUE_BATCH_SIZE, 4),
+    concurrency: parsePositiveInt(process.env.META_CREATE_QUEUE_CONCURRENCY, 4),
+    maxConcurrency: parsePositiveInt(process.env.META_CREATE_QUEUE_MAX_CONCURRENCY, 4),
     maxAttempts: parsePositiveInt(process.env.META_CREATE_QUEUE_MAX_ATTEMPTS, 5),
     retryBaseMs: parsePositiveInt(process.env.META_CREATE_QUEUE_RETRY_BASE_MS, 5000),
     retryMaxMs: parsePositiveInt(process.env.META_CREATE_QUEUE_RETRY_MAX_MS, 30000),

@@ -25,6 +25,8 @@ const PROXY_IP_CHECK_TIMEOUT = 15000;
 const PROXY_META_CHECK_TIMEOUT = 60000;
 const PLAYWRIGHT_CLOSE_TIMEOUT_MS = 15000;
 const FORCE_KILL_GRACE_MS = 1500;
+const VALIDATE_TIMEOUT_CLEANUP_MS = 20000;
+const VALIDATE_DEBUG_SCREENSHOT_TIMEOUT_MS = 10000;
 const progressByCUser = new Map();
 const SESSIONS_FILE = path.join(__dirname, '../../profiles/sessions.json');
 const PROFILE_ROOT = path.join(__dirname, '../../profiles');
@@ -761,6 +763,15 @@ function withTimeout(promise, ms, label, onTimeout = null) {
     promise.finally(() => clearTimeout(timer)),
     timeout,
   ]);
+}
+
+async function bestEffortWithTimeout(promise, ms, label) {
+  try {
+    return await withTimeout(Promise.resolve(promise), ms, label);
+  } catch (error) {
+    console.warn(`[SessionManager] ${label} timed out/failed: ${error?.message || String(error)}`);
+    return null;
+  }
 }
 
 async function withSessionLock(sessionId, task, { priority = 'normal' } = {}) {
@@ -2234,8 +2245,12 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
   } catch (error) {
     logStep('validateCookies:error', { cUser, error: error?.message || error?.toString() });
     setProgress(cUser, 'validate:error', { error: error?.message || error?.toString() });
-    if (page) {
-      await captureDebugScreenshot(page, 'validate', cUser || 'unknown').catch(() => {});
+    if (page && !(error instanceof FlowTimeoutError)) {
+      await bestEffortWithTimeout(
+        captureDebugScreenshot(page, 'validate', cUser || 'unknown'),
+        VALIDATE_DEBUG_SCREENSHOT_TIMEOUT_MS,
+        'validate.debug_screenshot'
+      );
     }
     if (error instanceof InvalidInputError) {
       throw error;
@@ -2246,11 +2261,23 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
     throw new BrowserCrashError(`Validate cookies failed: ${error.message}`);
   } finally {
     if (browserSlotReserved) {
-      await releaseBrowserSlot(browserReservationKey);
+      await bestEffortWithTimeout(
+        releaseBrowserSlot(browserReservationKey),
+        VALIDATE_TIMEOUT_CLEANUP_MS,
+        'validate.release_browser_slot'
+      );
     }
     if (!persist || !sessionPersisted) {
-      await closeBrowserArtifacts(tempSessionId, { page, context, browser });
-      await cleanupProfile(tempSessionId);
+      await bestEffortWithTimeout(
+        closeBrowserArtifacts(tempSessionId, { page, context, browser }),
+        VALIDATE_TIMEOUT_CLEANUP_MS,
+        'validate.close_browser_artifacts'
+      );
+      await bestEffortWithTimeout(
+        cleanupProfile(tempSessionId),
+        VALIDATE_TIMEOUT_CLEANUP_MS,
+        'validate.cleanup_profile'
+      );
     }
   }
 }
