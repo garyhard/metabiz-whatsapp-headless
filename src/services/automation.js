@@ -243,6 +243,9 @@ const NEW_WHATSAPP_NUMBER_LABELS = uniqueNormalizedList([
   'nomor whatsapp baru',
   'nomor baru whatsapp',
 ]);
+const WHATSAPP_INBOX_TAB_LABELS = uniqueNormalizedList([
+  'whatsapp',
+]);
 const SEND_MESSAGE_LABELS = uniqueNormalizedList([
   ...(config?.texts?.sendMessage || []),
   'send message',
@@ -2561,6 +2564,172 @@ async function ensureInboxReady(page, label = 'Automation', options = {}) {
   }
 }
 
+function looksLikeWhatsappInboxTabText(value, { allowDecorated = false } = {}) {
+  const normalized = normalizeText(value)
+    .replace(/[•·]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!normalized) return false;
+  if (WHATSAPP_INBOX_TAB_LABELS.includes(normalized)) return true;
+  if (/^whatsapp\s*[\[(]?\d+[\])]?$/i.test(normalized)) return true;
+  if (!allowDecorated) return false;
+  return (
+    /^whatsapp\b/.test(normalized) &&
+    normalized.length <= 40 &&
+    !/\b(send|message|kirim|pesan)\b/.test(normalized)
+  );
+}
+
+function scoreWhatsappInboxTabCandidate(info = {}) {
+  const candidate = info && typeof info === 'object' ? info : {};
+  const role = String(candidate.role || '').toLowerCase();
+  const href = String(candidate.href || '').toLowerCase();
+  const dataSurface = String(candidate.dataSurface || '').toLowerCase();
+  const textBag = [candidate.text, candidate.ariaLabel, candidate.title]
+    .map((value) => normalizeText(value))
+    .filter(Boolean);
+
+  const exactTextMatch = textBag.some((value) => looksLikeWhatsappInboxTabText(value));
+  const decoratedTextMatch = textBag.some((value) => looksLikeWhatsappInboxTabText(value, { allowDecorated: true }));
+  if (!exactTextMatch && !decoratedTextMatch) {
+    return -1;
+  }
+
+  let score = 0;
+  if (role === 'tab') score += 40;
+  if (href.includes('/latest/inbox')) score += 20;
+  if (dataSurface.includes('inbox') || dataSurface.includes('tab')) score += 10;
+  if (String(candidate.ariaSelected || '').toLowerCase() === 'true') score += 5;
+  return score;
+}
+
+async function getElementSummary(page, elementHandle) {
+  return page.evaluate((el) => {
+    const closestSelected = el.closest('[aria-selected="true"]');
+    const closestRole = el.closest('[role]');
+    return {
+      text: (el.textContent || el.innerText || '').replace(/\s+/g, ' ').trim(),
+      ariaLabel: el.getAttribute('aria-label') || '',
+      title: el.getAttribute('title') || '',
+      role: el.getAttribute('role') || closestRole?.getAttribute('role') || '',
+      href: el.getAttribute('href') || '',
+      dataSurface: el.getAttribute('data-surface') || '',
+      ariaSelected: el.getAttribute('aria-selected') || closestSelected?.getAttribute('aria-selected') || '',
+    };
+  }, elementHandle);
+}
+
+async function findWhatsappInboxTab(page) {
+  const elements = await page.$$('[role="tab"], [role="button"], button, a');
+  let best = null;
+
+  for (const element of elements) {
+    if (!(await isVisible(page, element))) continue;
+
+    const info = await getElementSummary(page, element).catch(() => null);
+    const score = scoreWhatsappInboxTabCandidate(info);
+    if (score < 0) continue;
+
+    if (!best || score > best.score) {
+      best = { element, info, score };
+    }
+  }
+
+  return best;
+}
+
+async function collectWhatsappContextDetails(page, reason, extraDetails = {}) {
+  const pageState = await page.evaluate(() => {
+    const candidates = Array.from(document.querySelectorAll('[role="tab"], [role="button"], button, a'))
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return {
+          text: (el.textContent || el.innerText || '').replace(/\s+/g, ' ').trim(),
+          ariaLabel: el.getAttribute('aria-label') || '',
+          role: el.getAttribute('role') || '',
+          href: el.getAttribute('href') || '',
+          ariaSelected: el.getAttribute('aria-selected') || '',
+          visible:
+            rect.width > 0 &&
+            rect.height > 0 &&
+            style.display !== 'none' &&
+            style.visibility !== 'hidden' &&
+            style.opacity !== '0',
+        };
+      })
+      .filter((item) => item.visible && (item.text || item.ariaLabel))
+      .slice(0, 30);
+
+    return {
+      title: document.title,
+      url: window.location.href,
+      candidates,
+    };
+  }).catch(() => ({
+    title: null,
+    url: page.url(),
+    candidates: [],
+  }));
+
+  return {
+    type: 'inbox_not_ready',
+    reason,
+    stage: 'check_session.whatsapp_context',
+    url: pageState.url || page.url(),
+    title: pageState.title || null,
+    visibleCandidates: pageState.candidates || [],
+    ...extraDetails,
+  };
+}
+
+async function scanForAccountRestriction(page, label, cUser, { timeoutMs = 1800, intervalMs = 300 } = {}) {
+  const deadline = Date.now() + positiveMs(timeoutMs, 1800);
+  const waitMs = positiveMs(intervalMs, 300);
+
+  while (Date.now() <= deadline) {
+    await detectAccountRestricted(page, label, cUser);
+    await sleep(waitMs);
+  }
+}
+
+async function ensureWhatsappInboxContext(page, label = 'Automation', {
+  cUser = 'unknown',
+  timeoutMs = 8000,
+} = {}) {
+  await detectAccountRestricted(page, label, cUser);
+
+  const tab = await waitFor(
+    page,
+    async () => findWhatsappInboxTab(page),
+    { timeoutMs: positiveMs(timeoutMs, 8000), intervalMs: 300 }
+  ).catch(() => null);
+
+  if (!tab?.element) {
+    throw new AutomationError(
+      `${label}: WhatsApp inbox tab not found`,
+      await collectWhatsappContextDetails(page, 'whatsapp_tab_not_found', { cUser })
+    );
+  }
+
+  if (String(tab.info?.ariaSelected || '').toLowerCase() !== 'true') {
+    await clickElement(page, tab.element, `${label}: Open WhatsApp inbox tab`);
+    await sleep(1200);
+  }
+
+  await dismissInboxBlockingPrompts(page, label);
+  const spinnerOk = await waitForMainSpinner(page, { timeoutMs: 5000 });
+  if (!spinnerOk) {
+    throw new AutomationError(
+      `${label}: WhatsApp inbox tab still loading`,
+      await collectWhatsappContextDetails(page, 'whatsapp_tab_spinner_timeout', { cUser })
+    );
+  }
+  await scanForAccountRestriction(page, label, cUser);
+
+  console.log(`[${label}] ✓ WhatsApp inbox context checked`);
+}
+
 /**
  * Check if element is visible
  */
@@ -3920,6 +4089,8 @@ export async function checkSessionFlow(
     reloadTimeoutMs = RELOAD_TIMEOUT_MS,
     spinnerTimeoutMs = SPINNER_TIMEOUT_MS,
     inboxIndicatorTimeoutMs = 10000,
+    requireWhatsappInboxContext = true,
+    whatsappContextTimeoutMs = 8000,
   } = {}
 ) {
   console.log('[Automation] ========================================');
@@ -4028,6 +4199,14 @@ export async function checkSessionFlow(
     }
 
     logStep('check:inbox_ready');
+
+    if (requireWhatsappInboxContext !== false) {
+      await ensureWhatsappInboxContext(page, 'Check', {
+        cUser,
+        timeoutMs: whatsappContextTimeoutMs,
+      });
+      logStep('check:whatsapp_context_ready');
+    }
   };
 
   let lastError = null;
