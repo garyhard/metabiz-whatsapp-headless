@@ -88,6 +88,12 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_message_jobs_status_next_retry
     ON message_jobs(status, next_retry_at, created_at);
+  CREATE INDEX IF NOT EXISTS idx_message_jobs_session_status_retry_created
+    ON message_jobs(session_id, status, next_retry_at, priority, created_at);
+  CREATE INDEX IF NOT EXISTS idx_message_jobs_status_session_created
+    ON message_jobs(status, session_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_message_jobs_webhook_pending
+    ON message_jobs(webhook_notified, status, webhook_next_retry_at, updated_at);
   CREATE TABLE IF NOT EXISTS session_flow_jobs (
     id TEXT PRIMARY KEY,
     request_id TEXT UNIQUE,
@@ -227,6 +233,33 @@ try {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_message_jobs_status_retry_priority_created
       ON message_jobs(status, next_retry_at, priority, created_at)
+  `);
+} catch {
+  // Index already exists.
+}
+
+try {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_message_jobs_session_status_retry_created
+      ON message_jobs(session_id, status, next_retry_at, priority, created_at)
+  `);
+} catch {
+  // Index already exists.
+}
+
+try {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_message_jobs_status_session_created
+      ON message_jobs(status, session_id, created_at)
+  `);
+} catch {
+  // Index already exists.
+}
+
+try {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_message_jobs_webhook_pending
+      ON message_jobs(webhook_notified, status, webhook_next_retry_at, updated_at)
   `);
 } catch {
   // Index already exists.
