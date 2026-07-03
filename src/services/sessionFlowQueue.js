@@ -497,6 +497,7 @@ export function stopSessionFlowQueueWorker() {
 }
 
 export function getSessionFlowQueueWorkerStatus(now = Date.now()) {
+  const counts = sessionStore.sessionFlowJobStatusCounts(now);
   const stalled = pumping &&
     !!lastPumpStartedAt &&
     now - lastPumpStartedAt > workerStallThresholdMs();
@@ -508,6 +509,13 @@ export function getSessionFlowQueueWorkerStatus(now = Date.now()) {
     stalled,
     pollIntervalMs: Math.max(1, Number(config.sessionQueue.pollIntervalMs) || 1),
     batchSize: Math.max(1, Number(config.sessionQueue.batchSize) || 1),
+    queuedCount: Number(counts.queued || 0),
+    runnableCount: Number(counts.runnable || 0),
+    processingCount: Number(counts.processing || 0),
+    errorCount: Number(counts.error || 0),
+    completedCount: Number(counts.completed || 0),
+    oldestRunnableAgeMs: counts.oldestRunnableAgeMs,
+    oldestProcessingAgeMs: counts.oldestProcessingAgeMs,
     lastPumpStartedAt,
     lastPumpFinishedAt,
     lastPumpAgeMs: lastPumpStartedAt ? Math.max(0, now - lastPumpStartedAt) : null,

@@ -24,8 +24,18 @@ npm ci --production=false
 echo "🎭 Installing Playwright Chromium (if needed)..."
 npx playwright install chromium
 
+if [ "${ENABLE_PM2_LOGROTATE:-true}" = "true" ]; then
+  echo "🧾 Ensuring PM2 log rotation..."
+  if ! pm2 module:list 2>/dev/null | grep -q "pm2-logrotate"; then
+    pm2 install pm2-logrotate || echo "⚠️  pm2-logrotate install failed; continuing deploy"
+  fi
+  pm2 set pm2-logrotate:max_size "${PM2_LOGROTATE_MAX_SIZE:-100M}" >/dev/null || true
+  pm2 set pm2-logrotate:retain "${PM2_LOGROTATE_RETAIN:-14}" >/dev/null || true
+  pm2 set pm2-logrotate:compress "${PM2_LOGROTATE_COMPRESS:-true}" >/dev/null || true
+  pm2 set pm2-logrotate:rotateInterval "${PM2_LOGROTATE_INTERVAL:-0 0 * * *}" >/dev/null || true
+fi
+
 echo "🔄 Restarting service..."
 pm2 reload ecosystem.config.cjs --update-env
 
 echo "✅ Deployment complete!"
-

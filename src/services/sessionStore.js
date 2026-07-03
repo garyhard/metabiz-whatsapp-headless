@@ -1617,6 +1617,42 @@ export const sessionStore = {
     }, {});
   },
 
+  sessionFlowJobStatusCounts(now = Date.now()) {
+    const countsRows = getRows(`
+      SELECT status, COUNT(*) AS count
+      FROM session_flow_jobs
+      GROUP BY status
+    `, {});
+    const counts = countsRows.reduce((memo, row) => {
+      const status = String(row.status || '').trim().toLowerCase();
+      if (!status) return memo;
+      memo[status] = Number(row.count || 0);
+      return memo;
+    }, {});
+
+    const runnable = getRow(`
+      SELECT COUNT(*) AS count, MIN(created_at) AS oldest_created_at
+      FROM session_flow_jobs
+      WHERE status = 'queued'
+        AND next_retry_at <= :now
+    `, { ':now': now }) || {};
+    const processing = getRow(`
+      SELECT COUNT(*) AS count, MIN(updated_at) AS oldest_updated_at
+      FROM session_flow_jobs
+      WHERE status = 'processing'
+    `, {}) || {};
+    const oldestQueuedCreatedAt = Number(runnable.oldest_created_at || 0) || null;
+    const oldestProcessingUpdatedAt = Number(processing.oldest_updated_at || 0) || null;
+
+    return {
+      ...counts,
+      runnable: Number(runnable.count || 0),
+      processing: Number(processing.count || counts.processing || 0),
+      oldestRunnableAgeMs: oldestQueuedCreatedAt ? Math.max(0, now - oldestQueuedCreatedAt) : null,
+      oldestProcessingAgeMs: oldestProcessingUpdatedAt ? Math.max(0, now - oldestProcessingUpdatedAt) : null,
+    };
+  },
+
   listQueuedMessageJobs(limit = 100) {
     const maxRows = Math.max(1, Number(limit) || 100);
     const rows = getRows(`
