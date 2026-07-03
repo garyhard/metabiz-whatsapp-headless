@@ -180,6 +180,12 @@ async function executeJob(job) {
         persist: payload.persist === true,
         freshBrowser: payload.freshBrowser === true,
         twofaSecret: payload.twofaSecret || null,
+        validateTimeoutMs: Number(payload.validateTimeoutMs) > 0
+          ? Number(payload.validateTimeoutMs)
+          : config.createQueue.validateTimeoutMs,
+        twofaInputTimeoutMs: Number(payload.twofaInputTimeoutMs) > 0
+          ? Number(payload.twofaInputTimeoutMs)
+          : config.createQueue.validateTwofaInputTimeoutMs,
       });
 
       if (payload.checkAfterSuccess === true && validationResult?.sessionId) {
@@ -454,13 +460,15 @@ export async function pumpSessionFlowQueue() {
   lastPumpError = null;
   try {
     sessionStore.requeueStaleProcessingSessionFlowJobs(config.sessionQueue.processingTimeoutMs);
-    let processed = 0;
+    const jobs = [];
     const maxBatch = Math.max(1, Number(config.sessionQueue.batchSize) || 1);
-    while (!stopRequested && processed < maxBatch) {
+    while (!stopRequested && jobs.length < maxBatch) {
       const job = sessionStore.claimNextSessionFlowJob(Date.now());
       if (!job) break;
-      await processJob(job);
-      processed += 1;
+      jobs.push(job);
+    }
+    if (jobs.length > 0) {
+      await Promise.all(jobs.map((job) => processJob(job)));
     }
     await flushWebhookQueue(maxBatch);
   } catch (error) {
