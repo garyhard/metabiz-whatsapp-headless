@@ -35,6 +35,63 @@ function normalizeContext(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
 }
 
+function normalizePriority(value, fallback = 'normal') {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'high' || normalized === 'normal' || normalized === 'low') {
+    return normalized;
+  }
+  return fallback;
+}
+
+function contextFlow(payload) {
+  return String(normalizeContext(payload?.context)?.flow || '').trim().toLowerCase();
+}
+
+function contextWhatsappSessionId(payload) {
+  return String(normalizeContext(payload?.context)?.whatsapp_session_id || '').trim();
+}
+
+function inferPriority(jobType, payload = {}, explicitPriority = null) {
+  const explicit = normalizePriority(explicitPriority || payload.priority || '', '');
+  if (explicit) return explicit;
+
+  const type = String(jobType || '').trim();
+  const flow = contextFlow(payload);
+  if (type === 'create_session' || flow === 'create_meta' || flow === 'test_flow' || flow === 'test_flow_retry') {
+    return 'high';
+  }
+  if (
+    flow === 'refresh_meta' ||
+    flow === 'update_cookies' ||
+    flow === 'bulk_refresh' ||
+    flow === 'reconcile_missing' ||
+    flow === 'auto_link_meta'
+  ) {
+    return 'low';
+  }
+  return 'normal';
+}
+
+function inferCoalesceKey(jobType, targetSessionId, cUser, payload = {}, priority = 'normal') {
+  const type = String(jobType || '').trim();
+  const target = String(targetSessionId || '').trim();
+  const contextSessionId = contextWhatsappSessionId(payload);
+  const flow = contextFlow(payload);
+  if (type === 'validate_cookies' && contextSessionId && priority !== 'high') {
+    return `${type}:whatsapp_session:${contextSessionId}`;
+  }
+  if (type === 'validate_cookies' && cUser && priority === 'low') {
+    return `${type}:c_user:${String(cUser).trim()}`;
+  }
+  if (['update_session_cookies', 'update_session_proxy', 'check_session', 'resume_check', 'destroy_session'].includes(type) && target) {
+    return `${type}:target:${target}`;
+  }
+  if (type === 'create_session' && contextSessionId && flow !== 'create_meta') {
+    return `${type}:whatsapp_session:${contextSessionId}`;
+  }
+  return null;
+}
+
 function webhookEnabled() {
   return String(config.sessionQueue.webhookUrl || '').trim().length > 0;
 }
@@ -72,9 +129,17 @@ function workerStallThresholdMs() {
 
 function sessionFlowJobTimeoutMs(job) {
   const payload = job?.payload && typeof job.payload === 'object' ? job.payload : {};
-  const requested = Number(payload.jobTimeoutMs || payload.flowTimeoutMs);
+  const requested = Number(payload.jobTimeoutMs || payload.flowTimeoutMs || payload.validateTimeoutMs);
   if (Number.isFinite(requested) && requested > 0) {
     return requested;
+  }
+
+  if (job?.jobType === 'validate_cookies') {
+    return Math.max(
+      Number(config.createQueue.validateTimeoutMs) || 0,
+      Number(config.sessionQueue.pollIntervalMs) || 0,
+      30000
+    );
   }
 
   return Math.max(
@@ -459,10 +524,24 @@ export async function pumpSessionFlowQueue() {
   lastPumpStartedAt = Date.now();
   lastPumpError = null;
   try {
+    const reconcileSummary = sessionStore.reconcileInvalidSessionFlowJobs({
+      defaultValidateTimeoutMs: config.createQueue.validateTimeoutMs,
+      defaultTwofaInputTimeoutMs: config.createQueue.validateTwofaInputTimeoutMs,
+    });
+    if (reconcileSummary.convertedPendingTarget > 0 || reconcileSummary.skippedPendingTarget > 0) {
+      console.warn(
+        `[SessionFlowQueue] reconciled invalid jobs converted_pending=${reconcileSummary.convertedPendingTarget} skipped_pending=${reconcileSummary.skippedPendingTarget}`
+      );
+    }
     sessionStore.requeueStaleProcessingSessionFlowJobs(config.sessionQueue.processingTimeoutMs);
     const jobs = [];
-    const maxBatch = Math.max(1, Number(config.sessionQueue.batchSize) || 1);
-    while (!stopRequested && jobs.length < maxBatch) {
+    const maxConcurrency = Math.max(
+      1,
+      Number(config.sessionQueue.concurrency) ||
+        Number(config.sessionQueue.batchSize) ||
+        1
+    );
+    while (!stopRequested && jobs.length < maxConcurrency) {
       const job = sessionStore.claimNextSessionFlowJob(Date.now());
       if (!job) break;
       jobs.push(job);
@@ -470,7 +549,7 @@ export async function pumpSessionFlowQueue() {
     if (jobs.length > 0) {
       await Promise.all(jobs.map((job) => processJob(job)));
     }
-    await flushWebhookQueue(maxBatch);
+    await flushWebhookQueue(maxConcurrency);
   } catch (error) {
     lastPumpError = error?.message || String(error);
     throw error;
@@ -517,6 +596,7 @@ export function getSessionFlowQueueWorkerStatus(now = Date.now()) {
     stalled,
     pollIntervalMs: Math.max(1, Number(config.sessionQueue.pollIntervalMs) || 1),
     batchSize: Math.max(1, Number(config.sessionQueue.batchSize) || 1),
+    concurrency: Math.max(1, Number(config.sessionQueue.concurrency) || Number(config.sessionQueue.batchSize) || 1),
     queuedCount: Number(counts.queued || 0),
     runnableCount: Number(counts.runnable || 0),
     processingCount: Number(counts.processing || 0),
@@ -537,6 +617,8 @@ export function serializeSessionFlowJob(job) {
     id: job.id,
     requestId: job.requestId,
     type: job.jobType,
+    priority: job.priority || 'normal',
+    coalesceKey: job.coalesceKey || null,
     targetSessionId: job.targetSessionId || null,
     cUser: job.cUser || null,
     status: job.status,
@@ -565,6 +647,8 @@ export function enqueueSessionFlowJob({
   payload = {},
   webhookUrl = null,
   maxAttempts = null,
+  priority = null,
+  coalesceKey = null,
 }) {
   const normalizedRequestId = requestId ? String(requestId).trim() : null;
   if (normalizedRequestId) {
@@ -575,12 +659,41 @@ export function enqueueSessionFlowJob({
   }
 
   const normalizedPayload = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
+  const normalizedJobType = String(jobType || '').trim();
+  const normalizedTargetSessionId = targetSessionId ? String(targetSessionId).trim() : null;
+  const normalizedCUser = cUser ? String(cUser).trim() : null;
+  const normalizedPriority = inferPriority(normalizedJobType, normalizedPayload, priority);
+  const normalizedCoalesceKey = String(coalesceKey || '').trim() ||
+    inferCoalesceKey(normalizedJobType, normalizedTargetSessionId, normalizedCUser, normalizedPayload, normalizedPriority);
+
+  if (normalizedCoalesceKey) {
+    const existing = sessionStore.getActiveSessionFlowJobByCoalesceKey(normalizedCoalesceKey);
+    if (existing) {
+      if (existing.status === 'queued') {
+        const updated = sessionStore.coalesceQueuedSessionFlowJob(existing.id, {
+          requestId: normalizedRequestId,
+          priority: normalizedPriority,
+          targetSessionId: normalizedTargetSessionId,
+          cUser: normalizedCUser,
+          payload: normalizedPayload,
+          webhookUrl: webhookUrl ? String(webhookUrl).trim() : null,
+          maxAttempts: Math.max(1, Number(maxAttempts) || config.sessionQueue.maxAttempts),
+        });
+        schedulePump(0);
+        return { job: updated || existing, created: false, coalesced: true };
+      }
+      return { job: existing, created: false, coalesced: true };
+    }
+  }
+
   const job = sessionStore.enqueueSessionFlowJob({
     id: uuidv4(),
     requestId: normalizedRequestId,
-    jobType: String(jobType || '').trim(),
-    targetSessionId: targetSessionId ? String(targetSessionId).trim() : null,
-    cUser: cUser ? String(cUser).trim() : null,
+    jobType: normalizedJobType,
+    priority: normalizedPriority,
+    coalesceKey: normalizedCoalesceKey,
+    targetSessionId: normalizedTargetSessionId,
+    cUser: normalizedCUser,
     payload: normalizedPayload,
     webhookUrl: webhookUrl ? String(webhookUrl).trim() : null,
     maxAttempts: Math.max(1, Number(maxAttempts) || config.sessionQueue.maxAttempts),

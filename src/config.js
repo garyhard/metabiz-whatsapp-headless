@@ -136,6 +136,10 @@ export const config = {
   sessionQueue: {
     pollIntervalMs: parsePositiveInt(process.env.META_SESSION_QUEUE_POLL_INTERVAL_MS, 1500),
     batchSize: parsePositiveInt(process.env.META_SESSION_QUEUE_BATCH_SIZE, 4),
+    concurrency: parsePositiveInt(
+      process.env.META_SESSION_QUEUE_CONCURRENCY,
+      parsePositiveInt(process.env.META_SESSION_QUEUE_BATCH_SIZE, 4)
+    ),
     maxAttempts: parsePositiveInt(process.env.META_SESSION_QUEUE_MAX_ATTEMPTS, 3),
     retryBaseMs: parsePositiveInt(process.env.META_SESSION_QUEUE_RETRY_BASE_MS, 30000),
     retryMaxMs: parsePositiveInt(process.env.META_SESSION_QUEUE_RETRY_MAX_MS, 300000),

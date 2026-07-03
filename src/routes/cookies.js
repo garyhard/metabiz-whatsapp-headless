@@ -66,7 +66,7 @@ router.post('/validate', async (req, res, next) => {
       });
     }
     if (asyncMode) {
-      const { job, created } = enqueueSessionFlowJob({
+      const { job, created, coalesced } = enqueueSessionFlowJob({
         requestId: normalizedRequestId,
         jobType: 'validate_cookies',
         payload: {
@@ -84,6 +84,7 @@ router.post('/validate', async (req, res, next) => {
         ok: true,
         accepted: true,
         created,
+        coalesced: coalesced === true,
         job: serializeSessionFlowJob(job),
       });
     }

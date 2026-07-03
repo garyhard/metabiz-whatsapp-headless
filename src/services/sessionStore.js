@@ -98,6 +98,8 @@ db.exec(`
     id TEXT PRIMARY KEY,
     request_id TEXT UNIQUE,
     job_type TEXT NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'normal',
+    coalesce_key TEXT,
     target_session_id TEXT,
     c_user TEXT,
     payload_json TEXT,
@@ -323,6 +325,31 @@ try {
   db.exec('ALTER TABLE session_flow_jobs ADD COLUMN c_user TEXT');
 } catch {
   // Column already exists.
+}
+
+try {
+  db.exec("ALTER TABLE session_flow_jobs ADD COLUMN priority TEXT NOT NULL DEFAULT 'normal'");
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE session_flow_jobs ADD COLUMN coalesce_key TEXT');
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_session_flow_jobs_status_priority_retry
+      ON session_flow_jobs(status, priority, next_retry_at, created_at)
+  `);
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_session_flow_jobs_coalesce_active
+      ON session_flow_jobs(coalesce_key, status, updated_at)
+  `);
+} catch (error) {
+  console.warn('[SessionStore] failed to ensure session_flow_jobs indexes:', error?.message || String(error));
 }
 
 function getSessionsTableSql() {
@@ -587,6 +614,14 @@ function messageJobPriorityOrderSql(columnName = 'q.priority') {
   return `CASE ${columnName} WHEN 'high' THEN 0 WHEN 'normal' THEN 1 WHEN 'low' THEN 2 ELSE 1 END`;
 }
 
+function normalizeSessionFlowJobPriority(priority, fallback = 'normal') {
+  return normalizeMessageJobPriority(priority, fallback);
+}
+
+function sessionFlowJobPriorityOrderSql(columnName = 'priority') {
+  return `CASE ${columnName} WHEN 'high' THEN 0 WHEN 'normal' THEN 1 WHEN 'low' THEN 2 ELSE 1 END`;
+}
+
 function buildExcludedSessionSql(excludedSessionIds = [], params = {}) {
   const normalizedIds = Array.from(new Set(
     Array.isArray(excludedSessionIds)
@@ -695,7 +730,16 @@ function getNextRunnableSessionFlowJobRow(now = Date.now()) {
     FROM session_flow_jobs
     WHERE status = 'queued'
       AND next_retry_at <= :now
-    ORDER BY created_at ASC
+    ORDER BY
+      ${sessionFlowJobPriorityOrderSql('priority')} ASC,
+      CASE job_type
+        WHEN 'create_session' THEN 0
+        WHEN 'validate_cookies' THEN 1
+        WHEN 'resume_check' THEN 2
+        WHEN 'check_session' THEN 3
+        ELSE 4
+      END ASC,
+      created_at ASC
     LIMIT 1
   `, { ':now': now });
 }
@@ -872,6 +916,8 @@ function normalizeSessionFlowJobRow(row) {
     id: row.id,
     requestId: row.request_id || null,
     jobType: row.job_type,
+    priority: normalizeSessionFlowJobPriority(row.priority),
+    coalesceKey: row.coalesce_key || null,
     targetSessionId: row.target_session_id || null,
     cUser: row.c_user || null,
     payload: deserializeSafe(row.payload_json),
@@ -1653,6 +1699,65 @@ export const sessionStore = {
     };
   },
 
+  reconcileInvalidSessionFlowJobs({
+    now = Date.now(),
+    defaultValidateTimeoutMs = null,
+    defaultTwofaInputTimeoutMs = null,
+  } = {}) {
+    const pendingRows = getRows(`
+      SELECT id, payload_json
+      FROM session_flow_jobs
+      WHERE job_type = 'update_session_cookies'
+        AND target_session_id = 'pending'
+        AND status IN ('queued', 'processing')
+    `, {});
+    let convertedPendingTarget = 0;
+    let skippedPendingTarget = 0;
+    pendingRows.forEach((row) => {
+      const payload = deserializeSafe(row.payload_json) || {};
+      if (!payload.cookies) {
+        skippedPendingTarget += 1;
+        return;
+      }
+      payload.persist = true;
+      payload.checkAfterSuccess = true;
+      payload.freshBrowser = payload.freshBrowser === true;
+      if (defaultValidateTimeoutMs && !payload.validateTimeoutMs) {
+        payload.validateTimeoutMs = defaultValidateTimeoutMs;
+      }
+      if (defaultTwofaInputTimeoutMs && !payload.twofaInputTimeoutMs) {
+        payload.twofaInputTimeoutMs = defaultTwofaInputTimeoutMs;
+      }
+      runStatement(`
+        UPDATE session_flow_jobs
+        SET job_type = 'validate_cookies',
+            priority = 'low',
+            target_session_id = NULL,
+            status = 'queued',
+            attempts = 0,
+            payload_json = :payload_json,
+            error_message = NULL,
+            error_code = NULL,
+            result_json = NULL,
+            next_retry_at = :now,
+            started_at = NULL,
+            finished_at = NULL,
+            updated_at = :now
+        WHERE id = :id
+      `, {
+        ':id': row.id,
+        ':payload_json': serialize(payload),
+        ':now': now,
+      });
+      convertedPendingTarget += 1;
+    });
+
+    return {
+      convertedPendingTarget,
+      skippedPendingTarget,
+    };
+  },
+
   listQueuedMessageJobs(limit = 100) {
     const maxRows = Math.max(1, Number(limit) || 100);
     const rows = getRows(`
@@ -1835,6 +1940,8 @@ export const sessionStore = {
     id,
     requestId = null,
     jobType,
+    priority = 'normal',
+    coalesceKey = null,
     targetSessionId = null,
     cUser = null,
     payload = {},
@@ -1844,12 +1951,12 @@ export const sessionStore = {
     const now = Date.now();
     runStatement(`
       INSERT INTO session_flow_jobs (
-        id, request_id, job_type, target_session_id, c_user, payload_json, webhook_url,
+        id, request_id, job_type, priority, coalesce_key, target_session_id, c_user, payload_json, webhook_url,
         status, attempts, max_attempts, next_retry_at,
         webhook_notified, webhook_attempts, webhook_next_retry_at,
         created_at, updated_at
       ) VALUES (
-        :id, :request_id, :job_type, :target_session_id, :c_user, :payload_json, :webhook_url,
+        :id, :request_id, :job_type, :priority, :coalesce_key, :target_session_id, :c_user, :payload_json, :webhook_url,
         'queued', 0, :max_attempts, 0,
         0, 0, 0,
         :created_at, :updated_at
@@ -1858,6 +1965,8 @@ export const sessionStore = {
       ':id': id,
       ':request_id': requestId || null,
       ':job_type': jobType,
+      ':priority': normalizeSessionFlowJobPriority(priority),
+      ':coalesce_key': coalesceKey || null,
       ':target_session_id': targetSessionId || null,
       ':c_user': cUser || null,
       ':payload_json': serialize(payload || {}),
@@ -1867,6 +1976,63 @@ export const sessionStore = {
       ':updated_at': now,
     });
     return this.getSessionFlowJob(id);
+  },
+
+  getActiveSessionFlowJobByCoalesceKey(coalesceKey) {
+    const normalized = String(coalesceKey || '').trim();
+    if (!normalized) return null;
+
+    const row = getRow(`
+      SELECT *
+      FROM session_flow_jobs
+      WHERE coalesce_key = :coalesce_key
+        AND status IN ('queued', 'processing')
+      ORDER BY
+        CASE status WHEN 'queued' THEN 0 WHEN 'processing' THEN 1 ELSE 2 END ASC,
+        updated_at DESC
+      LIMIT 1
+    `, { ':coalesce_key': normalized });
+    return normalizeSessionFlowJobRow(row);
+  },
+
+  coalesceQueuedSessionFlowJob(jobId, {
+    requestId = null,
+    priority = 'normal',
+    targetSessionId = null,
+    cUser = null,
+    payload = {},
+    webhookUrl = null,
+    maxAttempts = 3,
+  } = {}) {
+    const now = Date.now();
+    runStatement(`
+      UPDATE session_flow_jobs
+      SET request_id = COALESCE(:request_id, request_id),
+          priority = :priority,
+          target_session_id = :target_session_id,
+          c_user = :c_user,
+          payload_json = :payload_json,
+          webhook_url = COALESCE(:webhook_url, webhook_url),
+          max_attempts = :max_attempts,
+          error_message = NULL,
+          error_code = NULL,
+          result_json = NULL,
+          next_retry_at = :now,
+          updated_at = :now
+      WHERE id = :id
+        AND status = 'queued'
+    `, {
+      ':id': jobId,
+      ':request_id': requestId || null,
+      ':priority': normalizeSessionFlowJobPriority(priority),
+      ':target_session_id': targetSessionId || null,
+      ':c_user': cUser || null,
+      ':payload_json': serialize(payload || {}),
+      ':webhook_url': webhookUrl || null,
+      ':max_attempts': Math.max(1, Number(maxAttempts) || 1),
+      ':now': now,
+    });
+    return this.getSessionFlowJob(jobId);
   },
 
   getSessionFlowJob(jobId) {

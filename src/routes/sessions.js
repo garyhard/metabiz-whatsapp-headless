@@ -274,7 +274,7 @@ router.post('/', async (req, res, next) => {
     }
 
     if (asyncMode) {
-      const { job, created } = enqueueSessionFlowJob({
+      const { job, created, coalesced } = enqueueSessionFlowJob({
         requestId: normalizedRequestId,
         jobType: 'create_session',
         payload: {
@@ -289,6 +289,7 @@ router.post('/', async (req, res, next) => {
         ok: true,
         accepted: true,
         created,
+        coalesced: coalesced === true,
         job: serializeSessionFlowJob(job),
       });
     }
@@ -313,7 +314,7 @@ router.delete('/:sessionId', async (req, res, next) => {
   try {
     const asyncMode = toBoolean(req.query?.async) || toBoolean(req.body?.async);
     if (asyncMode) {
-      const { job, created } = enqueueSessionFlowJob({
+      const { job, created, coalesced } = enqueueSessionFlowJob({
         requestId,
         jobType: 'destroy_session',
         targetSessionId: sessionId,
@@ -328,6 +329,7 @@ router.delete('/:sessionId', async (req, res, next) => {
         ok: true,
         accepted: true,
         created,
+        coalesced: coalesced === true,
         job: serializeSessionFlowJob(job),
       });
     }
@@ -362,7 +364,7 @@ router.post('/:sessionId/check', async (req, res, next) => {
   try {
     const asyncMode = toBoolean(req.query?.async) || toBoolean(req.body?.async);
     if (asyncMode) {
-      const { job, created } = enqueueSessionFlowJob({
+      const { job, created, coalesced } = enqueueSessionFlowJob({
         requestId,
         jobType: 'check_session',
         targetSessionId: sessionId,
@@ -379,6 +381,7 @@ router.post('/:sessionId/check', async (req, res, next) => {
         ok: true,
         accepted: true,
         created,
+        coalesced: coalesced === true,
         job: serializeSessionFlowJob(job),
       });
     }
@@ -425,7 +428,7 @@ router.post('/:sessionId/resume-check', async (req, res, next) => {
   try {
     const asyncMode = toBoolean(req.query?.async) || toBoolean(req.body?.async);
     if (asyncMode) {
-      const { job, created } = enqueueSessionFlowJob({
+      const { job, created, coalesced } = enqueueSessionFlowJob({
         requestId,
         jobType: 'resume_check',
         targetSessionId: sessionId,
@@ -442,6 +445,7 @@ router.post('/:sessionId/resume-check', async (req, res, next) => {
         ok: true,
         accepted: true,
         created,
+        coalesced: coalesced === true,
         job: serializeSessionFlowJob(job),
       });
     }
@@ -524,7 +528,7 @@ router.put('/:sessionId/cookies', async (req, res, next) => {
     const asyncMode = toBoolean(req.query?.async) || toBoolean(async);
     const normalizedRequestId = normalizeRequestId(sessionId, requestId);
     if (asyncMode) {
-      const { job, created } = enqueueSessionFlowJob({
+      const { job, created, coalesced } = enqueueSessionFlowJob({
         requestId: normalizedRequestId,
         jobType: 'update_session_cookies',
         targetSessionId: sessionId,
@@ -541,6 +545,7 @@ router.put('/:sessionId/cookies', async (req, res, next) => {
         ok: true,
         accepted: true,
         created,
+        coalesced: coalesced === true,
         job: serializeSessionFlowJob(job),
       });
     }
@@ -593,7 +598,7 @@ router.put('/:sessionId/proxy', async (req, res, next) => {
     const asyncMode = toBoolean(req.query?.async) || toBoolean(async);
     const normalizedRequestId = normalizeRequestId(sessionId, requestId);
     if (asyncMode) {
-      const { job, created } = enqueueSessionFlowJob({
+      const { job, created, coalesced } = enqueueSessionFlowJob({
         requestId: normalizedRequestId,
         jobType: 'update_session_proxy',
         targetSessionId: sessionId,
@@ -607,6 +612,7 @@ router.put('/:sessionId/proxy', async (req, res, next) => {
         ok: true,
         accepted: true,
         created,
+        coalesced: coalesced === true,
         job: serializeSessionFlowJob(job),
       });
     }
