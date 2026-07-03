@@ -603,6 +603,7 @@ export function getSessionFlowQueueWorkerStatus(now = Date.now()) {
     processingCount: Number(counts.processing || 0),
     errorCount: Number(counts.error || 0),
     completedCount: Number(counts.completed || 0),
+    priorityCounts: counts.priorityCounts || {},
     oldestRunnableAgeMs: counts.oldestRunnableAgeMs,
     oldestProcessingAgeMs: counts.oldestProcessingAgeMs,
     lastPumpStartedAt,

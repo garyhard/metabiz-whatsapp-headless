@@ -1687,11 +1687,26 @@ export const sessionStore = {
       FROM session_flow_jobs
       WHERE status = 'processing'
     `, {}) || {};
+    const priorityRows = getRows(`
+      SELECT COALESCE(priority, 'normal') AS priority, status, COUNT(*) AS count
+      FROM session_flow_jobs
+      WHERE status IN ('queued', 'processing')
+      GROUP BY COALESCE(priority, 'normal'), status
+    `, {});
+    const priorityCounts = priorityRows.reduce((memo, row) => {
+      const priority = String(row.priority || 'normal').trim().toLowerCase() || 'normal';
+      const status = String(row.status || '').trim().toLowerCase();
+      if (!status) return memo;
+      memo[priority] ||= {};
+      memo[priority][status] = Number(row.count || 0);
+      return memo;
+    }, {});
     const oldestQueuedCreatedAt = Number(runnable.oldest_created_at || 0) || null;
     const oldestProcessingUpdatedAt = Number(processing.oldest_updated_at || 0) || null;
 
     return {
       ...counts,
+      priorityCounts,
       runnable: Number(runnable.count || 0),
       processing: Number(processing.count || counts.processing || 0),
       oldestRunnableAgeMs: oldestQueuedCreatedAt ? Math.max(0, now - oldestQueuedCreatedAt) : null,
