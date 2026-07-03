@@ -53,10 +53,9 @@ function contextWhatsappSessionId(payload) {
 
 function inferPriority(jobType, payload = {}, explicitPriority = null) {
   const explicit = normalizePriority(explicitPriority || payload.priority || '', '');
-  if (explicit) return explicit;
-
   const type = String(jobType || '').trim();
   const flow = contextFlow(payload);
+  if (explicit === 'high' || explicit === 'low') return explicit;
   if (type === 'create_session' || flow === 'create_meta' || flow === 'test_flow' || flow === 'test_flow_retry') {
     return 'high';
   }
@@ -65,10 +64,12 @@ function inferPriority(jobType, payload = {}, explicitPriority = null) {
     flow === 'update_cookies' ||
     flow === 'bulk_refresh' ||
     flow === 'reconcile_missing' ||
-    flow === 'auto_link_meta'
+    flow === 'auto_link_meta' ||
+    flow === 'periodic_check'
   ) {
     return 'low';
   }
+  if (explicit === 'normal') return explicit;
   return 'normal';
 }
 
