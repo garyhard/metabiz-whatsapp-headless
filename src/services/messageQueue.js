@@ -749,6 +749,8 @@ function runBackpressureSweep(now = Date.now()) {
     delayMs: config.queue.backpressureDeferMs,
     suspendedQueuedAgeMs: config.queue.suspendedQueuedAgeMs,
     maxRunnableQueuedPerSession: config.queue.maxRunnableQueuedPerSession,
+    globalQueuedThreshold: config.queue.backpressureGlobalQueuedThreshold,
+    maxRunnableSessions: config.queue.backpressureMaxRunnableSessions,
     maxSessions: config.queue.backpressureSweepSessionLimit,
   });
 
@@ -951,6 +953,8 @@ export function getMessageQueueWorkerStatus(now = Date.now()) {
       intervalMs: Math.max(1000, Number(config.queue.backpressureSweepIntervalMs) || 30000),
       result: lastBackpressureSweepResult,
       maxRunnableQueuedPerSession: Math.max(1, Number(config.queue.maxRunnableQueuedPerSession) || 250),
+      globalQueuedThreshold: Math.max(1, Number(config.queue.backpressureGlobalQueuedThreshold) || 25000),
+      maxRunnableSessions: Math.max(1, Number(config.queue.backpressureMaxRunnableSessions) || 40),
       deferMs: Math.max(1000, Number(config.queue.backpressureDeferMs) || 600000),
     },
   };

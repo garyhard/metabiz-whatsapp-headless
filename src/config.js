@@ -129,6 +129,8 @@ export const config = {
     backpressureDeferMs: parsePositiveInt(process.env.MESSAGE_QUEUE_BACKPRESSURE_DEFER_MS, 600000),
     suspendedQueuedAgeMs: parsePositiveInt(process.env.MESSAGE_QUEUE_SUSPENDED_QUEUED_AGE_MS, 300000),
     maxRunnableQueuedPerSession: parsePositiveInt(process.env.MESSAGE_QUEUE_MAX_RUNNABLE_PER_SESSION, 250),
+    backpressureGlobalQueuedThreshold: parsePositiveInt(process.env.MESSAGE_QUEUE_BACKPRESSURE_GLOBAL_QUEUED_THRESHOLD, 25000),
+    backpressureMaxRunnableSessions: parsePositiveInt(process.env.MESSAGE_QUEUE_BACKPRESSURE_MAX_RUNNABLE_SESSIONS, 40),
     maxAttempts: parsePositiveInt(process.env.MESSAGE_QUEUE_MAX_ATTEMPTS, 5),
     retryBaseMs: parsePositiveInt(process.env.MESSAGE_QUEUE_RETRY_BASE_MS, 30000),
     retryMaxMs: parsePositiveInt(process.env.MESSAGE_QUEUE_RETRY_MAX_MS, 300000),

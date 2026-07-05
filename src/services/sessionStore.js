@@ -1482,12 +1482,16 @@ export const sessionStore = {
     delayMs = 600000,
     suspendedQueuedAgeMs = 300000,
     maxRunnableQueuedPerSession = 250,
+    globalQueuedThreshold = 25000,
+    maxRunnableSessions = 40,
     maxSessions = 25,
   } = {}) {
     const safeNow = Math.max(0, Number(now) || Date.now());
     const safeDelayMs = Math.max(1000, Number(delayMs) || 600000);
     const safeSuspendedAgeMs = Math.max(1000, Number(suspendedQueuedAgeMs) || 300000);
     const safeMaxRunnable = Math.max(1, Number(maxRunnableQueuedPerSession) || 250);
+    const safeGlobalQueuedThreshold = Math.max(1, Number(globalQueuedThreshold) || 25000);
+    const safeMaxRunnableSessions = Math.max(1, Number(maxRunnableSessions) || 40);
     const safeMaxSessions = Math.max(1, Number(maxSessions) || 25);
     const deferUntil = safeNow + safeDelayMs;
     const rows = getRows(`
@@ -1528,6 +1532,8 @@ export const sessionStore = {
 
     let deferredJobs = 0;
     const sessions = [];
+    let globalDeferredJobs = 0;
+    let globalDeferredSessions = 0;
     rows.forEach((row) => {
       const sessionId = String(row.session_id || '').trim();
       if (!sessionId) return;
@@ -1593,10 +1599,91 @@ export const sessionStore = {
       }
     });
 
+    const queueTotals = getRow(`
+      SELECT
+        COUNT(*) AS queued_count,
+        COUNT(DISTINCT CASE WHEN next_retry_at <= :now THEN session_id END) AS runnable_session_count
+      FROM message_jobs
+      WHERE status = 'queued'
+    `, { ':now': safeNow }) || {};
+    const queuedCount = Number(queueTotals.queued_count || 0);
+    const runnableSessionCount = Number(queueTotals.runnable_session_count || 0);
+
+    if (queuedCount >= safeGlobalQueuedThreshold && runnableSessionCount > safeMaxRunnableSessions) {
+      const extraRows = getRows(`
+        SELECT
+          q.session_id,
+          COALESCE(s.status, 'missing') AS session_status,
+          COUNT(*) AS runnable_count,
+          MIN(q.created_at) AS oldest_created_at
+        FROM message_jobs q
+        LEFT JOIN sessions s ON s.session_id = q.session_id
+        WHERE q.status = 'queued'
+          AND q.next_retry_at <= :now
+        GROUP BY q.session_id
+        ORDER BY
+          CASE COALESCE(s.status, 'missing')
+            WHEN 'active' THEN 0
+            WHEN 'suspended' THEN 1
+            WHEN 'restricted' THEN 2
+            WHEN 'needs_manual_action' THEN 3
+            WHEN 'missing' THEN 4
+            ELSE 5
+          END ASC,
+          COUNT(*) DESC,
+          MIN(q.created_at) ASC,
+          q.session_id ASC
+        LIMIT -1 OFFSET :keep_count
+      `, {
+        ':now': safeNow,
+        ':keep_count': safeMaxRunnableSessions,
+      });
+
+      extraRows.slice(0, safeMaxSessions).forEach((row) => {
+        const sessionId = String(row.session_id || '').trim();
+        if (!sessionId) return;
+
+        const reason = 'backpressure:global_session_cap';
+        const changes = runStatementWithChanges(`
+          UPDATE message_jobs
+          SET next_retry_at = :defer_until,
+              error_message = :reason,
+              updated_at = :updated_at
+          WHERE session_id = :session_id
+            AND status = 'queued'
+            AND next_retry_at <= :now
+        `, {
+          ':session_id': sessionId,
+          ':defer_until': deferUntil,
+          ':reason': reason,
+          ':updated_at': safeNow,
+          ':now': safeNow,
+        });
+        if (changes <= 0) return;
+
+        globalDeferredJobs += changes;
+        globalDeferredSessions += 1;
+        deferredJobs += changes;
+        sessions.push({
+          sessionId,
+          status: String(row.session_status || 'missing'),
+          runnableCount: Number(row.runnable_count || 0),
+          deferredJobs: changes,
+          reason,
+          deferUntil,
+        });
+      });
+    }
+
     return {
       checkedSessions: rows.length,
       deferredSessions: sessions.length,
       deferredJobs,
+      globalQueuedCount: queuedCount,
+      globalRunnableSessionCount: runnableSessionCount,
+      globalMaxRunnableSessions: safeMaxRunnableSessions,
+      globalDeferredSessions,
+      globalDeferredJobs,
       sessions,
     };
   },
