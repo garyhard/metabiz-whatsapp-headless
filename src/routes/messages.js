@@ -76,6 +76,22 @@ function normalizeLimit(value, fallback = 100, max = 500) {
   return Math.min(parsed, max);
 }
 
+function safeString(value) {
+  return String(value ?? '').replace(/[\uD800-\uDFFF]/g, '');
+}
+
+function previewString(value, maxCodePoints = 160) {
+  return Array.from(safeString(value).replace(/\s+/g, ' ').trim())
+    .slice(0, maxCodePoints)
+    .join('');
+}
+
+function sendJson(res, payload) {
+  return res
+    .type('application/json')
+    .send(`${JSON.stringify(payload)}\n`);
+}
+
 function buildSessionSummary(sessions) {
   return (Array.isArray(sessions) ? sessions : []).reduce((memo, session) => {
     const status = String(session?.status || '').trim().toLowerCase();
@@ -109,7 +125,7 @@ function decorateJobWithSession(job, sessionMap) {
       liveBrowser: session.liveBrowser === true,
       lastActivity: session.lastActivity || null,
     } : null,
-    messagePreview: String(job?.message || '').replace(/\s+/g, ' ').trim().slice(0, 160),
+    messagePreview: previewString(job?.message, 160),
   };
 }
 
@@ -165,15 +181,28 @@ function buildQueueWarmupState(group, sessionSnapshot, remainingSlots) {
   return { eligible: true, reason: 'available_slot' };
 }
 
+function compactLoadedSession(session) {
+  return {
+    sessionId: session.sessionId,
+    cUser: session.cUser || null,
+    status: session.status || null,
+    liveBrowser: session.liveBrowser === true,
+    lastActivity: session.lastActivity || null,
+    suspendedAt: session.suspendedAt || null,
+    manualAction: session.manualAction || null,
+  };
+}
+
 /**
  * GET /api/sessions/jobs/monitor
  * Get MetaBiz queue/session monitoring snapshot
  */
 router.get('/jobs/monitor', async (req, res) => {
   const now = Date.now();
-  const queuedLimit = normalizeLimit(req.query?.queuedLimit, 100, 500);
-  const processingLimit = normalizeLimit(req.query?.processingLimit, 100, 500);
-  const sessionLimit = normalizeLimit(req.query?.sessionLimit, 100, 500);
+  const queuedLimit = normalizeLimit(req.query?.queuedLimit, 100, 200);
+  const processingLimit = normalizeLimit(req.query?.processingLimit, 100, 200);
+  const sessionLimit = normalizeLimit(req.query?.sessionLimit, 25, 100);
+  const loadedLimit = normalizeLimit(req.query?.loadedLimit, 50, 200);
 
   const loadedSessions = getAllSessionIds().map((id) => getSessionInfo(id)).filter(Boolean);
   const loadedSessionMap = new Map(loadedSessions.map((session) => [session.sessionId, session]));
@@ -203,7 +232,7 @@ router.get('/jobs/monitor', async (req, res) => {
     };
   });
 
-  return res.json({
+  return sendJson(res, {
     ok: true,
     generatedAt: new Date().toISOString(),
     worker,
@@ -223,7 +252,7 @@ router.get('/jobs/monitor', async (req, res) => {
     sessions: {
       summary: buildSessionSummary(loadedSessions),
       browserPool,
-      loaded: loadedSessions,
+      loaded: loadedSessions.slice(0, loadedLimit).map(compactLoadedSession),
     },
   });
 });

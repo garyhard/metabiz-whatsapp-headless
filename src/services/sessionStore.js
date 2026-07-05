@@ -1477,6 +1477,130 @@ export const sessionStore = {
     });
   },
 
+  deferQueuedMessageJobsForBackpressure({
+    now = Date.now(),
+    delayMs = 600000,
+    suspendedQueuedAgeMs = 300000,
+    maxRunnableQueuedPerSession = 250,
+    maxSessions = 25,
+  } = {}) {
+    const safeNow = Math.max(0, Number(now) || Date.now());
+    const safeDelayMs = Math.max(1000, Number(delayMs) || 600000);
+    const safeSuspendedAgeMs = Math.max(1000, Number(suspendedQueuedAgeMs) || 300000);
+    const safeMaxRunnable = Math.max(1, Number(maxRunnableQueuedPerSession) || 250);
+    const safeMaxSessions = Math.max(1, Number(maxSessions) || 25);
+    const deferUntil = safeNow + safeDelayMs;
+    const rows = getRows(`
+      SELECT
+        q.session_id,
+        COALESCE(s.status, 'missing') AS session_status,
+        COUNT(*) AS runnable_count,
+        MIN(q.created_at) AS oldest_created_at
+      FROM message_jobs q
+      LEFT JOIN sessions s ON s.session_id = q.session_id
+      WHERE q.status = 'queued'
+        AND q.next_retry_at <= :now
+      GROUP BY q.session_id
+      HAVING
+        COALESCE(s.status, 'missing') IN ('restricted', 'needs_manual_action', 'missing')
+        OR (
+          COALESCE(s.status, 'missing') = 'suspended'
+          AND MIN(q.created_at) <= :suspended_cutoff
+        )
+        OR COUNT(*) > :max_runnable
+      ORDER BY
+        CASE COALESCE(s.status, 'missing')
+          WHEN 'restricted' THEN 0
+          WHEN 'needs_manual_action' THEN 1
+          WHEN 'missing' THEN 2
+          WHEN 'suspended' THEN 3
+          ELSE 4
+        END ASC,
+        COUNT(*) DESC,
+        MIN(q.created_at) ASC
+      LIMIT :limit
+    `, {
+      ':now': safeNow,
+      ':suspended_cutoff': safeNow - safeSuspendedAgeMs,
+      ':max_runnable': safeMaxRunnable,
+      ':limit': safeMaxSessions,
+    });
+
+    let deferredJobs = 0;
+    const sessions = [];
+    rows.forEach((row) => {
+      const sessionId = String(row.session_id || '').trim();
+      if (!sessionId) return;
+
+      const status = String(row.session_status || 'missing');
+      const runnableCount = Number(row.runnable_count || 0);
+      const unhealthy = ['restricted', 'needs_manual_action', 'missing', 'suspended'].includes(status);
+      const reason = unhealthy ? `backpressure:${status}` : 'backpressure:per_session_cap';
+      let changes = 0;
+
+      if (unhealthy) {
+        changes = runStatementWithChanges(`
+          UPDATE message_jobs
+          SET next_retry_at = :defer_until,
+              error_message = :reason,
+              updated_at = :updated_at
+          WHERE session_id = :session_id
+            AND status = 'queued'
+            AND next_retry_at <= :now
+        `, {
+          ':session_id': sessionId,
+          ':defer_until': deferUntil,
+          ':reason': reason,
+          ':updated_at': safeNow,
+          ':now': safeNow,
+        });
+        this.blockQueuedWorkForSession(sessionId, reason, deferUntil);
+      } else if (runnableCount > safeMaxRunnable) {
+        changes = runStatementWithChanges(`
+          UPDATE message_jobs
+          SET next_retry_at = :defer_until,
+              error_message = :reason,
+              updated_at = :updated_at
+          WHERE id IN (
+            SELECT id
+            FROM message_jobs
+            WHERE session_id = :session_id
+              AND status = 'queued'
+              AND next_retry_at <= :now
+            ORDER BY ${messageJobPriorityOrderSql('priority')} ASC, created_at ASC
+            LIMIT -1 OFFSET :keep_count
+          )
+        `, {
+          ':session_id': sessionId,
+          ':defer_until': deferUntil,
+          ':reason': reason,
+          ':updated_at': safeNow,
+          ':now': safeNow,
+          ':keep_count': safeMaxRunnable,
+        });
+      }
+
+      if (changes > 0) {
+        deferredJobs += changes;
+        sessions.push({
+          sessionId,
+          status,
+          runnableCount,
+          deferredJobs: changes,
+          reason,
+          deferUntil,
+        });
+      }
+    });
+
+    return {
+      checkedSessions: rows.length,
+      deferredSessions: sessions.length,
+      deferredJobs,
+      sessions,
+    };
+  },
+
   failMessageJobsForSession(sessionId, errorMessage, result = null, { suppressWebhook = true } = {}) {
     if (!sessionId) return 0;
 
@@ -1697,7 +1821,7 @@ export const sessionStore = {
       const priority = String(row.priority || 'normal').trim().toLowerCase() || 'normal';
       const status = String(row.status || '').trim().toLowerCase();
       if (!status) return memo;
-      memo[priority] ||= {};
+      memo[priority] = memo[priority] || {};
       memo[priority][status] = Number(row.count || 0);
       return memo;
     }, {});

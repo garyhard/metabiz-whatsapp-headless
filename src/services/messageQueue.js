@@ -33,6 +33,8 @@ let lastJobFinishedAt = null;
 let webhookBlockedUntil = 0;
 let lastWebhookFailureAt = null;
 let lastWebhookFailureReason = null;
+let lastBackpressureSweepAt = null;
+let lastBackpressureSweepResult = null;
 
 function webhookEnabled() {
   return String(config.queue.webhookUrl || '').trim().length > 0;
@@ -731,6 +733,35 @@ function prewarmQueuedSessions() {
   return scheduled;
 }
 
+function runBackpressureSweep(now = Date.now()) {
+  if (config.queue.backpressureSweepEnabled === false) {
+    return null;
+  }
+
+  const intervalMs = Math.max(1000, Number(config.queue.backpressureSweepIntervalMs) || 30000);
+  if (lastBackpressureSweepAt && now - lastBackpressureSweepAt < intervalMs) {
+    return lastBackpressureSweepResult;
+  }
+
+  lastBackpressureSweepAt = now;
+  lastBackpressureSweepResult = sessionStore.deferQueuedMessageJobsForBackpressure({
+    now,
+    delayMs: config.queue.backpressureDeferMs,
+    suspendedQueuedAgeMs: config.queue.suspendedQueuedAgeMs,
+    maxRunnableQueuedPerSession: config.queue.maxRunnableQueuedPerSession,
+    maxSessions: config.queue.backpressureSweepSessionLimit,
+  });
+
+  if (lastBackpressureSweepResult?.deferredJobs > 0) {
+    console.warn(
+      `[MessageQueue] backpressure sweep deferred_jobs=${lastBackpressureSweepResult.deferredJobs} ` +
+      `deferred_sessions=${lastBackpressureSweepResult.deferredSessions}`
+    );
+  }
+
+  return lastBackpressureSweepResult;
+}
+
 export async function pumpQueue() {
   if (stopRequested) return;
   if (pumping) return;
@@ -742,6 +773,7 @@ export async function pumpQueue() {
   try {
     sessionStore.stopInvalidMessageJobWebhooks();
     sessionStore.requeueStaleProcessingMessageJobs(config.queue.processingTimeoutMs);
+    runBackpressureSweep(Date.now());
     const maxBatch = Math.max(1, Number(config.queue.batchSize) || 1);
     const claimLimit = nextClaimLimit(maxBatch);
     const jobs = [];
@@ -913,6 +945,14 @@ export function getMessageQueueWorkerStatus(now = Date.now()) {
     webhookBlockedForMs: webhookBlockRemainingMs(now),
     lastWebhookFailureAt,
     lastWebhookFailureReason,
+    backpressureSweep: {
+      enabled: config.queue.backpressureSweepEnabled !== false,
+      lastRunAt: lastBackpressureSweepAt,
+      intervalMs: Math.max(1000, Number(config.queue.backpressureSweepIntervalMs) || 30000),
+      result: lastBackpressureSweepResult,
+      maxRunnableQueuedPerSession: Math.max(1, Number(config.queue.maxRunnableQueuedPerSession) || 250),
+      deferMs: Math.max(1000, Number(config.queue.backpressureDeferMs) || 600000),
+    },
   };
 }
 
