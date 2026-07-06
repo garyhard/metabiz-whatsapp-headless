@@ -35,6 +35,7 @@ let lastWebhookFailureAt = null;
 let lastWebhookFailureReason = null;
 let lastBackpressureSweepAt = null;
 let lastBackpressureSweepResult = null;
+let lastArchiveSweepResult = null;
 
 function webhookEnabled() {
   return String(config.queue.webhookUrl || '').trim().length > 0;
@@ -753,11 +754,28 @@ function runBackpressureSweep(now = Date.now()) {
     maxRunnableSessions: config.queue.backpressureMaxRunnableSessions,
     maxSessions: config.queue.backpressureSweepSessionLimit,
   });
+  lastArchiveSweepResult = null;
+  if (config.queue.archiveDelayedEnabled !== false) {
+    lastArchiveSweepResult = sessionStore.archiveDelayedMessageJobsForBackpressure({
+      now,
+      queuedThreshold: config.queue.archiveDelayedQueuedThreshold,
+      minAgeMs: config.queue.archiveDelayedMinAgeMs,
+      maxJobs: config.queue.archiveDelayedMaxJobs,
+      maxSessions: config.queue.archiveDelayedMaxSessions,
+      source: 'message_queue_backpressure_sweep',
+    });
+  }
 
   if (lastBackpressureSweepResult?.deferredJobs > 0) {
     console.warn(
       `[MessageQueue] backpressure sweep deferred_jobs=${lastBackpressureSweepResult.deferredJobs} ` +
       `deferred_sessions=${lastBackpressureSweepResult.deferredSessions}`
+    );
+  }
+  if (lastArchiveSweepResult?.archivedJobs > 0) {
+    console.warn(
+      `[MessageQueue] archive sweep archived_jobs=${lastArchiveSweepResult.archivedJobs} ` +
+      `archived_sessions=${lastArchiveSweepResult.archivedSessions}`
     );
   }
 
@@ -956,6 +974,14 @@ export function getMessageQueueWorkerStatus(now = Date.now()) {
       globalQueuedThreshold: Math.max(1, Number(config.queue.backpressureGlobalQueuedThreshold) || 25000),
       maxRunnableSessions: Math.max(1, Number(config.queue.backpressureMaxRunnableSessions) || 40),
       deferMs: Math.max(1000, Number(config.queue.backpressureDeferMs) || 600000),
+      archive: {
+        enabled: config.queue.archiveDelayedEnabled !== false,
+        queuedThreshold: Math.max(1, Number(config.queue.archiveDelayedQueuedThreshold) || 50000),
+        minAgeMs: Math.max(1000, Number(config.queue.archiveDelayedMinAgeMs) || 300000),
+        maxJobs: Math.max(1, Number(config.queue.archiveDelayedMaxJobs) || 10000),
+        maxSessions: Math.max(1, Number(config.queue.archiveDelayedMaxSessions) || 150),
+        result: lastArchiveSweepResult,
+      },
     },
   };
 }

@@ -94,6 +94,41 @@ db.exec(`
     ON message_jobs(status, session_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_message_jobs_webhook_pending
     ON message_jobs(webhook_notified, status, webhook_next_retry_at, updated_at);
+  CREATE TABLE IF NOT EXISTS message_job_archives (
+    id TEXT PRIMARY KEY,
+    request_id TEXT,
+    meta_blast_message_id TEXT,
+    session_id TEXT NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'normal',
+    extension TEXT NOT NULL,
+    phone_number TEXT NOT NULL,
+    message TEXT NOT NULL,
+    use_reply_flow INTEGER NOT NULL DEFAULT 0,
+    include_success_screenshot INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'archived',
+    original_status TEXT NOT NULL DEFAULT 'queued',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 5,
+    error_message TEXT,
+    result_json TEXT,
+    next_retry_at INTEGER NOT NULL DEFAULT 0,
+    webhook_notified INTEGER NOT NULL DEFAULT 1,
+    webhook_attempts INTEGER NOT NULL DEFAULT 0,
+    webhook_next_retry_at INTEGER NOT NULL DEFAULT 0,
+    webhook_last_error TEXT,
+    webhook_delivered_at INTEGER,
+    started_at INTEGER,
+    finished_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    archived_at INTEGER NOT NULL,
+    archive_reason TEXT,
+    archive_source TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_message_job_archives_status_archived
+    ON message_job_archives(status, archived_at);
+  CREATE INDEX IF NOT EXISTS idx_message_job_archives_session_archived
+    ON message_job_archives(session_id, archived_at);
   CREATE TABLE IF NOT EXISTS session_flow_jobs (
     id TEXT PRIMARY KEY,
     request_id TEXT UNIQUE,
@@ -265,6 +300,48 @@ try {
   `);
 } catch {
   // Index already exists.
+}
+
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS message_job_archives (
+      id TEXT PRIMARY KEY,
+      request_id TEXT,
+      meta_blast_message_id TEXT,
+      session_id TEXT NOT NULL,
+      priority TEXT NOT NULL DEFAULT 'normal',
+      extension TEXT NOT NULL,
+      phone_number TEXT NOT NULL,
+      message TEXT NOT NULL,
+      use_reply_flow INTEGER NOT NULL DEFAULT 0,
+      include_success_screenshot INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'archived',
+      original_status TEXT NOT NULL DEFAULT 'queued',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER NOT NULL DEFAULT 5,
+      error_message TEXT,
+      result_json TEXT,
+      next_retry_at INTEGER NOT NULL DEFAULT 0,
+      webhook_notified INTEGER NOT NULL DEFAULT 1,
+      webhook_attempts INTEGER NOT NULL DEFAULT 0,
+      webhook_next_retry_at INTEGER NOT NULL DEFAULT 0,
+      webhook_last_error TEXT,
+      webhook_delivered_at INTEGER,
+      started_at INTEGER,
+      finished_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      archived_at INTEGER NOT NULL,
+      archive_reason TEXT,
+      archive_source TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_job_archives_status_archived
+      ON message_job_archives(status, archived_at);
+    CREATE INDEX IF NOT EXISTS idx_message_job_archives_session_archived
+      ON message_job_archives(session_id, archived_at);
+  `);
+} catch (error) {
+  console.warn('[SessionStore] failed to ensure message_job_archives table:', error?.message || String(error));
 }
 
 try {
@@ -889,6 +966,18 @@ function normalizeMessageJobRow(row) {
   };
 }
 
+function normalizeArchivedMessageJobRow(row) {
+  const normalized = normalizeMessageJobRow(row);
+  if (!normalized) return null;
+
+  normalized.status = 'archived';
+  normalized.originalStatus = row.original_status || null;
+  normalized.archivedAt = row.archived_at ? Number(row.archived_at) : null;
+  normalized.archiveReason = row.archive_reason || null;
+  normalized.archiveSource = row.archive_source || null;
+  return normalized;
+}
+
 function normalizeMessageJobSessionRow(row) {
   if (!row) return null;
   return {
@@ -1306,7 +1395,10 @@ export const sessionStore = {
 
   getMessageJob(jobId) {
     const row = getRow('SELECT * FROM message_jobs WHERE id = :id', { ':id': jobId });
-    return normalizeMessageJobRow(row);
+    if (row) return normalizeMessageJobRow(row);
+
+    const archivedRow = getRow('SELECT * FROM message_job_archives WHERE id = :id', { ':id': jobId });
+    return normalizeArchivedMessageJobRow(archivedRow);
   },
 
   getMessageJobByRequestId(requestId) {
@@ -1688,6 +1780,149 @@ export const sessionStore = {
     };
   },
 
+  archiveDelayedMessageJobsForBackpressure({
+    now = Date.now(),
+    queuedThreshold = 50000,
+    minAgeMs = 300000,
+    maxJobs = 10000,
+    maxSessions = 150,
+    source = 'backpressure_delayed_archive',
+  } = {}) {
+    const safeNow = Math.max(0, Number(now) || Date.now());
+    const safeQueuedThreshold = Math.max(1, Number(queuedThreshold) || 50000);
+    const safeMinAgeMs = Math.max(1000, Number(minAgeMs) || 300000);
+    const safeMaxJobs = Math.max(1, Number(maxJobs) || 10000);
+    const safeMaxSessions = Math.max(1, Number(maxSessions) || 150);
+    const totals = getRow(`
+      SELECT COUNT(*) AS queued_count
+      FROM message_jobs
+      WHERE status = 'queued'
+    `, {}) || {};
+    const queuedCount = Number(totals.queued_count || 0);
+    if (queuedCount < safeQueuedThreshold) {
+      return {
+        archivedJobs: 0,
+        archivedSessions: 0,
+        checkedSessions: 0,
+        queuedCount,
+        threshold: safeQueuedThreshold,
+        reason: 'below_threshold',
+      };
+    }
+
+    const cutoff = safeNow - safeMinAgeMs;
+    const sessionRows = getRows(`
+      SELECT
+        q.session_id,
+        COALESCE(s.status, 'missing') AS session_status,
+        COUNT(*) AS delayed_count,
+        MIN(q.created_at) AS oldest_created_at
+      FROM message_jobs q
+      LEFT JOIN sessions s ON s.session_id = q.session_id
+      WHERE q.status = 'queued'
+        AND q.next_retry_at > :now
+        AND q.created_at <= :cutoff
+      GROUP BY q.session_id
+      HAVING COALESCE(s.status, 'missing') IN ('restricted', 'needs_manual_action', 'missing', 'suspended')
+      ORDER BY
+        CASE COALESCE(s.status, 'missing')
+          WHEN 'missing' THEN 0
+          WHEN 'restricted' THEN 1
+          WHEN 'needs_manual_action' THEN 2
+          WHEN 'suspended' THEN 3
+          ELSE 4
+        END ASC,
+        COUNT(*) DESC,
+        MIN(q.created_at) ASC
+      LIMIT :limit
+    `, {
+      ':now': safeNow,
+      ':cutoff': cutoff,
+      ':limit': safeMaxSessions,
+    });
+
+    let archivedJobs = 0;
+    let archivedSessions = 0;
+    const sessions = [];
+    for (const row of sessionRows) {
+      if (archivedJobs >= safeMaxJobs) break;
+
+      const sessionId = String(row.session_id || '').trim();
+      if (!sessionId) continue;
+
+      const remaining = safeMaxJobs - archivedJobs;
+      const reason = `archive:${String(row.session_status || 'missing')}`;
+      const archiveRows = getRows(`
+        SELECT id
+        FROM message_jobs
+        WHERE session_id = :session_id
+          AND status = 'queued'
+          AND next_retry_at > :now
+          AND created_at <= :cutoff
+        ORDER BY created_at ASC
+        LIMIT :limit
+      `, {
+        ':session_id': sessionId,
+        ':now': safeNow,
+        ':cutoff': cutoff,
+        ':limit': remaining,
+      });
+      const ids = archiveRows.map((item) => String(item.id || '').trim()).filter(Boolean);
+      if (ids.length === 0) continue;
+
+      const placeholders = ids.map((_, index) => `:archive_job_id_${index}`);
+      const params = {
+        ':archived_at': safeNow,
+        ':archive_reason': reason,
+        ':archive_source': String(source || 'backpressure_delayed_archive'),
+      };
+      ids.forEach((id, index) => {
+        params[`:archive_job_id_${index}`] = id;
+      });
+
+      runStatement(`
+        INSERT OR REPLACE INTO message_job_archives (
+          id, request_id, meta_blast_message_id, session_id, priority, extension, phone_number, message,
+          use_reply_flow, include_success_screenshot, status, original_status, attempts, max_attempts,
+          error_message, result_json, next_retry_at, webhook_notified, webhook_attempts,
+          webhook_next_retry_at, webhook_last_error, webhook_delivered_at, started_at, finished_at,
+          created_at, updated_at, archived_at, archive_reason, archive_source
+        )
+        SELECT
+          id, request_id, meta_blast_message_id, session_id, priority, extension, phone_number, message,
+          use_reply_flow, include_success_screenshot, 'archived', status, attempts, max_attempts,
+          error_message, result_json, next_retry_at, 1, webhook_attempts,
+          0, webhook_last_error, webhook_delivered_at, started_at, finished_at,
+          created_at, :archived_at, :archived_at, :archive_reason, :archive_source
+        FROM message_jobs
+        WHERE id IN (${placeholders.join(', ')})
+      `, params);
+      const deleted = runStatementWithChanges(`
+        DELETE FROM message_jobs
+        WHERE id IN (${placeholders.join(', ')})
+      `, params);
+      if (deleted <= 0) continue;
+
+      archivedJobs += deleted;
+      archivedSessions += 1;
+      sessions.push({
+        sessionId,
+        status: String(row.session_status || 'missing'),
+        archivedJobs: deleted,
+        reason,
+      });
+    }
+
+    return {
+      archivedJobs,
+      archivedSessions,
+      checkedSessions: sessionRows.length,
+      queuedCount,
+      threshold: safeQueuedThreshold,
+      sessions,
+    };
+  },
+
   failMessageJobsForSession(sessionId, errorMessage, result = null, { suppressWebhook = true } = {}) {
     if (!sessionId) return 0;
 
@@ -1866,12 +2101,19 @@ export const sessionStore = {
       GROUP BY status
     `, {});
 
-    return rows.reduce((memo, row) => {
+    const counts = rows.reduce((memo, row) => {
       const status = String(row.status || "").trim().toLowerCase();
       if (!status) return memo;
       memo[status] = Number(row.count || 0);
       return memo;
     }, {});
+    const archived = getRow(`
+      SELECT COUNT(*) AS count
+      FROM message_job_archives
+      WHERE status = 'archived'
+    `, {}) || {};
+    counts.archived = Number(archived.count || 0);
+    return counts;
   },
 
   sessionFlowJobStatusCounts(now = Date.now()) {
