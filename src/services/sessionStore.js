@@ -1782,35 +1782,52 @@ export const sessionStore = {
 
   archiveDelayedMessageJobsForBackpressure({
     now = Date.now(),
-    queuedThreshold = 50000,
+    queuedThreshold = 10000,
+    terminalThreshold = 1000,
     minAgeMs = 300000,
     maxJobs = 10000,
     maxSessions = 150,
     source = 'backpressure_delayed_archive',
   } = {}) {
     const safeNow = Math.max(0, Number(now) || Date.now());
-    const safeQueuedThreshold = Math.max(1, Number(queuedThreshold) || 50000);
+    const safeQueuedThreshold = Math.max(1, Number(queuedThreshold) || 10000);
+    const safeTerminalThreshold = Math.max(1, Number(terminalThreshold) || 1000);
     const safeMinAgeMs = Math.max(1000, Number(minAgeMs) || 300000);
     const safeMaxJobs = Math.max(1, Number(maxJobs) || 10000);
     const safeMaxSessions = Math.max(1, Number(maxSessions) || 150);
+    const cutoff = safeNow - safeMinAgeMs;
     const totals = getRow(`
       SELECT COUNT(*) AS queued_count
       FROM message_jobs
       WHERE status = 'queued'
     `, {}) || {};
     const queuedCount = Number(totals.queued_count || 0);
-    if (queuedCount < safeQueuedThreshold) {
+    const terminalTotals = getRow(`
+      SELECT COUNT(*) AS terminal_delayed_count
+      FROM message_jobs q
+      LEFT JOIN sessions s ON s.session_id = q.session_id
+      WHERE q.status = 'queued'
+        AND q.next_retry_at > :now
+        AND q.created_at <= :cutoff
+        AND COALESCE(s.status, 'missing') IN ('restricted', 'needs_manual_action', 'missing', 'suspended')
+    `, {
+      ':now': safeNow,
+      ':cutoff': cutoff,
+    }) || {};
+    const terminalDelayedCount = Number(terminalTotals.terminal_delayed_count || 0);
+    if (queuedCount < safeQueuedThreshold && terminalDelayedCount < safeTerminalThreshold) {
       return {
         archivedJobs: 0,
         archivedSessions: 0,
         checkedSessions: 0,
         queuedCount,
+        terminalDelayedCount,
         threshold: safeQueuedThreshold,
+        terminalThreshold: safeTerminalThreshold,
         reason: 'below_threshold',
       };
     }
 
-    const cutoff = safeNow - safeMinAgeMs;
     const sessionRows = getRows(`
       SELECT
         q.session_id,
@@ -1918,7 +1935,9 @@ export const sessionStore = {
       archivedSessions,
       checkedSessions: sessionRows.length,
       queuedCount,
+      terminalDelayedCount,
       threshold: safeQueuedThreshold,
+      terminalThreshold: safeTerminalThreshold,
       sessions,
     };
   },

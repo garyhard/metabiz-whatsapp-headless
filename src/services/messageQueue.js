@@ -759,6 +759,7 @@ function runBackpressureSweep(now = Date.now()) {
     lastArchiveSweepResult = sessionStore.archiveDelayedMessageJobsForBackpressure({
       now,
       queuedThreshold: config.queue.archiveDelayedQueuedThreshold,
+      terminalThreshold: config.queue.archiveDelayedTerminalThreshold,
       minAgeMs: config.queue.archiveDelayedMinAgeMs,
       maxJobs: config.queue.archiveDelayedMaxJobs,
       maxSessions: config.queue.archiveDelayedMaxSessions,
@@ -976,7 +977,8 @@ export function getMessageQueueWorkerStatus(now = Date.now()) {
       deferMs: Math.max(1000, Number(config.queue.backpressureDeferMs) || 600000),
       archive: {
         enabled: config.queue.archiveDelayedEnabled !== false,
-        queuedThreshold: Math.max(1, Number(config.queue.archiveDelayedQueuedThreshold) || 50000),
+        queuedThreshold: Math.max(1, Number(config.queue.archiveDelayedQueuedThreshold) || 10000),
+        terminalThreshold: Math.max(1, Number(config.queue.archiveDelayedTerminalThreshold) || 1000),
         minAgeMs: Math.max(1000, Number(config.queue.archiveDelayedMinAgeMs) || 300000),
         maxJobs: Math.max(1, Number(config.queue.archiveDelayedMaxJobs) || 10000),
         maxSessions: Math.max(1, Number(config.queue.archiveDelayedMaxSessions) || 150),
