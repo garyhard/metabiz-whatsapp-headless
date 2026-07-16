@@ -5,7 +5,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { createBrowser } from './browserFactory.js';
 import { normalizeCookiesInput, parseCookieString, toPlaywrightCookies, toPlaywrightCookiesFromJson } from '../utils/cookies.js';
-import { sendMessage, checkSessionFlow, captureDebugScreenshot, detectNeedNewCookiesPage, dismissAutomatedBehaviorNotice, resolveTwoFactorIfNeeded } from './automation.js';
+import { sendMessage, sendMediaMessage, checkSessionFlow, captureDebugScreenshot, detectNeedNewCookiesPage, dismissAutomatedBehaviorNotice, resolveTwoFactorIfNeeded } from './automation.js';
 import { SessionNotFoundError, InvalidInputError, BrowserCrashError, FlowTimeoutError, AutomationError } from '../errors.js';
 import { config } from '../config.js';
 import { sessionStore } from './sessionStore.js';
@@ -2783,6 +2783,70 @@ export async function sendMessageForSession(
       retryFailureSuspendReason: 'send_retry_failed',
       initialTask: () => executeSendFlow('Send flow', forceInitialRefresh),
       retryTask: (attempt) => executeSendFlow(`Send flow (recovery ${attempt})`, true),
+    });
+    settleSessionAfterFlow(sessionId);
+    return { ok: true, ...(result || {}) };
+  }, { priority: sendPriority });
+}
+
+export async function sendMediaForSession(
+  sessionId,
+  {
+    extension,
+    phoneNumber,
+    message = '',
+    media,
+    useReplyFlow = true,
+    includeSuccessScreenshot = false,
+    requestId = null,
+    priority = null,
+    dryRunUpload = false,
+  }
+) {
+  const sendPriority = normalizeLockPriority(priority, useReplyFlow ? 'high' : 'normal');
+  return withSessionLock(sessionId, async () => {
+    throwIfSessionRestricted(sessionId, 'send_media_cached');
+    const session = await ensureSessionActive(sessionId);
+    const now = Date.now();
+    const lastActivity = session.lastActivity || 0;
+    const forceInitialRefresh =
+      config.sendReloadIdleMs > 0 &&
+      lastActivity > 0 &&
+      now - lastActivity > config.sendReloadIdleMs;
+
+    const executeSendFlow = async (label, forceRefresh) => {
+      const activeSession = await ensureSessionActive(sessionId);
+      touchSession(sessionId);
+      const result = await withTimeout(
+        sendMediaMessage(activeSession.page, {
+          extension,
+          phoneNumber,
+          message,
+          media,
+          sessionId,
+          cUser: activeSession.cUser || null,
+          twofaSecret: activeSession.twofaSecret || null,
+          forceInitialRefresh: forceRefresh,
+          useReplyFlow,
+          includeSuccessScreenshot,
+          requestId,
+          dryRunUpload,
+        }),
+        config.flowTimeoutMs,
+        label
+      );
+      return result || {};
+    };
+
+    const result = await runRecoverableSessionFlow({
+      sessionId,
+      flowName: 'send_media',
+      manualActionFlow: 'send_media',
+      restrictedFlow: 'send_media',
+      failureSuspendReason: 'send_media_flow_failed',
+      retryFailureSuspendReason: 'send_media_retry_failed',
+      initialTask: () => executeSendFlow('Send media flow', forceInitialRefresh),
+      retryTask: (attempt) => executeSendFlow(`Send media flow (recovery ${attempt})`, true),
     });
     settleSessionAfterFlow(sessionId);
     return { ok: true, ...(result || {}) };

@@ -65,9 +65,11 @@ db.exec(`
     meta_blast_message_id TEXT,
     session_id TEXT NOT NULL,
     priority TEXT NOT NULL DEFAULT 'normal',
+    message_type TEXT NOT NULL DEFAULT 'text',
     extension TEXT NOT NULL,
     phone_number TEXT NOT NULL,
     message TEXT NOT NULL,
+    media_payload_json TEXT,
     use_reply_flow INTEGER NOT NULL DEFAULT 0,
     include_success_screenshot INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'queued',
@@ -100,9 +102,11 @@ db.exec(`
     meta_blast_message_id TEXT,
     session_id TEXT NOT NULL,
     priority TEXT NOT NULL DEFAULT 'normal',
+    message_type TEXT NOT NULL DEFAULT 'text',
     extension TEXT NOT NULL,
     phone_number TEXT NOT NULL,
     message TEXT NOT NULL,
+    media_payload_json TEXT,
     use_reply_flow INTEGER NOT NULL DEFAULT 0,
     include_success_screenshot INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'archived',
@@ -267,6 +271,18 @@ try {
 }
 
 try {
+  db.exec("ALTER TABLE message_jobs ADD COLUMN message_type TEXT NOT NULL DEFAULT 'text'");
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE message_jobs ADD COLUMN media_payload_json TEXT');
+} catch {
+  // Column already exists.
+}
+
+try {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_message_jobs_status_retry_priority_created
       ON message_jobs(status, next_retry_at, priority, created_at)
@@ -310,9 +326,11 @@ try {
       meta_blast_message_id TEXT,
       session_id TEXT NOT NULL,
       priority TEXT NOT NULL DEFAULT 'normal',
+      message_type TEXT NOT NULL DEFAULT 'text',
       extension TEXT NOT NULL,
       phone_number TEXT NOT NULL,
       message TEXT NOT NULL,
+      media_payload_json TEXT,
       use_reply_flow INTEGER NOT NULL DEFAULT 0,
       include_success_screenshot INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'archived',
@@ -342,6 +360,18 @@ try {
   `);
 } catch (error) {
   console.warn('[SessionStore] failed to ensure message_job_archives table:', error?.message || String(error));
+}
+
+try {
+  db.exec("ALTER TABLE message_job_archives ADD COLUMN message_type TEXT NOT NULL DEFAULT 'text'");
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE message_job_archives ADD COLUMN media_payload_json TEXT');
+} catch {
+  // Column already exists.
 }
 
 try {
@@ -687,6 +717,11 @@ function normalizeMessageJobPriority(priority, fallback = 'normal') {
   return fallback;
 }
 
+function normalizeMessageJobType(type) {
+  const normalized = String(type || '').trim().toLowerCase();
+  return normalized === 'media' ? 'media' : 'text';
+}
+
 function messageJobPriorityOrderSql(columnName = 'q.priority') {
   return `CASE ${columnName} WHEN 'high' THEN 0 WHEN 'normal' THEN 1 WHEN 'low' THEN 2 ELSE 1 END`;
 }
@@ -943,9 +978,11 @@ function normalizeMessageJobRow(row) {
     metaBlastMessageId: row.meta_blast_message_id || null,
     sessionId: row.session_id,
     priority: normalizeMessageJobPriority(row.priority, 'normal'),
+    messageType: normalizeMessageJobType(row.message_type),
     extension: row.extension,
     phoneNumber: row.phone_number,
     message: row.message,
+    mediaPayload: deserializeSafe(row.media_payload_json),
     useReplyFlow: Number(row.use_reply_flow) === 1,
     includeSuccessScreenshot: Number(row.include_success_screenshot) === 1,
     status: row.status,
@@ -1356,22 +1393,25 @@ export const sessionStore = {
     metaBlastMessageId = null,
     sessionId,
     priority = 'normal',
+    messageType = 'text',
     extension,
     phoneNumber,
     message,
+    mediaPayload = null,
     useReplyFlow = false,
     includeSuccessScreenshot = false,
     maxAttempts = 5,
   }) {
     const now = Date.now();
+    const normalizedType = normalizeMessageJobType(messageType);
     runStatement(`
       INSERT INTO message_jobs (
-        id, request_id, meta_blast_message_id, session_id, priority, extension, phone_number, message,
+        id, request_id, meta_blast_message_id, session_id, priority, message_type, extension, phone_number, message, media_payload_json,
         use_reply_flow, include_success_screenshot, status, attempts, max_attempts,
         next_retry_at, webhook_notified, webhook_attempts, webhook_next_retry_at,
         created_at, updated_at
       ) VALUES (
-        :id, :request_id, :meta_blast_message_id, :session_id, :priority, :extension, :phone_number, :message,
+        :id, :request_id, :meta_blast_message_id, :session_id, :priority, :message_type, :extension, :phone_number, :message, :media_payload_json,
         :use_reply_flow, :include_success_screenshot, 'queued', 0, :max_attempts,
         0, 0, 0, 0, :created_at, :updated_at
       )
@@ -1381,9 +1421,11 @@ export const sessionStore = {
       ':meta_blast_message_id': metaBlastMessageId || null,
       ':session_id': sessionId,
       ':priority': normalizeMessageJobPriority(priority, useReplyFlow ? 'high' : 'normal'),
+      ':message_type': normalizedType,
       ':extension': extension,
       ':phone_number': phoneNumber,
       ':message': message,
+      ':media_payload_json': normalizedType === 'media' ? serialize(mediaPayload || {}) : null,
       ':use_reply_flow': useReplyFlow ? 1 : 0,
       ':include_success_screenshot': includeSuccessScreenshot ? 1 : 0,
       ':max_attempts': maxAttempts,
@@ -1899,14 +1941,14 @@ export const sessionStore = {
 
       runStatement(`
         INSERT OR REPLACE INTO message_job_archives (
-          id, request_id, meta_blast_message_id, session_id, priority, extension, phone_number, message,
+          id, request_id, meta_blast_message_id, session_id, priority, message_type, extension, phone_number, message, media_payload_json,
           use_reply_flow, include_success_screenshot, status, original_status, attempts, max_attempts,
           error_message, result_json, next_retry_at, webhook_notified, webhook_attempts,
           webhook_next_retry_at, webhook_last_error, webhook_delivered_at, started_at, finished_at,
           created_at, updated_at, archived_at, archive_reason, archive_source
         )
         SELECT
-          id, request_id, meta_blast_message_id, session_id, priority, extension, phone_number, message,
+          id, request_id, meta_blast_message_id, session_id, priority, message_type, extension, phone_number, message, media_payload_json,
           use_reply_flow, include_success_screenshot, 'archived', status, attempts, max_attempts,
           error_message, result_json, next_retry_at, 1, webhook_attempts,
           0, webhook_last_error, webhook_delivered_at, started_at, finished_at,

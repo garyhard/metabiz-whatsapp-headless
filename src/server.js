@@ -84,7 +84,7 @@ function buildHttpJsonErrorBody(req, error, fallback, extra = {}) {
 
 // Middleware
 app.disable('x-powered-by');
-app.use(express.json());
+app.use(express.json({ limit: config.jsonBodyLimit }));
 app.use((req, res, next) => {
   req.requestId = resolveHttpRequestId(req);
   res.setHeader('X-Request-Id', req.requestId);

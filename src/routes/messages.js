@@ -8,6 +8,7 @@ import {
   getBrowserPoolStatus,
   getQueuedWorkSessionBlock,
   getSessionInfo,
+  sendMediaForSession,
   sendMessageForSession,
   restoreSessionFromStore,
 } from '../services/sessionManager.js';
@@ -50,6 +51,12 @@ function serializeJob(job) {
     metaBlastMessageId: job.metaBlastMessageId || null,
     sessionId: job.sessionId,
     useReplyFlow: job.useReplyFlow === true,
+    messageType: job.messageType || 'text',
+    media: job.mediaPayload ? {
+      filename: job.mediaPayload.filename || null,
+      mimetype: job.mediaPayload.mimetype || job.mediaPayload.mimeType || null,
+      dryRunUpload: job.mediaPayload.dryRunUpload === true,
+    } : null,
     priority: job.priority || 'normal',
     status: job.status,
     attempts: job.attempts,
@@ -88,6 +95,29 @@ function previewString(value, maxCodePoints = 160) {
   return Array.from(safeString(value).replace(/\s+/g, ' ').trim())
     .slice(0, maxCodePoints)
     .join('');
+}
+
+function normalizeMediaPayload(value) {
+  const media = value && typeof value === 'object' ? value : {};
+  const mimetype = String(media.mimetype || media.mimeType || '').trim().toLowerCase();
+  const filename = String(media.filename || '').trim() || 'image';
+  const base64 = String(media.base64 || media.data || media.mediaBase64 || '').trim();
+  const dryRunUpload = media.dryRunUpload === true || toBoolean(media.dryRunUpload);
+  if (!mimetype.startsWith('image/')) {
+    return { ok: false, error: 'Only image media is supported' };
+  }
+  if (!base64) {
+    return { ok: false, error: 'Missing required media.base64' };
+  }
+  return {
+    ok: true,
+    media: {
+      mimetype,
+      filename,
+      base64,
+      dryRunUpload,
+    },
+  };
 }
 
 function sendJson(res, payload) {
@@ -420,6 +450,155 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
           screenshotFilename: result?.screenshot?.filename || null,
           screenshotDataUrl,
           requestId: result?.requestId || normalizedRequestId,
+        });
+      } catch (restoreError) {
+        if (restoreError instanceof InvalidInputError) {
+          return res.status(400).json(
+            buildJsonErrorBody(restoreError, 'Invalid input', {
+              errorCode: 'invalid_input',
+            })
+          );
+        }
+        if (restoreError instanceof AutomationError) {
+          return res.status(500).json(await buildAutomationErrorBody(restoreError, getAutomationErrorCode, normalizedRequestId));
+        }
+        if (restoreError instanceof SessionNotFoundError) {
+          return res.status(404).json(
+            buildJsonErrorBody(restoreError, 'Session not found', {
+              errorCode: 'session_not_found',
+              sessionId,
+            })
+          );
+        }
+        throw restoreError;
+      }
+    }
+    if (error instanceof InvalidInputError) {
+      return res.status(400).json(
+        buildJsonErrorBody(error, 'Invalid input', {
+          errorCode: 'invalid_input',
+        })
+      );
+    }
+    if (error instanceof AutomationError) {
+      return res.status(500).json(await buildAutomationErrorBody(error, getAutomationErrorCode, normalizedRequestId));
+    }
+    next(error);
+  }
+});
+
+/**
+ * POST /api/sessions/:sessionId/send-media
+ * Send a WhatsApp image media message.
+ */
+router.post('/:sessionId/send-media', async (req, res, next) => {
+  const { sessionId } = req.params;
+  const { extension, phoneNumber, message = '', media, includeSuccessScreenshot, requestId, async, dryRunUpload } = req.body || {};
+  const normalizedRequestId = normalizeRequestId(sessionId, requestId);
+  const normalizedPriority = 'high';
+  try {
+    console.log(`[Routes] send-media request session=${sessionId}`);
+
+    if (!extension || !phoneNumber) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Missing required fields: extension, phoneNumber',
+      });
+    }
+
+    if (typeof extension !== 'string' || typeof phoneNumber !== 'string' || typeof message !== 'string') {
+      return res.status(400).json({
+        ok: false,
+        error: 'extension, phoneNumber, and message must be strings',
+      });
+    }
+
+    const normalizedMedia = normalizeMediaPayload({
+      ...(media && typeof media === 'object' ? media : {}),
+      dryRunUpload: dryRunUpload === true || toBoolean(dryRunUpload) || media?.dryRunUpload === true,
+    });
+    if (!normalizedMedia.ok) {
+      return res.status(400).json({
+        ok: false,
+        error: normalizedMedia.error,
+      });
+    }
+
+    const asyncMode = toBoolean(req.query?.async) || toBoolean(async);
+    if (asyncMode) {
+      const { job, created } = enqueueMessageJob({
+        requestId: normalizedRequestId,
+        sessionId,
+        priority: normalizedPriority,
+        extension,
+        phoneNumber,
+        message,
+        messageType: 'media',
+        mediaPayload: normalizedMedia.media,
+        useReplyFlow: true,
+        includeSuccessScreenshot: includeSuccessScreenshot === true,
+      });
+      return res.status(202).json({
+        ok: true,
+        accepted: true,
+        created,
+        job: serializeJob(job),
+      });
+    }
+
+    const result = await sendMediaForSession(sessionId, {
+      extension,
+      phoneNumber,
+      message,
+      media: normalizedMedia.media,
+      useReplyFlow: true,
+      includeSuccessScreenshot: includeSuccessScreenshot === true,
+      requestId: normalizedRequestId,
+      priority: normalizedPriority,
+      dryRunUpload: normalizedMedia.media.dryRunUpload === true,
+    });
+    const screenshotDataUrl = await buildScreenshotDataUrl(result?.screenshot || null);
+
+    res.json({
+      ok: true,
+      message: normalizedMedia.media.dryRunUpload === true ? 'Media upload dry-run completed' : 'Media message sent successfully',
+      screenshot: result?.screenshot || null,
+      screenshotFilename: result?.screenshot?.filename || null,
+      screenshotDataUrl,
+      requestId: result?.requestId || normalizedRequestId,
+      dryRunUpload: result?.dryRunUpload === true,
+    });
+  } catch (error) {
+    if (error instanceof SessionNotFoundError) {
+      try {
+        await restoreSessionFromStore(sessionId);
+        const normalizedMedia = normalizeMediaPayload(media);
+        if (!normalizedMedia.ok) {
+          return res.status(400).json({
+            ok: false,
+            error: normalizedMedia.error,
+          });
+        }
+        const result = await sendMediaForSession(sessionId, {
+          extension,
+          phoneNumber,
+          message,
+          media: normalizedMedia.media,
+          useReplyFlow: true,
+          includeSuccessScreenshot: includeSuccessScreenshot === true,
+          requestId: normalizedRequestId,
+          priority: normalizedPriority,
+          dryRunUpload: normalizedMedia.media.dryRunUpload === true,
+        });
+        const screenshotDataUrl = await buildScreenshotDataUrl(result?.screenshot || null);
+        return res.json({
+          ok: true,
+          message: normalizedMedia.media.dryRunUpload === true ? 'Media upload dry-run completed' : 'Media message sent successfully',
+          screenshot: result?.screenshot || null,
+          screenshotFilename: result?.screenshot?.filename || null,
+          screenshotDataUrl,
+          requestId: result?.requestId || normalizedRequestId,
+          dryRunUpload: result?.dryRunUpload === true,
         });
       } catch (restoreError) {
         if (restoreError instanceof InvalidInputError) {

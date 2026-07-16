@@ -11,6 +11,7 @@ import {
   getSessionInfo,
   listQueuedWorkSessionBlocks,
   restoreSessionFromStore,
+  sendMediaForSession,
   sendMessageForSession,
   warmSessionForQueuedWork,
 } from './sessionManager.js';
@@ -378,16 +379,27 @@ async function processJob(job) {
       includeSuccessScreenshot: job.includeSuccessScreenshot,
       priority: job.priority || (job.useReplyFlow ? 'high' : 'normal'),
     };
+    const sendMediaPayload = job.messageType === 'media'
+      ? {
+          ...sendPayload,
+          media: job.mediaPayload,
+          dryRunUpload: job.mediaPayload?.dryRunUpload === true,
+        }
+      : null;
     let result;
     try {
-      result = await sendMessageForSession(job.sessionId, sendPayload);
+      result = job.messageType === 'media'
+        ? await sendMediaForSession(job.sessionId, sendMediaPayload)
+        : await sendMessageForSession(job.sessionId, sendPayload);
     } catch (error) {
       if (!(error instanceof SessionNotFoundError)) {
         throw error;
       }
 
       await restoreSessionFromStore(job.sessionId);
-      result = await sendMessageForSession(job.sessionId, sendPayload);
+      result = job.messageType === 'media'
+        ? await sendMediaForSession(job.sessionId, sendMediaPayload)
+        : await sendMessageForSession(job.sessionId, sendPayload);
     }
     const updatedJob = sessionStore.markMessageJobSent(job.id, result || {});
     if (updatedJob?.status !== 'sent') {
@@ -478,6 +490,7 @@ function buildWebhookPayload(job) {
       use_reply_flow: job.useReplyFlow === true,
       session_id: job.sessionId,
       priority: job.priority || 'normal',
+      type: job.messageType || 'text',
       status: job.status,
       attempts: job.attempts,
       max_attempts: job.maxAttempts,
@@ -996,6 +1009,8 @@ export function enqueueMessageJob({
   extension,
   phoneNumber,
   message,
+  messageType = 'text',
+  mediaPayload = null,
   useReplyFlow = false,
   includeSuccessScreenshot = false,
   maxAttempts = null,
@@ -1017,6 +1032,8 @@ export function enqueueMessageJob({
     extension: String(extension),
     phoneNumber: String(phoneNumber),
     message: String(message),
+    messageType,
+    mediaPayload,
     useReplyFlow: useReplyFlow === true,
     includeSuccessScreenshot: includeSuccessScreenshot === true,
     maxAttempts: Math.max(1, Number(maxAttempts) || config.queue.maxAttempts),

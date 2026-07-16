@@ -16,6 +16,7 @@ const IDLE_TIMEOUT_MINUTES = parseInt(process.env.IDLE_TIMEOUT_MINUTES || '0', 1
 const POST_FLOW_IDLE_TIMEOUT_MS = parseInt(process.env.POST_FLOW_IDLE_TIMEOUT_MS || '30000', 10);
 const SEND_RELOAD_IDLE_MINUTES = parseInt(process.env.SEND_RELOAD_IDLE_MINUTES || '10', 10);
 const BROWSER_POOL_WAIT_MS = parseInt(process.env.BROWSER_POOL_WAIT_MS || '30000', 10);
+const JSON_BODY_LIMIT = String(process.env.JSON_BODY_LIMIT || '8mb').trim() || '8mb';
 
 function parsePositiveInt(value, fallback) {
   const parsed = parseInt(String(value || ''), 10);
@@ -83,6 +84,7 @@ export const config = {
   apiKey: API_KEY,
   port: PORT,
   devMode: DEV_MODE,
+  jsonBodyLimit: JSON_BODY_LIMIT,
   flowTimeoutMs: Number.isFinite(FLOW_TIMEOUT_MS) && FLOW_TIMEOUT_MS > 0 ? FLOW_TIMEOUT_MS : 60000,
   flowRecoverableRetryAttempts: parseNonNegativeInt(process.env.FLOW_RECOVERABLE_RETRY_ATTEMPTS, 2),
   flowRecoverableRetryDelayMs: parsePositiveInt(process.env.FLOW_RECOVERABLE_RETRY_DELAY_MS, 1500),

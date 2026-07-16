@@ -16,8 +16,17 @@ const INBOX_URL = 'https://business.facebook.com/latest/inbox';
 const DEBUG_DIR = path.join(__dirname, '../../profiles/debug');
 const REQUEST_LOG_DIR = path.join(DEBUG_DIR, 'requests');
 const CAPTCHA_DIR = path.join(DEBUG_DIR, 'captcha');
+const MEDIA_UPLOAD_TMP_DIR = path.join(DEBUG_DIR, 'media-uploads');
 const RELOAD_TIMEOUT_MS = 60000;
 const SPINNER_TIMEOUT_MS = 15000;
+const MAX_MEDIA_UPLOAD_BYTES = 5 * 1024 * 1024;
+const IMAGE_MIME_EXTENSIONS = {
+  'image/jpeg': '.jpg',
+  'image/jpg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+};
 const SAVE_LOGIN_INFO_HINTS = normalizeList([
   'save login info',
   'save your login info',
@@ -33,6 +42,20 @@ const AUTOMATED_BEHAVIOR_NOTICE_HINTS = normalizeList([
 ]);
 const AUTOMATED_BEHAVIOR_DISMISS_LABELS = normalizeList(['dismiss']);
 const CONNECT_INSTAGRAM_HINTS = normalizeList(['connect to instagram', 'hubungkan ke instagram']);
+const ATTACH_MEDIA_LABELS = normalizeList([
+  'attach',
+  'attachment',
+  'photo',
+  'image',
+  'media',
+  'add media',
+  'add photo',
+  'upload',
+  'lampirkan',
+  'gambar',
+  'foto',
+  'media',
+]);
 const TWO_FACTOR_TEXT_HINTS = normalizeList([
   'try another way',
   'other ways to authenticate',
@@ -3858,6 +3881,216 @@ async function clickSendMessage(page) {
   console.log('[Automation] Step 6: ✓ "Send Message" button clicked');
 }
 
+function sanitizeMediaFilename(filename, mimetype) {
+  const fallbackExt = IMAGE_MIME_EXTENSIONS[String(mimetype || '').toLowerCase()] || '.jpg';
+  const cleaned = String(filename || 'image')
+    .replace(/[^\w.\-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^\.+/, '')
+    .slice(0, 120);
+  const base = cleaned || 'image';
+  return path.extname(base) ? base : `${base}${fallbackExt}`;
+}
+
+function normalizeMediaBase64(value) {
+  const raw = String(value || '').trim();
+  const match = raw.match(/^data:([^;]+);base64,(.+)$/i);
+  return match ? match[2] : raw;
+}
+
+async function writeMediaPayloadTempFile(media = {}) {
+  const mimetype = String(media.mimetype || media.mimeType || '').trim().toLowerCase();
+  if (!IMAGE_MIME_EXTENSIONS[mimetype]) {
+    throw new AutomationError(`Unsupported media type: ${mimetype || '-'}`);
+  }
+
+  const base64 = normalizeMediaBase64(media.base64 || media.data || media.mediaBase64);
+  if (!base64) {
+    throw new AutomationError('Media payload is missing base64 data');
+  }
+
+  let buffer;
+  try {
+    buffer = Buffer.from(base64, 'base64');
+  } catch {
+    throw new AutomationError('Media payload base64 is invalid');
+  }
+  if (!buffer || buffer.length <= 0) {
+    throw new AutomationError('Media payload is empty');
+  }
+  if (buffer.length > MAX_MEDIA_UPLOAD_BYTES) {
+    throw new AutomationError(`Media payload exceeds ${MAX_MEDIA_UPLOAD_BYTES} bytes`);
+  }
+
+  await fs.mkdir(MEDIA_UPLOAD_TMP_DIR, { recursive: true });
+  const safeName = sanitizeMediaFilename(media.filename, mimetype);
+  const filePath = path.join(MEDIA_UPLOAD_TMP_DIR, `${Date.now()}-${Math.random().toString(16).slice(2)}-${safeName}`);
+  await fs.writeFile(filePath, buffer);
+  return {
+    filePath,
+    filename: safeName,
+    mimetype,
+    size: buffer.length,
+  };
+}
+
+async function cleanupTempMediaFile(filePath) {
+  if (!filePath) return;
+  try {
+    await fs.unlink(filePath);
+  } catch {
+    // Best-effort cleanup only.
+  }
+}
+
+async function findMediaFileInput(page) {
+  const handle = await page.evaluateHandle(() => {
+    const isVisible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const inputs = Array.from(document.querySelectorAll('input[type="file"]'));
+    return inputs.find((input) => {
+      const accept = String(input.getAttribute('accept') || '').toLowerCase();
+      return accept.includes('image') || accept.includes('video') || accept.includes('*') || isVisible(input);
+    }) || inputs[0] || null;
+  });
+  return handle.asElement();
+}
+
+async function findAttachMediaButton(page) {
+  const handle = await page.evaluateHandle((labels) => {
+    const isVisible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
+    };
+    const candidates = Array.from(document.querySelectorAll('[role="button"],button,input[type="button"],a,[aria-label],[title]'));
+    return candidates.find((el) => {
+      if (!isVisible(el)) return false;
+      const bag = `${el.textContent || ''} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''} ${el.getAttribute('data-testid') || ''}`
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+      if (!bag) return false;
+      return labels.some((label) => bag === label || bag.includes(label));
+    }) || null;
+  }, ATTACH_MEDIA_LABELS);
+  return handle.asElement();
+}
+
+async function uploadMediaFile(page, filePath) {
+  let input = await findMediaFileInput(page);
+  if (input) {
+    await input.setInputFiles(filePath);
+    await sleep(500);
+    return { method: 'input' };
+  }
+
+  const attachButton = await findAttachMediaButton(page);
+  if (!attachButton) {
+    throw new AutomationError('Media upload: attach button or file input not found');
+  }
+
+  const chooserPromise = page.waitForEvent('filechooser', { timeout: 5000 }).catch(() => null);
+  await clickElement(page, attachButton, 'Media upload: Attach');
+  const chooser = await chooserPromise;
+  if (chooser) {
+    await chooser.setFiles(filePath);
+    await sleep(500);
+    return { method: 'filechooser' };
+  }
+
+  input = await findMediaFileInput(page);
+  if (!input) {
+    throw new AutomationError('Media upload: file chooser did not open and file input was not found');
+  }
+  await input.setInputFiles(filePath);
+  await sleep(500);
+  return { method: 'input_after_attach' };
+}
+
+async function waitForMediaPreview(page) {
+  const preview = await waitFor(
+    page,
+    async () => {
+      const handle = await page.evaluateHandle(() => {
+        const isVisible = (el) => {
+          if (!el) return false;
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          return rect.width > 20 && rect.height > 20 && style.visibility !== 'hidden' && style.display !== 'none';
+        };
+        return Array.from(document.querySelectorAll('[role="dialog"] img,img[src^="blob:"],img[src^="data:"],video'))
+          .find((el) => isVisible(el)) || null;
+      });
+      return handle.asElement();
+    },
+    { timeoutMs: 15000, intervalMs: 300 }
+  ).catch(() => null);
+  if (!preview) {
+    throw new AutomationError('Media upload: preview did not appear');
+  }
+  return preview;
+}
+
+async function prepareReplyBox(page, caption) {
+  if (String(caption || '').trim()) {
+    return fillReplyMessage(page, caption);
+  }
+  return waitFor(
+    page,
+    async () => findReplyInput(page),
+    { timeoutMs: 8000 }
+  );
+}
+
+async function tryReplyMediaFlow(page, { phoneDigits, caption, mediaPath, dryRunUpload = false, twofaSecret = null }) {
+  try {
+    console.log(`[Automation] Reply media flow: start for ${phoneDigits}`);
+    await ensureInboxReady(page, 'ReplyMedia', { twofaSecret });
+    await dismissInboxBlockingPrompts(page, 'ReplyMedia');
+    await ensureSearchEmpty(page);
+
+    await waitFor(
+      page,
+      async () => {
+        const rows = await page.$$('span[data-surface="/bizweb:all/thread_row"]');
+        return rows.length > 0;
+      },
+      { timeoutMs: 2000 }
+    ).catch(() => null);
+
+    const row = await findThreadRowByNumber(page, phoneDigits);
+    if (!row) {
+      console.warn('[Automation] Reply media flow: no matching thread row');
+      return false;
+    }
+
+    await clickElement(page, row, 'Reply media: Open thread row');
+    await sleep(500);
+    const replyBox = await prepareReplyBox(page, caption);
+    const upload = await uploadMediaFile(page, mediaPath);
+    await waitForMediaPreview(page);
+    if (dryRunUpload) {
+      console.log('[Automation] Reply media flow: dry-run upload completed before send');
+      return true;
+    }
+    await clickReplySend(page, replyBox);
+    console.log(`[Automation] Reply media flow: sent via thread row (${upload.method})`);
+    return true;
+  } catch (error) {
+    if (isAuthRelatedError(error)) {
+      throw error;
+    }
+    console.warn(`[Automation] Reply media flow failed, falling back: ${error?.message || error}`);
+    return false;
+  }
+}
+
 /**
  * Main automation flow - send WhatsApp message
  * @param {Page} page - Playwright page instance
@@ -4070,6 +4303,181 @@ export async function sendMessage(
       screenshotPath: debug.path,
       cause: lastError,
     });
+  }
+}
+
+export async function sendMediaMessage(
+  page,
+  {
+    extension,
+    phoneNumber,
+    message = '',
+    media,
+    sessionId = null,
+    cUser = null,
+    twofaSecret = null,
+    forceInitialRefresh = false,
+    useReplyFlow = true,
+    includeSuccessScreenshot = false,
+    requestId = null,
+    dryRunUpload = false,
+  }
+) {
+  if (!extension || !phoneNumber) {
+    throw new AutomationError('Missing required fields: extension, phoneNumber');
+  }
+  if (!media || typeof media !== 'object') {
+    throw new AutomationError('Missing required field: media');
+  }
+
+  const normalizedRequestId = normalizeRequestId(sessionId, requestId);
+  const steps = [];
+  const logStep = (label, extra = {}) => {
+    steps.push({ at: new Date().toISOString(), label, ...extra });
+  };
+
+  const temp = await writeMediaPayloadTempFile(media);
+  logStep('send_media:temp_file', { filename: temp.filename, mimetype: temp.mimetype, size: temp.size });
+
+  const refreshForSend = async (label) => {
+    console.log(`[Automation] Refreshing page before media send${label ? ` (${label})` : ''}...`);
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
+    await sleep(2000);
+    await ensureInboxReady(page, 'SendMedia', { twofaSecret });
+    logStep('send_media:refresh_ok', { label });
+  };
+
+  const runFlow = async () => {
+    const caption = String(message || '');
+    if (useReplyFlow) {
+      const phoneDigits = normalizeDigits(`${extension}${phoneNumber}`);
+      const replied = await tryReplyMediaFlow(page, {
+        phoneDigits,
+        caption,
+        mediaPath: temp.filePath,
+        dryRunUpload,
+        twofaSecret,
+      });
+      if (replied) {
+        logStep('send_media:reply_flow', { phoneDigits, dryRunUpload });
+        return;
+      }
+    }
+
+    await openWhatsappModal(page);
+    logStep('send_media:open_modal');
+
+    const newNumberResult = await clickNewWhatsappNumber(page);
+    logStep('send_media:new_number', newNumberResult);
+
+    await selectExtension(page, extension);
+    logStep('send_media:select_extension');
+
+    await fillPhoneNumber(page, phoneNumber);
+    logStep('send_media:fill_phone');
+
+    const upload = await uploadMediaFile(page, temp.filePath);
+    logStep('send_media:upload', upload);
+
+    await waitForMediaPreview(page);
+    logStep('send_media:preview_ready');
+
+    if (caption.trim()) {
+      await fillMessage(page, caption);
+      logStep('send_media:fill_caption');
+    }
+
+    if (dryRunUpload) {
+      logStep('send_media:dry_run_stop');
+      return;
+    }
+
+    await clickSendMessage(page);
+    logStep('send_media:click_send');
+    await sleep(300);
+  };
+
+  let lastError = null;
+  const maxAttempts = 2;
+  try {
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        if (attempt === 1) {
+          if (forceInitialRefresh) {
+            await refreshForSend('idle');
+          } else {
+            await ensureInboxReady(page, 'SendMedia', { twofaSecret });
+            logStep('send_media:ensure_ready');
+          }
+        } else {
+          await refreshForSend(`retry ${attempt}`);
+        }
+        await runFlow();
+
+        let successScreenshot = null;
+        if (includeSuccessScreenshot) {
+          const debug = await captureDebugScreenshot(page, dryRunUpload ? 'send-media-dry-run' : 'send-media-success', cUser || 'unknown');
+          successScreenshot = {
+            path: debug.path || null,
+            url: debug.url || null,
+            filename: debug.path ? path.basename(debug.path) : null,
+          };
+        }
+        logStep('send_media:ok', { attempt, dryRunUpload });
+        await writeRequestLog(normalizedRequestId, {
+          requestId: normalizedRequestId,
+          type: dryRunUpload ? 'send_media_dry_run' : 'send_media',
+          steps,
+          screenshotPath: successScreenshot?.path || null,
+          url: page.url(),
+        });
+        return {
+          ok: true,
+          dryRunUpload,
+          media: {
+            filename: temp.filename,
+            mimetype: temp.mimetype,
+            size: temp.size,
+          },
+          screenshot: successScreenshot,
+          requestId: normalizedRequestId,
+        };
+      } catch (error) {
+        lastError = error;
+        logStep('send_media:error', { attempt, error: error?.message || String(error) });
+        if (attempt < maxAttempts && error instanceof AutomationError && !isAuthRelatedError(error)) {
+          await sleep(3000);
+          continue;
+        }
+        break;
+      }
+    }
+
+    const debug = await captureDebugScreenshot(page, 'send-media', cUser || 'unknown');
+    await writeRequestLog(normalizedRequestId, {
+      requestId: normalizedRequestId,
+      type: 'send_media',
+      steps,
+      error: lastError?.message || String(lastError || 'send media failed'),
+      screenshotPath: debug.path,
+      url: debug.url,
+    });
+    if (lastError instanceof AutomationError) {
+      lastError.details = {
+        ...(lastError.details || {}),
+        requestId: lastError?.details?.requestId || normalizedRequestId,
+        url: lastError?.details?.url || debug.url,
+        screenshotPath: lastError?.details?.screenshotPath || debug.path,
+      };
+      throw lastError;
+    }
+    throw new AutomationError(`Media automation failed: ${lastError?.message || String(lastError)}`, {
+      requestId: normalizedRequestId,
+      url: debug.url,
+      screenshotPath: debug.path,
+    });
+  } finally {
+    await cleanupTempMediaFile(temp.filePath);
   }
 }
 
