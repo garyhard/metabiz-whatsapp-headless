@@ -36,6 +36,24 @@ if [ "${ENABLE_PM2_LOGROTATE:-true}" = "true" ]; then
 fi
 
 echo "🔄 Restarting service..."
-pm2 reload ecosystem.config.cjs --update-env
+pm2 startOrRestart ecosystem.config.cjs --update-env
+
+echo "🩺 Waiting for health check..."
+for attempt in $(seq 1 "${POST_DEPLOY_HEALTH_ATTEMPTS:-30}"); do
+  if curl -fsS --max-time 5 "http://127.0.0.1:${PORT:-4001}/health" >/dev/null; then
+    echo "✅ Health check passed"
+    break
+  fi
+
+  if [ "${attempt}" = "${POST_DEPLOY_HEALTH_ATTEMPTS:-30}" ]; then
+    echo "❌ Health check failed after ${attempt} attempts"
+    pm2 describe metabiz-whatsapp-headless || true
+    tail -n 80 "${APP_DIR}/shared/logs/app-out.log" || true
+    tail -n 80 "${APP_DIR}/shared/logs/app-error.log" || true
+    exit 1
+  fi
+
+  sleep 5
+done
 
 echo "✅ Deployment complete!"

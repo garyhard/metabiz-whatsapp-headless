@@ -28,7 +28,7 @@ module.exports = {
       log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
       merge_logs: true,
       autorestart: true,
-      max_memory_restart: '2G',
+      max_memory_restart: process.env.METABIZ_PM2_MAX_MEMORY_RESTART || '6G',
     },
   ],
 
