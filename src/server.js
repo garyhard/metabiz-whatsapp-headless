@@ -30,6 +30,12 @@ import { sessionStore, flushSessionStorePersist, getSessionStorePersistStatus } 
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
+import { getDiskPressureStatus } from './services/systemHealth.js';
+import {
+  startProfileCleanupWorker,
+  stopProfileCleanupWorker,
+  getProfileCleanupStatus,
+} from './services/profileCleanup.js';
 import {
   SessionNotFoundError,
   InvalidInputError,
@@ -92,14 +98,16 @@ app.use((req, res, next) => {
 });
 
 // Health check endpoint (no auth required)
-app.get('/health', (req, res) => {
+app.get('/health', async (req, res) => {
   const now = Date.now();
   const messageQueue = getMessageQueueWorkerStatus(now);
   const sessionFlowQueue = getSessionFlowQueueWorkerStatus(now);
   const createOperationQueue = getCreateOperationQueueWorkerStatus(now);
   const persist = getSessionStorePersistStatus(now);
+  const disk = await getDiskPressureStatus();
+  const profileCleanup = getProfileCleanupStatus(now);
   const messageJobCounts = sessionStore.messageJobStatusCounts();
-  const queueHealthy = !messageQueue.stalled && !sessionFlowQueue.stalled && !createOperationQueue.stalled;
+  const queueHealthy = !messageQueue.stalled && !sessionFlowQueue.stalled && !createOperationQueue.stalled && !disk.pressured;
 
   res.status(queueHealthy ? 200 : 503).json({
     ok: queueHealthy,
@@ -117,6 +125,10 @@ app.get('/health', (req, res) => {
     },
     store: {
       persist,
+      disk,
+      cleanup: {
+        profiles: profileCleanup,
+      },
     },
   });
 });
@@ -272,6 +284,7 @@ async function gracefulShutdown(signal) {
   stopMessageQueueWorker();
   stopSessionFlowQueueWorker();
   stopCreateOperationQueueWorker();
+  stopProfileCleanupWorker();
   if (config.devMode) {
     console.log('[Server] Dev mode: Preserving browser sessions across restart');
     console.log('[Server] Sessions will remain active. Use DELETE /api/sessions/:id to manually destroy them.');
@@ -312,4 +325,5 @@ server = app.listen(config.port, async () => {
     console.log('[Server] Restoring sessions from session store...');
   }
   await restoreSessions();
+  startProfileCleanupWorker();
 });

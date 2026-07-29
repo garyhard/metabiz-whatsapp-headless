@@ -82,9 +82,9 @@ PROXY_PASSWORD=your-proxy-password
 - `IDLE_TIMEOUT_MINUTES` (optional): Suspend browser session yang idle setelah N menit. Session tetap tersimpan di store dan akan dihidupkan lagi saat dipakai (default config: `0`, contoh env production saat ini: `120`)
 - `MAX_ACTIVE_BROWSERS` (optional): Batas jumlah browser live sekaligus. Saat limit penuh, service akan suspend session aktif yang paling lama idle sebelum membuka browser baru (default: `16`, hard limit default: `24`)
 - `BROWSER_POOL_WAIT_MS` (optional): Waktu tunggu maksimum saat limit browser aktif penuh dan belum ada session idle yang bisa dievict (default: `30000`)
-- `META_CREATE_QUEUE_BATCH_SIZE` (optional): Jumlah create Meta yang bisa di-claim per pump (default: `2`)
-- `META_CREATE_QUEUE_CONCURRENCY` (optional): Jumlah create Meta paralel yang ditargetkan worker (default: `2`)
-- `META_CREATE_QUEUE_MAX_CONCURRENCY` (optional): Batas atas paralel create Meta walaupun batch/concurrency dinaikkan (default: `2`)
+- `META_CREATE_QUEUE_BATCH_SIZE` (optional): Jumlah create Meta yang bisa di-claim per pump (default: `4`)
+- `META_CREATE_QUEUE_CONCURRENCY` (optional): Jumlah create Meta paralel yang ditargetkan worker (default: `4`)
+- `META_CREATE_QUEUE_MAX_CONCURRENCY` (optional): Batas atas paralel create Meta walaupun batch/concurrency dinaikkan (default: `4`)
 - `META_CREATE_QUEUE_PROCESSING_TIMEOUT_MS` (optional): Batas umur create operation sebelum dianggap stale/stalled (default: `900000`)
 - `META_CREATE_BROWSER_EXTRA_CAPACITY` (optional): Slot browser tambahan khusus lane create di atas limit normal (default: `2`)
 - `META_CREATE_BROWSER_POOL_WAIT_MS` (optional): Waktu tunggu lane create saat pool browser penuh (default: `90000`)
@@ -101,6 +101,14 @@ PROXY_PASSWORD=your-proxy-password
 - `MESSAGE_QUEUE_SESSION_BURST_SIZE` (optional): Prioritas sticky per session untuk reuse browser. `5` berarti satu session diprioritaskan sampai 5 job sebelum pindah ke session lain (default: `5`)
 - `SEND_CONCURRENCY` (optional): Batas paralel kirim lintas session. `10` untuk fixed 10 paralel, `0`/`all` untuk semua browser aktif (default: `1`). Queue hanya akan mengaktifkan maksimal satu job `processing` per `session_id`, jadi job dalam session yang sama tetap antri.
 - `SEND_CONCURRENCY_MAX_DURING_CREATE` (optional): Batas paralel kirim saat ada create Meta queued/processing supaya create/check-session dan send tidak saling makan kapasitas (default: `2`)
+- `DISK_PRESSURE_WARN_PERCENT` / `DISK_PRESSURE_BLOCK_PERCENT` (optional): Ambang disk untuk `/health` dan monitor queue. Saat block threshold tercapai, endpoint dianggap backpressured supaya manager bisa route pekerjaan ke server lain (default warn `90`, block `95`).
+- `PROFILE_CLEANUP_ENABLED` (optional): Aktifkan cleanup berkala untuk orphan Chromium profiles dan debug screenshots (default: `true`).
+- `PROFILE_CLEANUP_INTERVAL_MINUTES` (optional): Interval cleanup berkala (default: `30`).
+- `PROFILE_CLEANUP_STARTUP_DELAY_MINUTES` (optional): Delay cleanup pertama setelah server start agar tidak bentrok dengan restore session (default: `5`).
+- `PROFILE_CLEANUP_ORPHAN_MIN_AGE_HOURS` (optional): Umur minimum folder `profiles/session-*` sebelum boleh dihapus jika tidak ada di DB dan tidak dipakai Chromium aktif (default: `24`).
+- `PROFILE_CLEANUP_MAX_DELETE_PER_RUN` (optional): Batas hapus orphan profile per run supaya cleanup tidak spike disk I/O (default: `1000`).
+- `PROFILE_CLEANUP_DEBUG_MAX_AGE_DAYS` (optional): Umur maksimum debug screenshots/log artifacts di `profiles/debug` (default: `3`).
+- `PROFILE_CLEANUP_DEBUG_MAX_DELETE_PER_RUN` (optional): Batas hapus debug files per run (default: `5000`).
 - `MESSAGE_QUEUE_CREATE_RESERVED_BROWSER_SLOTS` (optional): Jumlah browser slot default yang disisihkan untuk create Meta saat ada create queued/processing (default: `8`)
 - `MESSAGE_QUEUE_SESSION_PREWARM_LIMIT` (optional): Batas session prewarm paralel untuk send queue (default: `2`)
 - `MESSAGE_QUEUE_SESSION_PREWARM_IDLE_TIMEOUT_MS` (optional): Durasi browser prewarm idle sebelum ditutup (default: `45000`)

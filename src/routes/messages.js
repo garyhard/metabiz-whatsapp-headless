@@ -25,6 +25,8 @@ import {
   AutomationError,
 } from '../errors.js';
 import { buildJsonErrorBody } from '../utils/apiErrors.js';
+import { getDiskPressureStatus } from '../services/systemHealth.js';
+import { getProfileCleanupStatus } from '../services/profileCleanup.js';
 
 const router = express.Router();
 
@@ -246,6 +248,8 @@ router.get('/jobs/monitor', async (req, res) => {
   const queueSessions = sessionStore.listMessageJobSessions(sessionLimit, now);
   const browserPool = getBrowserPoolStatus();
   const worker = getMessageQueueWorkerStatus(now);
+  const disk = await getDiskPressureStatus();
+  const profileCleanup = getProfileCleanupStatus(now);
 
   const processingSessionIds = [...new Set(processingJobs.map((job) => String(job.sessionId || '')).filter(Boolean))];
   const queuedSessionIds = [...new Set(queuedJobs.map((job) => String(job.sessionId || '')).filter(Boolean))];
@@ -287,6 +291,12 @@ router.get('/jobs/monitor', async (req, res) => {
       summary: buildSessionSummary(loadedSessions),
       browserPool,
       loaded: loadedSessions.slice(0, loadedLimit).map(compactLoadedSession),
+    },
+    system: {
+      disk,
+      cleanup: {
+        profiles: profileCleanup,
+      },
     },
   });
 });

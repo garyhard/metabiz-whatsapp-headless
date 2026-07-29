@@ -110,6 +110,17 @@ export const config = {
   sendConcurrencyMaxDuringCreate: parsePositiveInt(process.env.SEND_CONCURRENCY_MAX_DURING_CREATE, 2),
   sessionLockWaitTimeoutMs: parseNonNegativeInt(process.env.SESSION_LOCK_WAIT_TIMEOUT_MS, 90000),
   storePersistDebounceMs: parseNonNegativeInt(process.env.SESSION_STORE_PERSIST_DEBOUNCE_MS, 50),
+  diskPressureWarnPercent: parsePositiveInt(process.env.DISK_PRESSURE_WARN_PERCENT, 90),
+  diskPressureBlockPercent: parsePositiveInt(process.env.DISK_PRESSURE_BLOCK_PERCENT, 95),
+  profileCleanup: {
+    enabled: parseBoolean(process.env.PROFILE_CLEANUP_ENABLED, true),
+    intervalMs: parsePositiveInt(process.env.PROFILE_CLEANUP_INTERVAL_MINUTES, 30) * 60 * 1000,
+    startupDelayMs: parseNonNegativeInt(process.env.PROFILE_CLEANUP_STARTUP_DELAY_MINUTES, 5) * 60 * 1000,
+    orphanMinAgeMs: parsePositiveInt(process.env.PROFILE_CLEANUP_ORPHAN_MIN_AGE_HOURS, 24) * 60 * 60 * 1000,
+    maxDeletePerRun: parsePositiveInt(process.env.PROFILE_CLEANUP_MAX_DELETE_PER_RUN, 1000),
+    debugMaxAgeMs: parsePositiveInt(process.env.PROFILE_CLEANUP_DEBUG_MAX_AGE_DAYS, 3) * 24 * 60 * 60 * 1000,
+    debugMaxDeletePerRun: parsePositiveInt(process.env.PROFILE_CLEANUP_DEBUG_MAX_DELETE_PER_RUN, 5000),
+  },
   priorityHighStreakLimit: parsePositiveInt(process.env.MESSAGE_PRIORITY_HIGH_STREAK_LIMIT, 3),
   queue: {
     pollIntervalMs: parsePositiveInt(process.env.MESSAGE_QUEUE_POLL_INTERVAL_MS, 1500),

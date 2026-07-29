@@ -1127,6 +1127,17 @@ export function getSessionStorePersistStatus(now = Date.now()) {
 }
 
 export const sessionStore = {
+  listStoredSessionIds() {
+    const rows = getRows(`
+      SELECT session_id
+      FROM sessions
+      ORDER BY updated_at DESC, created_at DESC
+    `, {});
+    return rows
+      .map((row) => String(row.session_id || '').trim())
+      .filter(Boolean);
+  },
+
   getBySessionId(sessionId) {
     const row = getRow('SELECT * FROM sessions WHERE session_id = :session_id', { ':session_id': sessionId });
     return normalizeRow(row);
@@ -1583,6 +1594,63 @@ export const sessionStore = {
     return this.getMessageJob(jobId);
   },
 
+  markQueuedMessageJobsForManagerReroute(
+    sessionId,
+    errorMessage,
+    result = null,
+    {
+      now = Date.now(),
+      onlyRunnable = true,
+      statusFilter = ['suspended', 'missing', 'restricted', 'needs_manual_action'],
+    } = {}
+  ) {
+    if (!sessionId) return 0;
+
+    const safeNow = Math.max(0, Number(now) || Date.now());
+    const statuses = Array.isArray(statusFilter) ? statusFilter.map((status) => String(status || '').trim()).filter(Boolean) : [];
+    const statusPlaceholders = statuses.map((_, index) => `:status_${index}`);
+    const statusParams = statuses.reduce((memo, status, index) => {
+      memo[`:status_${index}`] = status;
+      return memo;
+    }, {});
+    const statusClause = statusPlaceholders.length > 0
+      ? `AND COALESCE(s.status, 'missing') IN (${statusPlaceholders.join(', ')})`
+      : '';
+    const runnableClause = onlyRunnable ? 'AND q.next_retry_at <= :now' : '';
+
+    return runStatementWithChanges(`
+      UPDATE message_jobs
+      SET status = 'error',
+          error_message = :error_message,
+          result_json = :result_json,
+          webhook_notified = 0,
+          webhook_attempts = 0,
+          webhook_next_retry_at = 0,
+          webhook_last_error = NULL,
+          webhook_delivered_at = NULL,
+          finished_at = :finished_at,
+          updated_at = :updated_at
+      WHERE id IN (
+        SELECT q.id
+        FROM message_jobs q
+        LEFT JOIN sessions s ON s.session_id = q.session_id
+        WHERE q.session_id = :session_id
+          AND q.status = 'queued'
+          AND COALESCE(TRIM(q.meta_blast_message_id), '') <> ''
+          ${runnableClause}
+          ${statusClause}
+      )
+    `, {
+      ...statusParams,
+      ':session_id': String(sessionId),
+      ':error_message': errorMessage || null,
+      ':result_json': serialize(result),
+      ':now': safeNow,
+      ':finished_at': safeNow,
+      ':updated_at': safeNow,
+    });
+  },
+
   failQueuedMessageJobsForSession(sessionId, errorMessage, result = null, { suppressWebhook = true } = {}) {
     if (!sessionId) return 0;
 
@@ -1668,6 +1736,8 @@ export const sessionStore = {
     const sessions = [];
     let globalDeferredJobs = 0;
     let globalDeferredSessions = 0;
+    let reroutedJobs = 0;
+    let reroutedSessions = 0;
     rows.forEach((row) => {
       const sessionId = String(row.session_id || '').trim();
       if (!sessionId) return;
@@ -1676,9 +1746,29 @@ export const sessionStore = {
       const runnableCount = Number(row.runnable_count || 0);
       const unhealthy = ['restricted', 'needs_manual_action', 'missing', 'suspended'].includes(status);
       const reason = unhealthy ? `backpressure:${status}` : 'backpressure:per_session_cap';
+      let rerouted = 0;
       let changes = 0;
 
       if (unhealthy) {
+        rerouted = this.markQueuedMessageJobsForManagerReroute(
+          sessionId,
+          `MetaBiz session ${status}; requeueing to manager for a healthy replacement.`,
+          {
+            error: `MetaBiz session ${status}; requeueing to manager for a healthy replacement.`,
+            errorCode: 'session_backpressure_reroute',
+            details: {
+              reason,
+              sessionId,
+              sessionStatus: status,
+              source: 'message_queue_backpressure_sweep',
+            },
+          },
+          {
+            now: safeNow,
+            onlyRunnable: true,
+            statusFilter: [status],
+          }
+        );
         changes = runStatementWithChanges(`
           UPDATE message_jobs
           SET next_retry_at = :defer_until,
@@ -1694,7 +1784,9 @@ export const sessionStore = {
           ':updated_at': safeNow,
           ':now': safeNow,
         });
-        this.blockQueuedWorkForSession(sessionId, reason, deferUntil);
+        if (changes > 0) {
+          this.blockQueuedWorkForSession(sessionId, reason, deferUntil);
+        }
       } else if (runnableCount > safeMaxRunnable) {
         changes = runStatementWithChanges(`
           UPDATE message_jobs
@@ -1720,6 +1812,10 @@ export const sessionStore = {
         });
       }
 
+      if (rerouted > 0) {
+        reroutedJobs += rerouted;
+        reroutedSessions += 1;
+      }
       if (changes > 0) {
         deferredJobs += changes;
         sessions.push({
@@ -1727,8 +1823,19 @@ export const sessionStore = {
           status,
           runnableCount,
           deferredJobs: changes,
+          reroutedJobs: rerouted,
           reason,
           deferUntil,
+        });
+      } else if (rerouted > 0) {
+        sessions.push({
+          sessionId,
+          status,
+          runnableCount,
+          deferredJobs: 0,
+          reroutedJobs: rerouted,
+          reason: 'manager_reroute',
+          deferUntil: null,
         });
       }
     });
@@ -1813,6 +1920,8 @@ export const sessionStore = {
       checkedSessions: rows.length,
       deferredSessions: sessions.length,
       deferredJobs,
+      reroutedJobs,
+      reroutedSessions,
       globalQueuedCount: queuedCount,
       globalRunnableSessionCount: runnableSessionCount,
       globalMaxRunnableSessions: safeMaxRunnableSessions,
