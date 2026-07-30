@@ -1765,7 +1765,7 @@ export const sessionStore = {
           },
           {
             now: safeNow,
-            onlyRunnable: true,
+            onlyRunnable: false,
             statusFilter: [status],
           }
         );
