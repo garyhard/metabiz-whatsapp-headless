@@ -2093,6 +2093,126 @@ export const sessionStore = {
     };
   },
 
+  archiveTerminalQueuedMessageJobs({
+    now = Date.now(),
+    minAgeMs = 300000,
+    maxJobs = 500,
+    maxSessions = 50,
+    source = 'terminal_queued_archive',
+  } = {}) {
+    const safeNow = Math.max(0, Number(now) || Date.now());
+    const safeMinAgeMs = Math.max(1000, Number(minAgeMs) || 300000);
+    const safeMaxJobs = Math.max(1, Number(maxJobs) || 500);
+    const safeMaxSessions = Math.max(1, Number(maxSessions) || 50);
+    const cutoff = safeNow - safeMinAgeMs;
+
+    const sessionRows = getRows(`
+      SELECT
+        q.session_id,
+        COALESCE(s.status, 'missing') AS session_status,
+        COUNT(*) AS queued_count,
+        MIN(q.created_at) AS oldest_created_at
+      FROM message_jobs q
+      LEFT JOIN sessions s ON s.session_id = q.session_id
+      WHERE q.status = 'queued'
+        AND q.created_at <= :cutoff
+      GROUP BY q.session_id
+      HAVING COALESCE(s.status, 'missing') IN ('restricted', 'needs_manual_action', 'missing', 'suspended')
+      ORDER BY
+        CASE COALESCE(s.status, 'missing')
+          WHEN 'missing' THEN 0
+          WHEN 'restricted' THEN 1
+          WHEN 'needs_manual_action' THEN 2
+          WHEN 'suspended' THEN 3
+          ELSE 4
+        END ASC,
+        COUNT(*) DESC,
+        MIN(q.created_at) ASC
+      LIMIT :limit
+    `, {
+      ':cutoff': cutoff,
+      ':limit': safeMaxSessions,
+    });
+
+    let archivedJobs = 0;
+    let archivedSessions = 0;
+    const sessions = [];
+    for (const row of sessionRows) {
+      if (archivedJobs >= safeMaxJobs) break;
+
+      const sessionId = String(row.session_id || '').trim();
+      if (!sessionId) continue;
+
+      const remaining = safeMaxJobs - archivedJobs;
+      const reason = `archive:${String(row.session_status || 'missing')}`;
+      const archiveRows = getRows(`
+        SELECT id
+        FROM message_jobs
+        WHERE session_id = :session_id
+          AND status = 'queued'
+          AND created_at <= :cutoff
+        ORDER BY created_at ASC
+        LIMIT :limit
+      `, {
+        ':session_id': sessionId,
+        ':cutoff': cutoff,
+        ':limit': remaining,
+      });
+      const ids = archiveRows.map((item) => String(item.id || '').trim()).filter(Boolean);
+      if (ids.length === 0) continue;
+
+      const placeholders = ids.map((_, index) => `:archive_terminal_job_id_${index}`);
+      const params = {
+        ':archived_at': safeNow,
+        ':archive_reason': reason,
+        ':archive_source': String(source || 'terminal_queued_archive'),
+      };
+      ids.forEach((id, index) => {
+        params[`:archive_terminal_job_id_${index}`] = id;
+      });
+
+      runStatement(`
+        INSERT OR REPLACE INTO message_job_archives (
+          id, request_id, meta_blast_message_id, session_id, priority, message_type, extension, phone_number, message, media_payload_json,
+          use_reply_flow, include_success_screenshot, status, original_status, attempts, max_attempts,
+          error_message, result_json, next_retry_at, webhook_notified, webhook_attempts,
+          webhook_next_retry_at, webhook_last_error, webhook_delivered_at, started_at, finished_at,
+          created_at, updated_at, archived_at, archive_reason, archive_source
+        )
+        SELECT
+          id, request_id, meta_blast_message_id, session_id, priority, message_type, extension, phone_number, message, media_payload_json,
+          use_reply_flow, include_success_screenshot, 'archived', status, attempts, max_attempts,
+          error_message, result_json, next_retry_at, 1, webhook_attempts,
+          0, webhook_last_error, webhook_delivered_at, started_at, finished_at,
+          created_at, :archived_at, :archived_at, :archive_reason, :archive_source
+        FROM message_jobs
+        WHERE id IN (${placeholders.join(', ')})
+      `, params);
+      const deleted = runStatementWithChanges(`
+        DELETE FROM message_jobs
+        WHERE id IN (${placeholders.join(', ')})
+      `, params);
+      if (deleted <= 0) continue;
+
+      archivedJobs += deleted;
+      archivedSessions += 1;
+      sessions.push({
+        sessionId,
+        status: String(row.session_status || 'missing'),
+        archivedJobs: deleted,
+        reason,
+      });
+    }
+
+    return {
+      archivedJobs,
+      archivedSessions,
+      checkedSessions: sessionRows.length,
+      minAgeMs: safeMinAgeMs,
+      sessions,
+    };
+  },
+
   failMessageJobsForSession(sessionId, errorMessage, result = null, { suppressWebhook = true } = {}) {
     if (!sessionId) return 0;
 

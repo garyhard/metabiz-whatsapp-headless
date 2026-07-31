@@ -779,6 +779,21 @@ function runBackpressureSweep(now = Date.now()) {
       source: 'message_queue_backpressure_sweep',
     });
   }
+  if (config.queue.archiveTerminalQueuedEnabled !== false) {
+    const terminalArchiveResult = sessionStore.archiveTerminalQueuedMessageJobs({
+      now,
+      minAgeMs: config.queue.archiveTerminalQueuedMinAgeMs,
+      maxJobs: config.queue.archiveTerminalQueuedMaxJobs,
+      maxSessions: config.queue.archiveTerminalQueuedMaxSessions,
+      source: 'message_queue_terminal_queued_sweep',
+    });
+    if (terminalArchiveResult?.archivedJobs > 0 || lastArchiveSweepResult == null) {
+      lastArchiveSweepResult = {
+        ...(lastArchiveSweepResult || {}),
+        terminalQueued: terminalArchiveResult,
+      };
+    }
+  }
 
   if (lastBackpressureSweepResult?.deferredJobs > 0) {
     console.warn(
@@ -995,6 +1010,10 @@ export function getMessageQueueWorkerStatus(now = Date.now()) {
         minAgeMs: Math.max(1000, Number(config.queue.archiveDelayedMinAgeMs) || 300000),
         maxJobs: Math.max(1, Number(config.queue.archiveDelayedMaxJobs) || 10000),
         maxSessions: Math.max(1, Number(config.queue.archiveDelayedMaxSessions) || 150),
+        terminalQueuedEnabled: config.queue.archiveTerminalQueuedEnabled !== false,
+        terminalQueuedMinAgeMs: Math.max(1000, Number(config.queue.archiveTerminalQueuedMinAgeMs) || 300000),
+        terminalQueuedMaxJobs: Math.max(1, Number(config.queue.archiveTerminalQueuedMaxJobs) || 500),
+        terminalQueuedMaxSessions: Math.max(1, Number(config.queue.archiveTerminalQueuedMaxSessions) || 50),
         result: lastArchiveSweepResult,
       },
     },

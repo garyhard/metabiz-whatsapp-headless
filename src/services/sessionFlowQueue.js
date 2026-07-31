@@ -59,9 +59,11 @@ function inferPriority(jobType, payload = {}, explicitPriority = null) {
   if (type === 'create_session' || flow === 'create_meta' || flow === 'test_flow' || flow === 'test_flow_retry') {
     return 'high';
   }
+  if (['update_session_cookies', 'update_session_proxy', 'check_session', 'resume_check'].includes(type)) {
+    return 'normal';
+  }
   if (
     flow === 'refresh_meta' ||
-    flow === 'update_cookies' ||
     flow === 'bulk_refresh' ||
     flow === 'reconcile_missing' ||
     flow === 'auto_link_meta' ||
