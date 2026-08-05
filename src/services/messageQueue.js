@@ -222,6 +222,17 @@ function coldSessionClaimLimit() {
   return Math.max(0, Number(config.queue.coldSessionClaimLimit) || 0);
 }
 
+function coldSessionMinAvailableSlots() {
+  return Math.max(0, Number(config.queue.coldSessionMinAvailableSlots) || 0);
+}
+
+function coldSessionHasEnoughBrowserCapacity(remainingSlots) {
+  if (remainingSlots == null) {
+    return true;
+  }
+  return Number(remainingSlots || 0) >= coldSessionMinAvailableSlots();
+}
+
 function hasActiveBurst() {
   return !!burstSessionId && burstRemaining > 0;
 }
@@ -856,7 +867,7 @@ export async function pumpQueue() {
       if (
         !job &&
         coldSessionClaims < maxColdClaims &&
-        (coldBrowserSlotsRemaining == null || coldBrowserSlotsRemaining > 0)
+        coldSessionHasEnoughBrowserCapacity(coldBrowserSlotsRemaining)
       ) {
         job = sessionStore.claimNextMessageJob(
           now,
@@ -976,6 +987,7 @@ export function getMessageQueueWorkerStatus(now = Date.now()) {
     queuedWorkCooldownSessionCount: blockedSessions.length,
     queuedWorkCooldownSessionIds: blockedSessions.map((entry) => entry.sessionId),
     coldSessionClaimLimit: coldSessionClaimLimit(),
+    coldSessionMinAvailableSlots: coldSessionMinAvailableSlots(),
     prewarmingSessions: warmingSessions.size,
     prewarmingSessionIds: Array.from(warmingSessions.values()),
     oldestActiveJobAgeMs,
