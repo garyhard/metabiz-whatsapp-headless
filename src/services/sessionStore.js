@@ -1601,6 +1601,7 @@ export const sessionStore = {
     {
       now = Date.now(),
       onlyRunnable = true,
+      limit = 25,
       statusFilter = ['suspended', 'missing', 'restricted', 'needs_manual_action'],
     } = {}
   ) {
@@ -1617,6 +1618,7 @@ export const sessionStore = {
       ? `AND COALESCE(s.status, 'missing') IN (${statusPlaceholders.join(', ')})`
       : '';
     const runnableClause = onlyRunnable ? 'AND q.next_retry_at <= :now' : '';
+    const safeLimit = Math.max(1, Number(limit) || 25);
 
     return runStatementWithChanges(`
       UPDATE message_jobs
@@ -1639,6 +1641,8 @@ export const sessionStore = {
           AND COALESCE(TRIM(q.meta_blast_message_id), '') <> ''
           ${runnableClause}
           ${statusClause}
+        ORDER BY q.created_at ASC
+        LIMIT :limit
       )
     `, {
       ...statusParams,
@@ -1648,6 +1652,7 @@ export const sessionStore = {
       ':now': safeNow,
       ':finished_at': safeNow,
       ':updated_at': safeNow,
+      ':limit': safeLimit,
     });
   },
 
@@ -1692,6 +1697,7 @@ export const sessionStore = {
     const safeDelayMs = Math.max(1000, Number(delayMs) || 600000);
     const safeSuspendedAgeMs = Math.max(1000, Number(suspendedQueuedAgeMs) || 300000);
     const safeMaxRunnable = Math.max(1, Number(maxRunnableQueuedPerSession) || 250);
+    const safeManagerRerouteMax = Math.max(1, Number(config.queue.managerRerouteMaxPerSession) || 25);
     const safeGlobalQueuedThreshold = Math.max(1, Number(globalQueuedThreshold) || 25000);
     const safeMaxRunnableSessions = Math.max(1, Number(maxRunnableSessions) || 40);
     const safeMaxSessions = Math.max(1, Number(maxSessions) || 25);
@@ -1765,7 +1771,8 @@ export const sessionStore = {
           },
           {
             now: safeNow,
-            onlyRunnable: false,
+            onlyRunnable: true,
+            limit: safeManagerRerouteMax,
             statusFilter: [status],
           }
         );

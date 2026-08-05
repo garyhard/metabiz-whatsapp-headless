@@ -142,6 +142,7 @@ export const config = {
     backpressureDeferMs: parsePositiveInt(process.env.MESSAGE_QUEUE_BACKPRESSURE_DEFER_MS, 3600000),
     suspendedQueuedAgeMs: parsePositiveInt(process.env.MESSAGE_QUEUE_SUSPENDED_QUEUED_AGE_MS, 300000),
     maxRunnableQueuedPerSession: parsePositiveInt(process.env.MESSAGE_QUEUE_MAX_RUNNABLE_PER_SESSION, 25),
+    managerRerouteMaxPerSession: parsePositiveInt(process.env.MESSAGE_QUEUE_MANAGER_REROUTE_MAX_PER_SESSION, 25),
     backpressureGlobalQueuedThreshold: parsePositiveInt(process.env.MESSAGE_QUEUE_BACKPRESSURE_GLOBAL_QUEUED_THRESHOLD, 25000),
     backpressureMaxRunnableSessions: parsePositiveInt(process.env.MESSAGE_QUEUE_BACKPRESSURE_MAX_RUNNABLE_SESSIONS, 15),
     archiveDelayedEnabled: parseBoolean(process.env.MESSAGE_QUEUE_ARCHIVE_DELAYED_ENABLED, true),

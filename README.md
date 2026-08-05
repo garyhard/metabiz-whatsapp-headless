@@ -120,6 +120,7 @@ PROXY_PASSWORD=your-proxy-password
 - `FLOW_RECOVERABLE_RETRY_ATTEMPTS` (optional): Retry internal untuk flow recoverable seperti browser closed/crash dan flow timeout, per eksekusi send/check, di luar retry queue (default: `2`)
 - `FLOW_RECOVERABLE_RETRY_DELAY_MS` (optional): Delay antar retry internal flow recoverable (default: `1500`)
 - `MESSAGE_QUEUE_PROCESSING_TIMEOUT_MS` (optional): Timeout untuk requeue job `processing` setelah restart/crash (default: `180000`)
+- `MESSAGE_QUEUE_MANAGER_REROUTE_MAX_PER_SESSION` (optional): Batas job MetaBlast per session yang dilepas ke manager dalam satu sweep saat session unhealthy. Ini mencegah webhook/reroute storm ke Waha Manager (default: `25`)
 - `META_BLAST_WEBHOOK_URL` (optional): URL webhook Rails penerima status blast (contoh: `https://your-app.com/webhooks/meta_blast_status`)
 - `META_BLAST_WEBHOOK_PRIVATE_URL` (optional): Jika diisi, blast status webhook akan dikirim ke URL private ini lebih dulu, fallback ke `META_BLAST_WEBHOOK_URL`
 - `META_BLAST_WEBHOOK_TIMEOUT_MS` (optional): Timeout HTTP webhook (default: `15000`)
