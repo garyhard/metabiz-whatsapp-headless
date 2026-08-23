@@ -105,12 +105,22 @@ PROXY_PASSWORD=your-proxy-password
 - `PROFILE_CLEANUP_ENABLED` (optional): Aktifkan cleanup berkala untuk Chromium profiles yang tidak aktif dan debug screenshots. SQLite session store tidak pernah dihapus oleh worker ini (default: `true`).
 - `PROFILE_CLEANUP_INTERVAL_MINUTES` (optional): Interval cleanup berkala (default: `30`).
 - `PROFILE_CLEANUP_STARTUP_DELAY_MINUTES` (optional): Delay cleanup pertama setelah server start agar tidak bentrok dengan restore session (default: `5`).
+- `PROFILE_CLEANUP_PRESSURE_ADAPTIVE_ENABLED` (optional): Percepat cleanup saat pemakaian disk masih di atas target aman (default: `true`).
+- `PROFILE_CLEANUP_PRESSURE_TARGET_PERCENT` (optional): Target pemakaian disk; cleanup tetap dalam mode dipercepat sampai turun di bawah nilai ini (default: `85`).
+- `PROFILE_CLEANUP_PRESSURE_INTERVAL_MINUTES` (optional): Interval cleanup ketika disk belum mencapai target aman (default: `5`).
+- `PROFILE_CLEANUP_PRESSURE_STARTUP_DELAY_SECONDS` (optional): Delay cleanup pertama saat disk belum mencapai target aman (default: `10`).
+- `PROFILE_CLEANUP_PRESSURE_MAX_DELETE_PER_RUN` (optional): Batas hapus profil per run dalam mode dipercepat (default: `5000`).
 - `PROFILE_CLEANUP_ORPHAN_MIN_AGE_HOURS` (optional): Umur minimum folder `profiles/session-*` sebelum boleh dihapus jika tidak ada di DB dan tidak dipakai Chromium aktif (default: `24`).
 - `PROFILE_CLEANUP_MAX_DELETE_PER_RUN` (optional): Batas hapus orphan profile per run supaya cleanup tidak spike disk I/O (default: `1000`).
 - `PROFILE_CLEANUP_KNOWN_INACTIVE_ENABLED` (optional): Hapus juga folder profil untuk session yang masih tersimpan di SQLite tetapi tidak sedang loaded atau dipakai proses Chromium. Profil akan dibuat ulang dari cookies/fingerprint SQLite ketika session dibutuhkan (default: `true`).
 - `PROFILE_CLEANUP_KNOWN_INACTIVE_MIN_AGE_HOURS` (optional): Umur minimum profil session SQLite yang tidak aktif sebelum boleh dihapus (default: `1`).
 - `PROFILE_CLEANUP_DEBUG_MAX_AGE_DAYS` (optional): Umur maksimum debug screenshots/log artifacts di `profiles/debug` (default: `3`).
 - `PROFILE_CLEANUP_DEBUG_MAX_DELETE_PER_RUN` (optional): Batas hapus debug files per run (default: `5000`).
+- `PROFILE_CLEANUP_BACKUP_ENABLED` (optional): Hapus snapshot backup non-SQLite yang sudah tua; default aktif hanya pada `NODE_ENV=production`.
+- `PROFILE_CLEANUP_BACKUP_ROOT` (optional): Override root backup. Default mengikuti layout deploy `../shared/backups`.
+- `PROFILE_CLEANUP_BACKUP_MIN_AGE_DAYS` (optional): Umur minimum snapshot backup non-SQLite sebelum boleh dihapus (default: `7`).
+- `PROFILE_CLEANUP_BACKUP_MAX_DELETE_PER_RUN` (optional): Batas snapshot backup yang dihapus per run (default: `10`).
+- `PROFILE_CLEANUP_BACKUP_ALLOWED_PREFIXES` (optional): Allowlist prefix direktori snapshot yang boleh dihapus (default: `reset-zero-`). Direktori `sessions-db`, file biasa, symlink, dan nama di luar allowlist selalu dipertahankan.
 - `MESSAGE_QUEUE_CREATE_RESERVED_BROWSER_SLOTS` (optional): Jumlah browser slot default yang disisihkan untuk create Meta saat ada create queued/processing (default: `8`)
 - `MESSAGE_QUEUE_SESSION_PREWARM_LIMIT` (optional): Batas session prewarm paralel untuk send queue (default: `2`)
 - `MESSAGE_QUEUE_SESSION_PREWARM_IDLE_TIMEOUT_MS` (optional): Durasi browser prewarm idle sebelum ditutup (default: `45000`)

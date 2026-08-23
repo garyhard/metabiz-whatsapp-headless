@@ -325,5 +325,7 @@ server = app.listen(config.port, async () => {
     console.log('[Server] Restoring sessions from session store...');
   }
   await restoreSessions();
-  startProfileCleanupWorker();
+  startProfileCleanupWorker().catch((error) => {
+    console.error('[ProfileCleanup] Failed to start periodic cleanup:', error);
+  });
 });

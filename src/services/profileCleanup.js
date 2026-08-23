@@ -5,11 +5,16 @@ import { fileURLToPath } from 'url';
 import { config } from '../config.js';
 import { sessionStore } from './sessionStore.js';
 import { getAllSessionIds } from './sessionManager.js';
+import { getDiskPressureStatus } from './systemHealth.js';
+import { cleanupBackupSnapshots, resolveStorageCleanupPolicy } from './storageCleanup.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROFILE_ROOT = path.resolve(__dirname, '../../profiles');
 const DEBUG_ROOT = path.join(PROFILE_ROOT, 'debug');
+const BACKUP_ROOT = path.resolve(
+  config.profileCleanup.backupRoot || path.join(PROFILE_ROOT, '../../shared/backups')
+);
 const SESSION_DIR_PREFIX = 'session-';
 
 const cleanupState = {
@@ -23,6 +28,7 @@ const cleanupState = {
   lastResult: null,
   lastError: null,
   nextRunAt: null,
+  generation: 0,
 };
 
 function isInside(parent, child) {
@@ -69,7 +75,7 @@ async function removePath(targetPath) {
   });
 }
 
-async function cleanupOrphanProfiles(now) {
+async function cleanupOrphanProfiles(now, { maxDelete: maxDeleteOverride = null } = {}) {
   const knownSessionIds = new Set(sessionStore.listStoredSessionIds());
   const processSessionIds = parseActiveSessionIdsFromProcessList();
   const loadedSessionIds = new Set(getAllSessionIds());
@@ -80,7 +86,10 @@ async function cleanupOrphanProfiles(now) {
     1000,
     Number(config.profileCleanup.knownInactiveMinAgeMs) || 60 * 60 * 1000
   );
-  const maxDelete = Math.max(1, Number(config.profileCleanup.maxDeletePerRun) || 500);
+  const maxDelete = Math.max(
+    1,
+    Number(maxDeleteOverride) || Number(config.profileCleanup.maxDeletePerRun) || 500
+  );
   const orphanCutoff = now - orphanMinAgeMs;
   const knownInactiveCutoff = now - knownInactiveMinAgeMs;
   const result = {
@@ -99,6 +108,8 @@ async function cleanupOrphanProfiles(now) {
     activeBrowsers: processSessionIds.size,
     loadedSessions: loadedSessionIds.size,
     protectedSessions: protectedSessionIds.size,
+    profileDirectories: 0,
+    remainingProfileDirectories: 0,
     maxDelete,
     orphanMinAgeMs,
     knownInactiveEnabled,
@@ -112,6 +123,9 @@ async function cleanupOrphanProfiles(now) {
     if (error?.code === 'ENOENT') return result;
     throw error;
   }
+  result.profileDirectories = entries.filter(
+    (entry) => entry.isDirectory() && entry.name.startsWith(SESSION_DIR_PREFIX)
+  ).length;
 
   for (const entry of entries) {
     if (result.deleted >= maxDelete) break;
@@ -167,6 +181,8 @@ async function cleanupOrphanProfiles(now) {
       }
     }
   }
+
+  result.remainingProfileDirectories = Math.max(0, result.profileDirectories - result.deleted);
 
   return result;
 }
@@ -254,18 +270,45 @@ export async function runProfileCleanup({ reason = 'manual' } = {}) {
   cleanupState.lastRunAt = startedAt;
   cleanupState.lastReason = reason;
   cleanupState.lastError = null;
+  let nextIntervalMs = config.profileCleanup.intervalMs;
 
   try {
-    const orphanProfiles = await cleanupOrphanProfiles(startedAt);
+    const diskBefore = await getDiskPressureStatus();
+    const policyBefore = resolveStorageCleanupPolicy(diskBefore, config.profileCleanup);
+    const backupSnapshots = await cleanupBackupSnapshots({
+      backupRoot: BACKUP_ROOT,
+      now: startedAt,
+      enabled: config.profileCleanup.backupCleanupEnabled,
+      minAgeMs: config.profileCleanup.backupMinAgeMs,
+      maxDelete: config.profileCleanup.backupMaxDeletePerRun,
+      allowedPrefixes: config.profileCleanup.backupAllowedPrefixes,
+      protectedDirectoryNames: ['sessions-db'],
+    });
+    const orphanProfiles = await cleanupOrphanProfiles(startedAt, {
+      maxDelete: policyBefore.maxDeletePerRun,
+    });
     const debugFiles = await cleanupDebugFiles(startedAt);
+    const diskAfter = await getDiskPressureStatus();
+    const policyAfter = resolveStorageCleanupPolicy(diskAfter, config.profileCleanup);
+    nextIntervalMs = policyAfter.nextIntervalMs;
     const finishedAt = Date.now();
     const result = {
-      ok: orphanProfiles.failed === 0 && debugFiles.failed === 0,
+      ok: backupSnapshots.failed === 0 && orphanProfiles.failed === 0 && debugFiles.failed === 0,
       startedAt,
       finishedAt,
       durationMs: finishedAt - startedAt,
       reason,
       profileRoot: PROFILE_ROOT,
+      backupRoot: BACKUP_ROOT,
+      policyBefore,
+      policyAfter,
+      diskBefore,
+      diskAfter,
+      estimatedReclaimedBytes: Math.max(
+        0,
+        Number(diskAfter.availableBytes || 0) - Number(diskBefore.availableBytes || 0)
+      ),
+      backupSnapshots,
       orphanProfiles,
       debugFiles,
     };
@@ -275,7 +318,9 @@ export async function runProfileCleanup({ reason = 'manual' } = {}) {
     cleanupState.lastResult = result;
     console.log(
       `[ProfileCleanup] ${reason} cleanup finished in ${result.durationMs}ms ` +
-      `(orphanProfiles deleted=${orphanProfiles.deleted}, failed=${orphanProfiles.failed}; ` +
+      `(mode=${policyBefore.mode}->${policyAfter.mode}; ` +
+      `backupSnapshots deleted=${backupSnapshots.deleted}, failed=${backupSnapshots.failed}; ` +
+      `orphanProfiles deleted=${orphanProfiles.deleted}, failed=${orphanProfiles.failed}; ` +
       `debugFiles deleted=${debugFiles.deleted}, failed=${debugFiles.failed})`
     );
     return result;
@@ -296,26 +341,32 @@ export async function runProfileCleanup({ reason = 'manual' } = {}) {
     return cleanupState.lastResult;
   } finally {
     cleanupState.running = false;
-    scheduleNext(config.profileCleanup.intervalMs);
+    scheduleNext(nextIntervalMs);
   }
 }
 
-export function startProfileCleanupWorker() {
+export async function startProfileCleanupWorker() {
   cleanupState.enabled = config.profileCleanup.enabled;
+  const generation = ++cleanupState.generation;
   if (!cleanupState.enabled) {
     console.log('[ProfileCleanup] Periodic cleanup disabled');
     return;
   }
 
-  const startupDelayMs = Math.max(1000, Number(config.profileCleanup.startupDelayMs) || 5 * 60 * 1000);
-  scheduleNext(startupDelayMs);
+  const disk = await getDiskPressureStatus();
+  if (!cleanupState.enabled || cleanupState.generation !== generation) return;
+  const startupPolicy = resolveStorageCleanupPolicy(disk, config.profileCleanup);
+  scheduleNext(startupPolicy.startupDelayMs);
   console.log(
     `[ProfileCleanup] Periodic cleanup enabled ` +
-    `(startupDelayMs=${startupDelayMs}, intervalMs=${config.profileCleanup.intervalMs})`
+    `(mode=${startupPolicy.mode}, startupDelayMs=${startupPolicy.startupDelayMs}, ` +
+    `intervalMs=${startupPolicy.nextIntervalMs})`
   );
 }
 
 export function stopProfileCleanupWorker() {
+  cleanupState.enabled = false;
+  cleanupState.generation += 1;
   if (cleanupState.timer) {
     clearTimeout(cleanupState.timer);
     cleanupState.timer = null;
@@ -328,6 +379,7 @@ export function getProfileCleanupStatus(now = Date.now()) {
     enabled: cleanupState.enabled,
     running: cleanupState.running,
     profileRoot: PROFILE_ROOT,
+    backupRoot: BACKUP_ROOT,
     nextRunAt: cleanupState.nextRunAt,
     nextRunInMs: cleanupState.nextRunAt ? Math.max(0, cleanupState.nextRunAt - now) : null,
     lastRunAt: cleanupState.lastRunAt,
@@ -339,12 +391,21 @@ export function getProfileCleanupStatus(now = Date.now()) {
     config: {
       intervalMs: config.profileCleanup.intervalMs,
       startupDelayMs: config.profileCleanup.startupDelayMs,
+      pressureAdaptiveEnabled: config.profileCleanup.pressureAdaptiveEnabled,
+      pressureTargetPercent: config.profileCleanup.pressureTargetPercent,
+      pressureIntervalMs: config.profileCleanup.pressureIntervalMs,
+      pressureStartupDelayMs: config.profileCleanup.pressureStartupDelayMs,
+      pressureMaxDeletePerRun: config.profileCleanup.pressureMaxDeletePerRun,
       orphanMinAgeMs: config.profileCleanup.orphanMinAgeMs,
       maxDeletePerRun: config.profileCleanup.maxDeletePerRun,
       knownInactiveEnabled: config.profileCleanup.knownInactiveEnabled,
       knownInactiveMinAgeMs: config.profileCleanup.knownInactiveMinAgeMs,
       debugMaxAgeMs: config.profileCleanup.debugMaxAgeMs,
       debugMaxDeletePerRun: config.profileCleanup.debugMaxDeletePerRun,
+      backupCleanupEnabled: config.profileCleanup.backupCleanupEnabled,
+      backupMinAgeMs: config.profileCleanup.backupMinAgeMs,
+      backupMaxDeletePerRun: config.profileCleanup.backupMaxDeletePerRun,
+      backupAllowedPrefixes: config.profileCleanup.backupAllowedPrefixes,
     },
   };
 }
