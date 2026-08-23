@@ -4,7 +4,11 @@ import os from 'os';
 import path from 'path';
 import test from 'node:test';
 
-import { cleanupBackupSnapshots, resolveStorageCleanupPolicy } from '../src/services/storageCleanup.js';
+import {
+  cleanupBackupSnapshots,
+  removeDirectoryTreeBounded,
+  resolveStorageCleanupPolicy,
+} from '../src/services/storageCleanup.js';
 
 test('resolveStorageCleanupPolicy accelerates until disk is below the cleanup target', () => {
   const cleanupConfig = {
@@ -112,4 +116,22 @@ test('cleanupBackupSnapshots refuses a filesystem root', async () => {
 
   assert.equal(result.deleted, 0);
   assert.equal(result.skippedUnsafe, 1);
+});
+
+test('removeDirectoryTreeBounded deletes nested content without following symlinks', async (t) => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'metabiz-bounded-delete-'));
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+
+  const target = path.join(parent, 'target');
+  const outside = path.join(parent, 'outside');
+  await fs.mkdir(path.join(target, 'nested', 'deeper'), { recursive: true });
+  await fs.mkdir(outside);
+  await fs.writeFile(path.join(target, 'nested', 'deeper', 'payload.bin'), 'payload');
+  await fs.writeFile(path.join(outside, 'preserved.txt'), 'preserved');
+  await fs.symlink(outside, path.join(target, 'outside-link'));
+
+  await removeDirectoryTreeBounded(target);
+
+  await assert.rejects(fs.stat(target), { code: 'ENOENT' });
+  assert.equal(await fs.readFile(path.join(outside, 'preserved.txt'), 'utf8'), 'preserved');
 });

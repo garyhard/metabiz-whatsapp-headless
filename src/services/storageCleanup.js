@@ -16,6 +16,36 @@ function isInside(parent, child) {
   return !!relative && !relative.startsWith('..') && !path.isAbsolute(relative);
 }
 
+async function ignoreMissing(operation) {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error?.code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
+export async function removeDirectoryTreeBounded(targetPath, fsApi = fs) {
+  let directory;
+  try {
+    directory = await fsApi.opendir(targetPath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return;
+    throw error;
+  }
+
+  for await (const entry of directory) {
+    const childPath = path.join(targetPath, entry.name);
+    if (entry.isDirectory() && !entry.isSymbolicLink()) {
+      await removeDirectoryTreeBounded(childPath, fsApi);
+    } else {
+      await ignoreMissing(() => fsApi.unlink(childPath));
+    }
+  }
+
+  await ignoreMissing(() => fsApi.rmdir(targetPath));
+}
+
 export function resolveStorageCleanupPolicy(disk, cleanupConfig = {}) {
   const usedPercent = Number(disk?.usedPercent);
   const targetPercent = positiveNumber(cleanupConfig.pressureTargetPercent, 85);
@@ -129,12 +159,7 @@ export async function cleanupBackupSnapshots({
         result.skippedYoung += 1;
         continue;
       }
-      await fsApi.rm(targetPath, {
-        recursive: true,
-        force: true,
-        maxRetries: 2,
-        retryDelay: 100,
-      });
+      await removeDirectoryTreeBounded(targetPath, fsApi);
       result.deleted += 1;
     } catch (error) {
       result.failed += 1;
