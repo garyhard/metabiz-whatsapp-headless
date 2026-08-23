@@ -118,6 +118,8 @@ export const config = {
     startupDelayMs: parseNonNegativeInt(process.env.PROFILE_CLEANUP_STARTUP_DELAY_MINUTES, 5) * 60 * 1000,
     orphanMinAgeMs: parsePositiveInt(process.env.PROFILE_CLEANUP_ORPHAN_MIN_AGE_HOURS, 24) * 60 * 60 * 1000,
     maxDeletePerRun: parsePositiveInt(process.env.PROFILE_CLEANUP_MAX_DELETE_PER_RUN, 1000),
+    knownInactiveEnabled: parseBoolean(process.env.PROFILE_CLEANUP_KNOWN_INACTIVE_ENABLED, true),
+    knownInactiveMinAgeMs: parsePositiveInt(process.env.PROFILE_CLEANUP_KNOWN_INACTIVE_MIN_AGE_HOURS, 1) * 60 * 60 * 1000,
     debugMaxAgeMs: parsePositiveInt(process.env.PROFILE_CLEANUP_DEBUG_MAX_AGE_DAYS, 3) * 24 * 60 * 60 * 1000,
     debugMaxDeletePerRun: parsePositiveInt(process.env.PROFILE_CLEANUP_DEBUG_MAX_DELETE_PER_RUN, 5000),
   },

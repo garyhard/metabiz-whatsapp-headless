@@ -13,6 +13,8 @@ import {
   restoreSessionFromStore,
 } from '../services/sessionManager.js';
 import { enqueueMessageJob, getMessageJob, getMessageQueueWorkerStatus } from '../services/messageQueue.js';
+import { getSessionFlowQueueWorkerStatus } from '../services/sessionFlowQueue.js';
+import { getCreateOperationQueueWorkerStatus } from '../services/createOperationQueue.js';
 import { sessionStore } from '../services/sessionStore.js';
 import {
   buildAutomationErrorBody,
@@ -248,6 +250,8 @@ router.get('/jobs/monitor', async (req, res) => {
   const queueSessions = sessionStore.listMessageJobSessions(sessionLimit, now);
   const browserPool = getBrowserPoolStatus();
   const worker = getMessageQueueWorkerStatus(now);
+  const sessionFlowQueue = getSessionFlowQueueWorkerStatus(now);
+  const createOperationQueue = getCreateOperationQueueWorkerStatus(now);
   const disk = await getDiskPressureStatus();
   const profileCleanup = getProfileCleanupStatus(now);
 
@@ -274,6 +278,11 @@ router.get('/jobs/monitor', async (req, res) => {
     ok: true,
     generatedAt: new Date().toISOString(),
     worker,
+    workers: {
+      messageQueue: worker,
+      sessionFlowQueue,
+      createOperationQueue,
+    },
     queue: {
       counts: {
         queued: Number(queueCounts.queued || 0),

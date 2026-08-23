@@ -102,11 +102,13 @@ PROXY_PASSWORD=your-proxy-password
 - `SEND_CONCURRENCY` (optional): Batas paralel kirim lintas session. `10` untuk fixed 10 paralel, `0`/`all` untuk semua browser aktif (default: `1`). Queue hanya akan mengaktifkan maksimal satu job `processing` per `session_id`, jadi job dalam session yang sama tetap antri.
 - `SEND_CONCURRENCY_MAX_DURING_CREATE` (optional): Batas paralel kirim saat ada create Meta queued/processing supaya create/check-session dan send tidak saling makan kapasitas (default: `2`)
 - `DISK_PRESSURE_WARN_PERCENT` / `DISK_PRESSURE_BLOCK_PERCENT` (optional): Ambang disk untuk `/health` dan monitor queue. Saat block threshold tercapai, endpoint dianggap backpressured supaya manager bisa route pekerjaan ke server lain (default warn `90`, block `95`).
-- `PROFILE_CLEANUP_ENABLED` (optional): Aktifkan cleanup berkala untuk orphan Chromium profiles dan debug screenshots (default: `true`).
+- `PROFILE_CLEANUP_ENABLED` (optional): Aktifkan cleanup berkala untuk Chromium profiles yang tidak aktif dan debug screenshots. SQLite session store tidak pernah dihapus oleh worker ini (default: `true`).
 - `PROFILE_CLEANUP_INTERVAL_MINUTES` (optional): Interval cleanup berkala (default: `30`).
 - `PROFILE_CLEANUP_STARTUP_DELAY_MINUTES` (optional): Delay cleanup pertama setelah server start agar tidak bentrok dengan restore session (default: `5`).
 - `PROFILE_CLEANUP_ORPHAN_MIN_AGE_HOURS` (optional): Umur minimum folder `profiles/session-*` sebelum boleh dihapus jika tidak ada di DB dan tidak dipakai Chromium aktif (default: `24`).
 - `PROFILE_CLEANUP_MAX_DELETE_PER_RUN` (optional): Batas hapus orphan profile per run supaya cleanup tidak spike disk I/O (default: `1000`).
+- `PROFILE_CLEANUP_KNOWN_INACTIVE_ENABLED` (optional): Hapus juga folder profil untuk session yang masih tersimpan di SQLite tetapi tidak sedang loaded atau dipakai proses Chromium. Profil akan dibuat ulang dari cookies/fingerprint SQLite ketika session dibutuhkan (default: `true`).
+- `PROFILE_CLEANUP_KNOWN_INACTIVE_MIN_AGE_HOURS` (optional): Umur minimum profil session SQLite yang tidak aktif sebelum boleh dihapus (default: `1`).
 - `PROFILE_CLEANUP_DEBUG_MAX_AGE_DAYS` (optional): Umur maksimum debug screenshots/log artifacts di `profiles/debug` (default: `3`).
 - `PROFILE_CLEANUP_DEBUG_MAX_DELETE_PER_RUN` (optional): Batas hapus debug files per run (default: `5000`).
 - `MESSAGE_QUEUE_CREATE_RESERVED_BROWSER_SLOTS` (optional): Jumlah browser slot default yang disisihkan untuk create Meta saat ada create queued/processing (default: `8`)

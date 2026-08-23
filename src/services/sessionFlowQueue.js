@@ -95,6 +95,20 @@ function inferCoalesceKey(jobType, targetSessionId, cUser, payload = {}, priorit
   return null;
 }
 
+function isCapacitySessionFlowError(errorResult) {
+  const value = [
+    errorResult?.error,
+    errorResult?.message,
+    errorResult?.errorCode,
+    errorResult?.details,
+  ].filter(Boolean).join(' ').toLowerCase();
+
+  return value.includes('active browser limit reached') ||
+    value.includes('no idle session could be suspended') ||
+    value.includes('waiting for an available browser slot') ||
+    value.includes('disk pressure');
+}
+
 function webhookEnabled() {
   return String(config.sessionQueue.webhookUrl || '').trim().length > 0;
 }
@@ -366,8 +380,9 @@ async function processJob(job) {
     const retryable =
       isRetryableSessionFlowError(errorResult) &&
       !(job.jobType === 'create_session' && errorResult.errorCode === 'flow_timeout');
+    const deferForCapacity = isCapacitySessionFlowError(errorResult);
 
-    if (!retryable || attempts >= maxAttempts) {
+    if (!retryable || (attempts >= maxAttempts && !deferForCapacity)) {
       const updatedJob = sessionStore.markSessionFlowJobError(job.id, message, errorResult.errorCode, errorResult);
       if (updatedJob?.status !== 'error') {
         console.warn(
@@ -381,7 +396,11 @@ async function processJob(job) {
       return;
     }
 
-    const retryDelay = backoffMs(attempts, config.sessionQueue.retryBaseMs, config.sessionQueue.retryMaxMs);
+    const retryDelay = backoffMs(
+      deferForCapacity ? Math.min(attempts, maxAttempts) : attempts,
+      config.sessionQueue.retryBaseMs,
+      config.sessionQueue.retryMaxMs
+    );
     const retryAt = Date.now() + retryDelay;
     const updatedJob = sessionStore.markSessionFlowJobRetry(job.id, message, errorResult.errorCode, retryAt, errorResult);
     if (updatedJob?.status !== 'queued') {
@@ -391,7 +410,8 @@ async function processJob(job) {
       return;
     }
     console.warn(
-      `[SessionFlowQueue] job retry id=${job.id} type=${job.jobType} attempts=${attempts}/${maxAttempts} retry_in_ms=${retryDelay}`
+      `[SessionFlowQueue] job retry id=${job.id} type=${job.jobType} attempts=${attempts}/${maxAttempts} ` +
+      `defer_for_capacity=${deferForCapacity} retry_in_ms=${retryDelay}`
     );
   }
 }

@@ -4,6 +4,7 @@ import { execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { config } from '../config.js';
 import { sessionStore } from './sessionStore.js';
+import { getAllSessionIds } from './sessionManager.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -70,13 +71,23 @@ async function removePath(targetPath) {
 
 async function cleanupOrphanProfiles(now) {
   const knownSessionIds = new Set(sessionStore.listStoredSessionIds());
-  const activeSessionIds = parseActiveSessionIdsFromProcessList();
+  const processSessionIds = parseActiveSessionIdsFromProcessList();
+  const loadedSessionIds = new Set(getAllSessionIds());
+  const protectedSessionIds = new Set([...processSessionIds, ...loadedSessionIds]);
   const orphanMinAgeMs = Math.max(1000, Number(config.profileCleanup.orphanMinAgeMs) || 24 * 60 * 60 * 1000);
+  const knownInactiveEnabled = config.profileCleanup.knownInactiveEnabled === true;
+  const knownInactiveMinAgeMs = Math.max(
+    1000,
+    Number(config.profileCleanup.knownInactiveMinAgeMs) || 60 * 60 * 1000
+  );
   const maxDelete = Math.max(1, Number(config.profileCleanup.maxDeletePerRun) || 500);
-  const cutoff = now - orphanMinAgeMs;
+  const orphanCutoff = now - orphanMinAgeMs;
+  const knownInactiveCutoff = now - knownInactiveMinAgeMs;
   const result = {
     checked: 0,
     deleted: 0,
+    deletedOrphan: 0,
+    deletedKnownInactive: 0,
     skippedKnown: 0,
     skippedActive: 0,
     skippedYoung: 0,
@@ -85,9 +96,13 @@ async function cleanupOrphanProfiles(now) {
     failed: 0,
     failures: [],
     knownSessions: knownSessionIds.size,
-    activeBrowsers: activeSessionIds.size,
+    activeBrowsers: processSessionIds.size,
+    loadedSessions: loadedSessionIds.size,
+    protectedSessions: protectedSessionIds.size,
     maxDelete,
     orphanMinAgeMs,
+    knownInactiveEnabled,
+    knownInactiveMinAgeMs,
   };
 
   let entries = [];
@@ -114,11 +129,7 @@ async function cleanupOrphanProfiles(now) {
       result.skippedUnsafe += 1;
       continue;
     }
-    if (knownSessionIds.has(sessionId)) {
-      result.skippedKnown += 1;
-      continue;
-    }
-    if (activeSessionIds.has(sessionId)) {
+    if (protectedSessionIds.has(sessionId)) {
       result.skippedActive += 1;
       continue;
     }
@@ -129,12 +140,23 @@ async function cleanupOrphanProfiles(now) {
         result.skippedNonDirectory += 1;
         continue;
       }
+      const isKnownSession = knownSessionIds.has(sessionId);
+      if (isKnownSession && !knownInactiveEnabled) {
+        result.skippedKnown += 1;
+        continue;
+      }
+      const cutoff = isKnownSession ? knownInactiveCutoff : orphanCutoff;
       if (Number(stat.mtimeMs || 0) > cutoff) {
         result.skippedYoung += 1;
         continue;
       }
       await removePath(fullPath);
       result.deleted += 1;
+      if (isKnownSession) {
+        result.deletedKnownInactive += 1;
+      } else {
+        result.deletedOrphan += 1;
+      }
     } catch (error) {
       result.failed += 1;
       if (result.failures.length < 10) {
@@ -319,6 +341,8 @@ export function getProfileCleanupStatus(now = Date.now()) {
       startupDelayMs: config.profileCleanup.startupDelayMs,
       orphanMinAgeMs: config.profileCleanup.orphanMinAgeMs,
       maxDeletePerRun: config.profileCleanup.maxDeletePerRun,
+      knownInactiveEnabled: config.profileCleanup.knownInactiveEnabled,
+      knownInactiveMinAgeMs: config.profileCleanup.knownInactiveMinAgeMs,
       debugMaxAgeMs: config.profileCleanup.debugMaxAgeMs,
       debugMaxDeletePerRun: config.profileCleanup.debugMaxDeletePerRun,
     },
