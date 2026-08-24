@@ -110,7 +110,7 @@ export const config = {
   sendConcurrencyMaxDuringCreate: parsePositiveInt(process.env.SEND_CONCURRENCY_MAX_DURING_CREATE, 2),
   sessionLockWaitTimeoutMs: parseNonNegativeInt(process.env.SESSION_LOCK_WAIT_TIMEOUT_MS, 90000),
   storePersistDebounceMs: parseNonNegativeInt(process.env.SESSION_STORE_PERSIST_DEBOUNCE_MS, 50),
-  storePersistMinIntervalMs: parseNonNegativeInt(process.env.SESSION_STORE_PERSIST_MIN_INTERVAL_MS, 5000),
+  storePersistMinIntervalMs: parseNonNegativeInt(process.env.SESSION_STORE_PERSIST_MIN_INTERVAL_MS, 30000),
   storeTempCleanup: {
     enabled: parseBoolean(process.env.SESSION_STORE_TEMP_CLEANUP_ENABLED, true),
     minAgeMs: parsePositiveInt(process.env.SESSION_STORE_TEMP_CLEANUP_MIN_AGE_MINUTES, 60) * 60 * 1000,

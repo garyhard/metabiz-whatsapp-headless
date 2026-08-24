@@ -122,7 +122,7 @@ PROXY_PASSWORD=your-proxy-password
 - `PROFILE_CLEANUP_BACKUP_MAX_DELETE_PER_RUN` (optional): Batas snapshot backup yang dihapus per run (default: `10`).
 - `PROFILE_CLEANUP_BACKUP_ALLOWED_PREFIXES` (optional): Allowlist prefix direktori snapshot yang boleh dihapus (default: `reset-zero-`). Direktori `sessions-db`, file biasa, symlink, dan nama di luar allowlist selalu dipertahankan.
 - `SESSION_STORE_PERSIST_DEBOUNCE_MS` (optional): Debounce perubahan sebelum SQLite diekspor (default: `50`).
-- `SESSION_STORE_PERSIST_MIN_INTERVAL_MS` (optional): Jarak minimum antar full export SQLite untuk membatasi peak memory dan write amplification ketika queue sibuk (default: `5000`).
+- `SESSION_STORE_PERSIST_MIN_INTERVAL_MS` (optional): Jarak minimum antar full export SQLite untuk membatasi peak memory dan write amplification ketika queue sibuk (default: `30000`).
 - `SESSION_STORE_TEMP_CLEANUP_ENABLED` (optional): Hapus file temp SQLite yang ditinggalkan proses mati. Hanya nama dengan pola atomik internal yang diterima dan file aktif selalu dilindungi (default: `true`).
 - `SESSION_STORE_TEMP_CLEANUP_MIN_AGE_MINUTES` (optional): Umur minimum file temp SQLite sebelum boleh dihapus (default: `60`).
 - `SESSION_STORE_TEMP_CLEANUP_MAX_DELETE_PER_RUN` (optional): Batas file temp SQLite stale yang dihapus saat startup dan setiap profile cleanup (default: `5000`).
