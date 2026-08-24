@@ -16,6 +16,10 @@ function isInside(parent, child) {
   return !!relative && !relative.startsWith('..') && !path.isAbsolute(relative);
 }
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 async function ignoreMissing(operation) {
   try {
     return await operation();
@@ -44,6 +48,118 @@ export async function removeDirectoryTreeBounded(targetPath, fsApi = fs) {
   }
 
   await ignoreMissing(() => fsApi.rmdir(targetPath));
+}
+
+export async function cleanupStaleSqliteTempFiles({
+  dbPath,
+  now = Date.now(),
+  enabled = true,
+  minAgeMs = 60 * 60 * 1000,
+  maxDelete = 5000,
+  protectedPaths = [],
+  fsApi = fs,
+} = {}) {
+  const resolvedDbPath = path.resolve(String(dbPath || ''));
+  const root = path.dirname(resolvedDbPath);
+  const dbFilename = path.basename(resolvedDbPath);
+  const safeMinAgeMs = Math.max(1000, positiveNumber(minAgeMs, 60 * 60 * 1000));
+  const safeMaxDelete = Math.max(1, Math.trunc(positiveNumber(maxDelete, 5000)));
+  const cutoff = now - safeMinAgeMs;
+  const filenamePattern = new RegExp(
+    `^${escapeRegExp(dbFilename)}\\.\\d+-\\d+-[a-z0-9]{6,16}\\.tmp$`
+  );
+  const protectedResolvedPaths = new Set(
+    Array.from(protectedPaths || [], (value) => path.resolve(String(value || '')))
+      .filter((value) => value && value !== path.parse(value).root)
+  );
+  const result = {
+    enabled: enabled === true,
+    dbPath: resolvedDbPath,
+    root,
+    checked: 0,
+    matched: 0,
+    matchedBytes: 0,
+    stale: 0,
+    staleBytes: 0,
+    deleted: 0,
+    deletedBytes: 0,
+    remaining: 0,
+    remainingBytes: 0,
+    skippedProtected: 0,
+    skippedYoung: 0,
+    skippedUnsafe: 0,
+    skippedNonFile: 0,
+    failed: 0,
+    failures: [],
+    maxDelete: safeMaxDelete,
+    minAgeMs: safeMinAgeMs,
+  };
+
+  if (!result.enabled || !dbPath || root === path.parse(root).root) return result;
+
+  let entries;
+  try {
+    entries = await fsApi.readdir(root, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === 'ENOENT') return result;
+    throw error;
+  }
+
+  for (const entry of entries) {
+    result.checked += 1;
+    if (!filenamePattern.test(entry.name)) continue;
+
+    result.matched += 1;
+    const targetPath = path.join(root, entry.name);
+    if (!isInside(root, targetPath)) {
+      result.skippedUnsafe += 1;
+      continue;
+    }
+    if (!entry.isFile()) {
+      result.skippedNonFile += 1;
+      continue;
+    }
+
+    try {
+      const stat = await fsApi.lstat(targetPath);
+      if (!stat.isFile() || stat.isSymbolicLink()) {
+        result.skippedNonFile += 1;
+        continue;
+      }
+
+      const size = Math.max(0, Number(stat.size) || 0);
+      result.matchedBytes += size;
+      if (protectedResolvedPaths.has(path.resolve(targetPath))) {
+        result.skippedProtected += 1;
+        continue;
+      }
+      if (Number(stat.mtimeMs || 0) > cutoff) {
+        result.skippedYoung += 1;
+        continue;
+      }
+
+      result.stale += 1;
+      result.staleBytes += size;
+      if (result.deleted >= safeMaxDelete) continue;
+
+      await fsApi.unlink(targetPath);
+      result.deleted += 1;
+      result.deletedBytes += size;
+    } catch (error) {
+      if (error?.code === 'ENOENT') continue;
+      result.failed += 1;
+      if (result.failures.length < 10) {
+        result.failures.push({
+          path: targetPath,
+          error: error?.message || String(error),
+        });
+      }
+    }
+  }
+
+  result.remaining = Math.max(0, result.matched - result.deleted);
+  result.remainingBytes = Math.max(0, result.matchedBytes - result.deletedBytes);
+  return result;
 }
 
 export function resolveStorageCleanupPolicy(disk, cleanupConfig = {}) {

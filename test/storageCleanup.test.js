@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import {
   cleanupBackupSnapshots,
+  cleanupStaleSqliteTempFiles,
   removeDirectoryTreeBounded,
   resolveStorageCleanupPolicy,
 } from '../src/services/storageCleanup.js';
@@ -134,4 +135,70 @@ test('removeDirectoryTreeBounded deletes nested content without following symlin
 
   await assert.rejects(fs.stat(target), { code: 'ENOENT' });
   assert.equal(await fs.readFile(path.join(outside, 'preserved.txt'), 'utf8'), 'preserved');
+});
+
+test('cleanupStaleSqliteTempFiles deletes only stale exact-pattern files', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'metabiz-sqlite-temp-cleanup-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const dbPath = path.join(root, 'sessions.db');
+  const staleTemp = `${dbPath}.123-1700000000000-abcdefgh.tmp`;
+  const youngTemp = `${dbPath}.456-1700000000001-ijklmnop.tmp`;
+  const unrelatedTemp = path.join(root, 'sessions.db.manual.tmp');
+  const otherDbTemp = path.join(root, 'other.db.123-1700000000000-abcdefgh.tmp');
+  await Promise.all([
+    fs.writeFile(dbPath, 'database'),
+    fs.writeFile(staleTemp, 'stale-data'),
+    fs.writeFile(youngTemp, 'young-data'),
+    fs.writeFile(unrelatedTemp, 'keep'),
+    fs.writeFile(otherDbTemp, 'keep'),
+  ]);
+
+  const now = Date.now();
+  const oldTime = new Date(now - 2 * 60 * 60 * 1000);
+  await fs.utimes(staleTemp, oldTime, oldTime);
+
+  const result = await cleanupStaleSqliteTempFiles({
+    dbPath,
+    now,
+    minAgeMs: 60 * 60 * 1000,
+  });
+
+  assert.equal(result.matched, 2);
+  assert.equal(result.stale, 1);
+  assert.equal(result.deleted, 1);
+  assert.equal(result.deletedBytes, Buffer.byteLength('stale-data'));
+  assert.equal(result.skippedYoung, 1);
+  await assert.rejects(fs.stat(staleTemp), { code: 'ENOENT' });
+  await Promise.all([
+    fs.stat(dbPath),
+    fs.stat(youngTemp),
+    fs.stat(unrelatedTemp),
+    fs.stat(otherDbTemp),
+  ]);
+});
+
+test('cleanupStaleSqliteTempFiles protects active files and refuses symlinks', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'metabiz-sqlite-temp-protected-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+
+  const dbPath = path.join(root, 'sessions.db');
+  const protectedTemp = `${dbPath}.123-1700000000000-abcdefgh.tmp`;
+  const symlinkTemp = `${dbPath}.456-1700000000001-ijklmnop.tmp`;
+  const outside = path.join(root, 'outside');
+  await fs.writeFile(protectedTemp, 'active');
+  await fs.writeFile(outside, 'outside');
+  await fs.symlink(outside, symlinkTemp);
+  const oldTime = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  await fs.utimes(protectedTemp, oldTime, oldTime);
+
+  const result = await cleanupStaleSqliteTempFiles({
+    dbPath,
+    protectedPaths: [protectedTemp],
+  });
+
+  assert.equal(result.deleted, 0);
+  assert.equal(result.skippedProtected, 1);
+  assert.equal(result.skippedNonFile, 1);
+  await Promise.all([fs.stat(protectedTemp), fs.lstat(symlinkTemp), fs.stat(outside)]);
 });

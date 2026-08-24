@@ -3,7 +3,7 @@ import path from 'path';
 import { execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { config } from '../config.js';
-import { sessionStore } from './sessionStore.js';
+import { cleanupSessionStoreTempFiles, sessionStore } from './sessionStore.js';
 import { getAllSessionIds } from './sessionManager.js';
 import { getDiskPressureStatus } from './systemHealth.js';
 import { cleanupBackupSnapshots, resolveStorageCleanupPolicy } from './storageCleanup.js';
@@ -288,12 +288,17 @@ export async function runProfileCleanup({ reason = 'manual' } = {}) {
       maxDelete: policyBefore.maxDeletePerRun,
     });
     const debugFiles = await cleanupDebugFiles(startedAt);
+    const sqliteTempFiles = await cleanupSessionStoreTempFiles({
+      now: startedAt,
+      reason: `profile_cleanup:${reason}`,
+    });
     const diskAfter = await getDiskPressureStatus();
     const policyAfter = resolveStorageCleanupPolicy(diskAfter, config.profileCleanup);
     nextIntervalMs = policyAfter.nextIntervalMs;
     const finishedAt = Date.now();
     const result = {
-      ok: backupSnapshots.failed === 0 && orphanProfiles.failed === 0 && debugFiles.failed === 0,
+      ok: backupSnapshots.failed === 0 && orphanProfiles.failed === 0 &&
+        debugFiles.failed === 0 && sqliteTempFiles.ok !== false,
       startedAt,
       finishedAt,
       durationMs: finishedAt - startedAt,
@@ -311,6 +316,7 @@ export async function runProfileCleanup({ reason = 'manual' } = {}) {
       backupSnapshots,
       orphanProfiles,
       debugFiles,
+      sqliteTempFiles,
     };
 
     cleanupState.lastFinishedAt = finishedAt;
@@ -321,7 +327,8 @@ export async function runProfileCleanup({ reason = 'manual' } = {}) {
       `(mode=${policyBefore.mode}->${policyAfter.mode}; ` +
       `backupSnapshots deleted=${backupSnapshots.deleted}, failed=${backupSnapshots.failed}; ` +
       `orphanProfiles deleted=${orphanProfiles.deleted}, failed=${orphanProfiles.failed}; ` +
-      `debugFiles deleted=${debugFiles.deleted}, failed=${debugFiles.failed})`
+      `debugFiles deleted=${debugFiles.deleted}, failed=${debugFiles.failed}; ` +
+      `sqliteTempFiles deleted=${sqliteTempFiles.deleted || 0}, failed=${sqliteTempFiles.failed || 0})`
     );
     return result;
   } catch (error) {

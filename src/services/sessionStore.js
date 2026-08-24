@@ -7,6 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { config } from '../config.js';
+import { cleanupStaleSqliteTempFiles } from './storageCleanup.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,6 +19,77 @@ const dbDir = path.dirname(DB_PATH);
 if (!fs.existsSync(dbDir)) {
   fs.mkdirSync(dbDir, { recursive: true });
 }
+
+const activeTempPaths = new Set();
+const tempCleanupState = {
+  running: false,
+  lastRunAt: null,
+  lastFinishedAt: null,
+  lastReason: null,
+  lastResult: null,
+  lastError: null,
+};
+
+export async function cleanupSessionStoreTempFiles({
+  now = Date.now(),
+  reason = 'manual',
+} = {}) {
+  if (tempCleanupState.running) {
+    return { ok: true, skipped: true, reason: 'already_running' };
+  }
+
+  const startedAt = now;
+  tempCleanupState.running = true;
+  tempCleanupState.lastRunAt = startedAt;
+  tempCleanupState.lastReason = reason;
+  tempCleanupState.lastError = null;
+
+  try {
+    const cleanup = await cleanupStaleSqliteTempFiles({
+      dbPath: DB_PATH,
+      now: startedAt,
+      enabled: config.storeTempCleanup.enabled,
+      minAgeMs: config.storeTempCleanup.minAgeMs,
+      maxDelete: config.storeTempCleanup.maxDeletePerRun,
+      protectedPaths: activeTempPaths,
+    });
+    const finishedAt = Date.now();
+    const result = {
+      ...cleanup,
+      ok: cleanup.failed === 0,
+      reason,
+      startedAt,
+      finishedAt,
+      durationMs: finishedAt - startedAt,
+    };
+    tempCleanupState.lastFinishedAt = finishedAt;
+    tempCleanupState.lastResult = result;
+    console.log(
+      `[SessionStore] ${reason} temp cleanup finished in ${result.durationMs}ms ` +
+      `(matched=${result.matched}, deleted=${result.deleted}, ` +
+      `deletedBytes=${result.deletedBytes}, protected=${result.skippedProtected}, failed=${result.failed})`
+    );
+    return result;
+  } catch (error) {
+    const finishedAt = Date.now();
+    tempCleanupState.lastFinishedAt = finishedAt;
+    tempCleanupState.lastError = error?.message || String(error);
+    tempCleanupState.lastResult = {
+      ok: false,
+      reason,
+      startedAt,
+      finishedAt,
+      durationMs: finishedAt - startedAt,
+      error: tempCleanupState.lastError,
+    };
+    console.error('[SessionStore] Temp cleanup failed:', error);
+    return tempCleanupState.lastResult;
+  } finally {
+    tempCleanupState.running = false;
+  }
+}
+
+await cleanupSessionStoreTempFiles({ reason: 'startup' });
 
 const SQL = await initSqlJs({
   locateFile: (file) => {
@@ -534,12 +606,32 @@ let lastPersistError = null;
 
 function exportDbBuffer() {
   const data = db.export();
-  return Buffer.from(data);
+  return Buffer.from(data.buffer, data.byteOffset, data.byteLength);
 }
 
-function getTempDbPath() {
+function getTempDbPath(filePath = DB_PATH) {
   const suffix = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  return `${DB_PATH}.${suffix}.tmp`;
+  return `${filePath}.${suffix}.tmp`;
+}
+
+function unlinkTempFileSync(tempPath) {
+  try {
+    fs.unlinkSync(tempPath);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      console.warn('[SessionStore] Failed to remove incomplete temp file:', error?.message || error);
+    }
+  }
+}
+
+async function unlinkTempFile(tempPath) {
+  try {
+    await fs.promises.unlink(tempPath);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      console.warn('[SessionStore] Failed to remove incomplete temp file:', error?.message || error);
+    }
+  }
 }
 
 function fsyncParentDirSync(filePath) {
@@ -561,12 +653,21 @@ function fsyncParentDirSync(filePath) {
 }
 
 function writeBufferAtomicallySync(filePath, buffer) {
-  const tempPath = getTempDbPath();
+  const tempPath = getTempDbPath(filePath);
   let fd = null;
+  let committed = false;
+  activeTempPaths.add(tempPath);
   try {
     fd = fs.openSync(tempPath, 'w');
     fs.writeFileSync(fd, buffer);
     fs.fsyncSync(fd);
+    if (fd != null) {
+      fs.closeSync(fd);
+      fd = null;
+    }
+    fs.renameSync(tempPath, filePath);
+    committed = true;
+    fsyncParentDirSync(filePath);
   } finally {
     if (fd != null) {
       try {
@@ -575,33 +676,39 @@ function writeBufferAtomicallySync(filePath, buffer) {
         // ignore close errors
       }
     }
+    activeTempPaths.delete(tempPath);
+    if (!committed) unlinkTempFileSync(tempPath);
   }
-
-  fs.renameSync(tempPath, filePath);
-  fsyncParentDirSync(filePath);
 }
 
 async function writeBufferAtomically(filePath, buffer) {
-  const tempPath = getTempDbPath();
-  const handle = await fs.promises.open(tempPath, 'w');
+  const tempPath = getTempDbPath(filePath);
+  let handle = null;
+  let committed = false;
+  activeTempPaths.add(tempPath);
   try {
+    handle = await fs.promises.open(tempPath, 'w');
     await handle.writeFile(buffer);
     await handle.sync();
-  } finally {
-    await handle.close().catch(() => {});
-  }
+    await handle.close();
+    handle = null;
+    await fs.promises.rename(tempPath, filePath);
+    committed = true;
 
-  await fs.promises.rename(tempPath, filePath);
-
-  try {
-    const dirHandle = await fs.promises.open(path.dirname(filePath), 'r');
     try {
-      await dirHandle.sync();
-    } finally {
-      await dirHandle.close().catch(() => {});
+      const dirHandle = await fs.promises.open(path.dirname(filePath), 'r');
+      try {
+        await dirHandle.sync();
+      } finally {
+        await dirHandle.close().catch(() => {});
+      }
+    } catch {
+      // Best-effort only.
     }
-  } catch {
-    // Best-effort only.
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+    activeTempPaths.delete(tempPath);
+    if (!committed) await unlinkTempFile(tempPath);
   }
 }
 
@@ -653,7 +760,12 @@ async function flushPersistDbAsync() {
 function schedulePersistDbFlush(delayMs = null) {
   if (persistTimer) return;
   const configuredDelay = Math.max(0, Number(config.storePersistDebounceMs) || 0);
-  const waitMs = delayMs == null ? configuredDelay : Math.max(0, Number(delayMs) || 0);
+  const requestedWaitMs = delayMs == null ? configuredDelay : Math.max(0, Number(delayMs) || 0);
+  const minIntervalMs = Math.max(0, Number(config.storePersistMinIntervalMs) || 0);
+  const earliestNextPersistAt = lastPersistStartedAt == null
+    ? Date.now()
+    : lastPersistStartedAt + minIntervalMs;
+  const waitMs = Math.max(requestedWaitMs, earliestNextPersistAt - Date.now(), 0);
   persistTimer = setTimeout(() => {
     persistTimer = null;
     flushPersistDbAsync().catch((error) => {
@@ -1123,6 +1235,20 @@ export function getSessionStorePersistStatus(now = Date.now()) {
     lastPersistedAt,
     lastPersistAgeMs: lastPersistedAt ? Math.max(0, now - lastPersistedAt) : null,
     lastPersistError,
+    debounceMs: config.storePersistDebounceMs,
+    minIntervalMs: config.storePersistMinIntervalMs,
+    activeTempFileCount: activeTempPaths.size,
+    tempCleanup: {
+      enabled: config.storeTempCleanup.enabled,
+      running: tempCleanupState.running,
+      minAgeMs: config.storeTempCleanup.minAgeMs,
+      maxDeletePerRun: config.storeTempCleanup.maxDeletePerRun,
+      lastRunAt: tempCleanupState.lastRunAt,
+      lastFinishedAt: tempCleanupState.lastFinishedAt,
+      lastReason: tempCleanupState.lastReason,
+      lastError: tempCleanupState.lastError,
+      lastResult: tempCleanupState.lastResult,
+    },
   };
 }
 
