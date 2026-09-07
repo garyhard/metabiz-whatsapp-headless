@@ -254,6 +254,10 @@ const OPEN_WHATSAPP_MODAL_LABELS = uniqueNormalizedList([
   'send message on whatsapp',
   'kirim pesan di whatsapp',
   'kirim pesan lewat whatsapp',
+  'kirim pesan whatsapp',
+  'mulai percakapan di whatsapp',
+  'mulai chat whatsapp',
+  'pesan whatsapp',
 ]);
 const NEW_WHATSAPP_NUMBER_LABELS = uniqueNormalizedList([
   ...(config?.texts?.newWhatsappNumber || []),
@@ -261,6 +265,8 @@ const NEW_WHATSAPP_NUMBER_LABELS = uniqueNormalizedList([
   'new whatsapp',
   'nomor whatsapp baru',
   'nomor baru whatsapp',
+  'kontak whatsapp baru',
+  'nomor baru',
 ]);
 const WHATSAPP_INBOX_TAB_LABELS = uniqueNormalizedList([
   'whatsapp',
@@ -268,7 +274,11 @@ const WHATSAPP_INBOX_TAB_LABELS = uniqueNormalizedList([
 const SEND_MESSAGE_LABELS = uniqueNormalizedList([
   ...(config?.texts?.sendMessage || []),
   'send message',
+  'send',
+  'submit',
   'kirim pesan',
+  'kirim',
+  'kirimkan',
 ]);
 const REPLY_SEND_LABELS = normalizeList([
   'send',
@@ -281,8 +291,26 @@ const REPLY_SEND_LABELS = normalizeList([
 const REPLY_INPUT_HINTS = normalizeList([
   'reply on whatsapp',
   'reply',
+  'message',
+  'type a message',
+  'write a message',
   'balas',
+  'balas di whatsapp',
+  'tulis balasan',
+  'ketik pesan',
+  'tulis pesan',
   'whatsapp',
+]);
+const SEARCH_INPUT_HINTS = normalizeList([
+  'search',
+  'search conversations',
+  'search messages',
+  'cari',
+  'telusuri',
+  'cari percakapan',
+  'cari pesan',
+  'percakapan',
+  'pesan',
 ]);
 
 function positiveMs(value, fallback) {
@@ -2898,13 +2926,55 @@ async function setNativeValue(page, elementHandle, value) {
 }
 
 async function findSearchInput(page) {
-  return (
-    (await findFirstVisible(
-      page,
-      'div[data-pagelet="GenericBizInboxThreadListViewHeader"] input[role="combobox"][placeholder="Search"]'
-    )) ||
-    (await findFirstVisible(page, 'input[role="combobox"][placeholder="Search"]'))
-  );
+  const selectorCandidates = [
+    'div[data-pagelet="GenericBizInboxThreadListViewHeader"] input[role="combobox"]',
+    'div[data-pagelet="GenericBizInboxThreadListViewHeader"] input[role="searchbox"]',
+    'input[role="combobox"][placeholder*="Search" i]',
+    'input[role="combobox"][placeholder*="Cari" i]',
+    'input[role="combobox"][aria-label*="Search" i]',
+    'input[role="combobox"][aria-label*="Cari" i]',
+    'input[role="searchbox"]',
+  ];
+
+  for (const selector of selectorCandidates) {
+    const input = await findFirstVisible(page, selector);
+    if (input) return input;
+  }
+
+  const handle = await page.evaluateHandle((searchHints) => {
+    const normalize = (value) => String(value || '')
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const style = window.getComputedStyle(el);
+      if (!style || style.visibility === 'hidden' || style.display === 'none') return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 4 && rect.height > 4;
+    };
+    const scoreInput = (el) => {
+      const bag = normalize([
+        el.getAttribute('placeholder') || '',
+        el.getAttribute('aria-label') || '',
+        el.getAttribute('title') || '',
+        el.getAttribute('name') || '',
+      ].join(' '));
+      const hintScore = searchHints.some((hint) => bag.includes(hint)) ? 100 : 0;
+      const role = String(el.getAttribute('role') || '').toLowerCase();
+      const roleScore = role === 'combobox' || role === 'searchbox' ? 40 : 0;
+      const headerScore = el.closest('[data-pagelet*="ThreadListViewHeader"], [data-pagelet*="InboxThreadListViewHeader"]') ? 30 : 0;
+      const type = String(el.getAttribute('type') || '').toLowerCase();
+      const typeScore = !type || ['text', 'search'].includes(type) ? 10 : -50;
+      return hintScore + roleScore + headerScore + typeScore;
+    };
+    return Array.from(document.querySelectorAll('input'))
+      .filter(visible)
+      .map((el) => ({ el, score: scoreInput(el) }))
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score)[0]?.el || null;
+  }, SEARCH_INPUT_HINTS);
+  return handle.asElement();
 }
 
 async function ensureSearchEmpty(page) {
