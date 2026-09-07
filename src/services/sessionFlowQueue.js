@@ -197,6 +197,7 @@ function deriveErrorCode(error, message) {
     if (detailsType === 'need_new_cookies') return 'need_new_cookies';
     if (detailsType === 'captcha_required') return 'captcha_required';
     if (detailsType === 'account_restricted') return 'account_restricted';
+    if (detailsType === 'automated_behavior_checkpoint') return 'automated_behavior_checkpoint';
   }
 
   if (error instanceof InvalidInputError) {
@@ -249,6 +250,7 @@ function isRetryableSessionFlowError(errorResult) {
     'need_new_cookies',
     'captcha_required',
     'account_restricted',
+    'automated_behavior_checkpoint',
     'session_not_found',
     'session_exists',
   ].includes(code);
@@ -262,6 +264,7 @@ async function executeJob(job) {
         persist: payload.persist === true,
         freshBrowser: payload.freshBrowser === true,
         twofaSecret: payload.twofaSecret || null,
+        context: payload.context || null,
         validateTimeoutMs: Number(payload.validateTimeoutMs) > 0
           ? Number(payload.validateTimeoutMs)
           : config.createQueue.validateTimeoutMs,
@@ -273,8 +276,9 @@ async function executeJob(job) {
       if (payload.checkAfterSuccess === true && validationResult?.sessionId) {
         try {
           const checkResult = await checkSessionForSession(validationResult.sessionId, {
-            requestId: job.requestId || null,
-          });
+        requestId: job.requestId || null,
+        context: payload.context || null,
+      });
           return {
             ...validationResult,
             check: { ok: true, ...(checkResult || {}) },
@@ -290,12 +294,14 @@ async function executeJob(job) {
     case 'create_session':
       return createSession(payload.cookies, null, null, payload.proxy || null, {
         twofaSecret: payload.twofaSecret || null,
+        context: payload.context || null,
       });
     case 'check_session': {
       const result = await checkSessionForSession(job.targetSessionId, {
         requestId: job.requestId || null,
         priority: job.payload?.priority || 'normal',
         browserPoolOptions: { lane: job.payload?.browserPoolLane || 'default' },
+        context: payload.context || null,
       });
       return {
         ok: true,
@@ -308,6 +314,7 @@ async function executeJob(job) {
         requestId: job.requestId || null,
         priority: job.payload?.priority || 'normal',
         browserPoolOptions: { lane: job.payload?.browserPoolLane || 'default' },
+        context: payload.context || null,
       });
       return {
         ok: true,
@@ -320,6 +327,7 @@ async function executeJob(job) {
         await updateSessionCookies(job.targetSessionId, payload.cookies, {
           twofaSecret: payload.twofaSecret || null,
           proxy: payload.proxy || null,
+          context: payload.context || null,
         });
         return {
           ok: true,
@@ -334,6 +342,7 @@ async function executeJob(job) {
         return {
           ...(await createSession(payload.cookies, null, null, payload.proxy || null, {
             twofaSecret: payload.twofaSecret || null,
+            context: payload.context || null,
           })),
           recreated: true,
         };

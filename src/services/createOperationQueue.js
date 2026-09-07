@@ -157,6 +157,7 @@ function deriveErrorCode(error, message) {
     if (detailsType === 'need_new_cookies') return 'need_new_cookies';
     if (detailsType === 'captcha_required') return 'captcha_required';
     if (detailsType === 'account_restricted') return 'account_restricted';
+    if (detailsType === 'automated_behavior_checkpoint') return 'automated_behavior_checkpoint';
     if (detailsType === 'inbox_not_ready') return 'inbox_not_ready';
     if (detailsType === 'twofa_input_not_found') return 'twofa_input_not_found';
   }
@@ -206,6 +207,7 @@ function isRetryableCreateError(errorResult) {
     'twofa_input_not_found',
     'twofa_secret_missing',
     'account_restricted',
+    'automated_behavior_checkpoint',
     'session_not_found',
     'flow_timeout',
     'inbox_not_ready',
@@ -284,6 +286,7 @@ async function executeOperation(operation) {
       persist: true,
       freshBrowser: true,
       twofaSecret: payload.twofaSecret || null,
+      context: payload.context || null,
       skipProxyValidation: payload.proxy && payload.validateProxyFirst !== false,
       navigationRetries: 0,
       browserPoolLane: 'create',
@@ -321,6 +324,7 @@ async function executeOperation(operation) {
         browserPoolOptions: { lane: 'create' },
         skipInitialReload: true,
         checkOptions,
+        context: payload.context || null,
       });
     } catch (checkError) {
       const checkErrorResult = buildErrorResult(checkError);

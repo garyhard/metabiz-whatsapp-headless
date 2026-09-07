@@ -93,6 +93,7 @@ router.post('/validate', async (req, res, next) => {
       persist: persist === true,
       freshBrowser: freshBrowser === true,
       twofaSecret,
+      context,
     });
 
     res.json({

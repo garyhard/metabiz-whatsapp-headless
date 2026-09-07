@@ -9,10 +9,12 @@ import { easyOCR, isOcrConfigured } from '../utils/ocr.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
+import { automatedBehaviorIndicator, isExplicitTwoFactorUrl } from '../utils/authCheckpoint.js';
+import { DEFAULT_META_INBOX_URL, metaInboxTargetMatchesUrl, normalizeMetaInboxTarget } from '../utils/metaInboxTarget.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const INBOX_URL = 'https://business.facebook.com/latest/inbox';
+const INBOX_URL = DEFAULT_META_INBOX_URL;
 const DEBUG_DIR = path.join(__dirname, '../../profiles/debug');
 const REQUEST_LOG_DIR = path.join(DEBUG_DIR, 'requests');
 const CAPTCHA_DIR = path.join(DEBUG_DIR, 'captcha');
@@ -35,12 +37,6 @@ const SAVE_LOGIN_INFO_HINTS = normalizeList([
 ]);
 const NOT_NOW_LABELS = normalizeList(['not now', 'nanti', 'tidak sekarang', 'jangan sekarang', 'skip', 'lewati']);
 const INBOX_DISMISS_LABELS = normalizeList(['dismiss', 'tutup', 'close', 'abaikan']);
-const AUTOMATED_BEHAVIOR_NOTICE_HINTS = normalizeList([
-  'we suspect automated behavior on your account',
-  'to prevent your account from being temporarily restricted or permanently disabled',
-  'make sure that no other users or tools have access to your account',
-]);
-const AUTOMATED_BEHAVIOR_DISMISS_LABELS = normalizeList(['dismiss']);
 const CONNECT_INSTAGRAM_HINTS = normalizeList(['connect to instagram', 'hubungkan ke instagram']);
 const ATTACH_MEDIA_LABELS = normalizeList([
   'attach',
@@ -324,25 +320,32 @@ async function dismissSaveLoginInfo(page, label = 'Automation') {
   return false;
 }
 
-export async function dismissAutomatedBehaviorNotice(page, label = 'Automation') {
+export async function throwIfAutomatedBehaviorNotice(page, label = 'Automation', cUser = 'unknown') {
   try {
     const bodyText = normalizeText(await page.evaluate(() => document.body?.innerText || ''));
-    if (!AUTOMATED_BEHAVIOR_NOTICE_HINTS.some((hint) => bodyText.includes(hint))) {
+    const indicator = automatedBehaviorIndicator(bodyText);
+    if (!indicator) {
       return false;
     }
 
-    const clicked = await clickFirstMatchingText(page, AUTOMATED_BEHAVIOR_DISMISS_LABELS, {
-      selector: '[role="button"],button,a,[role="link"]',
+    const debug = await captureDebugScreenshot(page, 'automated-behavior-checkpoint', cUser).catch(() => null);
+    const diagnostics = await getAuthPageDiagnostics(page).catch(() => ({}));
+    throw new AutomationError(`${label}: Automated behavior checkpoint detected`, {
+      type: 'automated_behavior_checkpoint',
+      reason: 'automated_behavior_notice',
+      indicator,
+      url: diagnostics.url || page.url(),
+      title: diagnostics.title || null,
+      text: diagnostics.text || bodyText,
+      screenshotPath: debug?.path || null,
+      debugPath: debug?.path || null,
+      cUser: cUser || null,
     });
-    if (!clicked) {
-      return false;
+  } catch (error) {
+    if (error instanceof AutomationError) {
+      throw error;
     }
-
-    await sleep(500);
-    console.log(`[${label}] Dismissed automated behavior notice`);
-    return true;
-  } catch {
-    // Ignore prompt dismissal failures
+    // Ignore detector failures; later auth checks remain fail-closed.
   }
   return false;
 }
@@ -1493,8 +1496,7 @@ function isBadAuthUrl(url) {
 }
 
 function isTwoFactorUrl(url) {
-  const value = String(url || '').toLowerCase();
-  return value.includes('twofactor') || value.includes('checkpoint');
+  return isExplicitTwoFactorUrl(url);
 }
 
 function isAuthRelatedError(error) {
@@ -2212,8 +2214,12 @@ async function resolveTwoFactorChallenge(
     label = 'Automation',
     cUser = 'unknown',
     inputTimeoutMs = 25000,
+    metaInboxTarget = null,
+    targetInboxUrl = null,
   } = {}
 ) {
+  const target = normalizeMetaInboxTarget(metaInboxTarget || { targetInboxUrl });
+  const inboxUrl = target?.inboxUrl || INBOX_URL;
   const challengeDetected = await hasTwoFactorChallenge(page);
   if (!challengeDetected) return false;
 
@@ -2246,7 +2252,7 @@ async function resolveTwoFactorChallenge(
 
   if (!isTwoFactorUrl(page.url())) {
     if (!page.url().includes('business.facebook.com') || (!page.url().includes('inbox') && !page.url().includes('messages'))) {
-      await page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
+      await page.goto(inboxUrl, { waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
       await sleep(800);
     }
     console.log(`[${label}] ✓ Two-factor challenge resolved`);
@@ -2275,7 +2281,7 @@ async function resolveTwoFactorChallenge(
 
   if (!isTwoFactorUrl(page.url())) {
     if (!page.url().includes('business.facebook.com') || (!page.url().includes('inbox') && !page.url().includes('messages'))) {
-      await page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
+      await page.goto(inboxUrl, { waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
       await sleep(800);
     }
     console.log(`[${label}] ✓ Two-factor challenge resolved`);
@@ -2313,7 +2319,7 @@ async function resolveTwoFactorChallenge(
 
   if (input === 'resolved') {
     if (!page.url().includes('business.facebook.com') || (!page.url().includes('inbox') && !page.url().includes('messages'))) {
-      await page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
+      await page.goto(inboxUrl, { waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
       await sleep(800);
     }
     console.log(`[${label}] ✓ Two-factor challenge resolved`);
@@ -2322,7 +2328,7 @@ async function resolveTwoFactorChallenge(
 
   if (input === 'captcha') {
     await resolveCaptchaCheckpointIfPresent(page, label, cUser);
-    return resolveTwoFactorChallenge(page, { twofaSecret, label, cUser, inputTimeoutMs });
+    return resolveTwoFactorChallenge(page, { twofaSecret, label, cUser, inputTimeoutMs, metaInboxTarget: target });
   }
 
   if (input === 'restricted') {
@@ -2410,7 +2416,7 @@ async function resolveTwoFactorChallenge(
   }
 
   if (!page.url().includes('business.facebook.com') || (!page.url().includes('inbox') && !page.url().includes('messages'))) {
-    await page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
+    await page.goto(inboxUrl, { waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
     await sleep(800);
   }
 
@@ -2459,14 +2465,18 @@ async function ensureOnInbox(page, label = 'Automation', {
   twofaSecret = null,
   cUser = 'unknown',
   reloadTimeoutMs = RELOAD_TIMEOUT_MS,
+  metaInboxTarget = null,
+  targetInboxUrl = null,
 } = {}) {
   const effectiveReloadTimeoutMs = positiveMs(reloadTimeoutMs, RELOAD_TIMEOUT_MS);
+  const target = normalizeMetaInboxTarget(metaInboxTarget || { targetInboxUrl });
+  const inboxUrl = target?.inboxUrl || INBOX_URL;
   await dismissSaveLoginInfo(page, label);
-  await dismissAutomatedBehaviorNotice(page, label);
+  await throwIfAutomatedBehaviorNotice(page, label, cUser);
 
   let url = page.url();
   if (isBadAuthUrl(url)) {
-    const resolved = await resolveTwoFactorChallenge(page, { twofaSecret, label, cUser });
+    const resolved = await resolveTwoFactorChallenge(page, { twofaSecret, label, cUser, metaInboxTarget: target });
     if (!resolved) {
       throw new AutomationError(
         `${label}: Redirected to auth/checkpoint URL: ${url}`,
@@ -2478,15 +2488,16 @@ async function ensureOnInbox(page, label = 'Automation', {
   const isBusiness = url.includes('business.facebook.com');
   const isInbox = url.includes('inbox');
   const isMessages = url.includes('messages');
-  if (!isBusiness || (!isInbox && !isMessages)) {
+  const targetMismatch = target && !metaInboxTargetMatchesUrl(target, url);
+  if (!isBusiness || (!isInbox && !isMessages) || targetMismatch) {
     try {
-      await page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: effectiveReloadTimeoutMs });
+      await page.goto(inboxUrl, { waitUntil: 'domcontentloaded', timeout: effectiveReloadTimeoutMs });
     } catch (error) {
       throw new AutomationError(`${label}: Unexpected URL after reload: ${url}`, { url });
     }
     let nextUrl = page.url();
     if (isBadAuthUrl(nextUrl)) {
-      const resolved = await resolveTwoFactorChallenge(page, { twofaSecret, label, cUser });
+      const resolved = await resolveTwoFactorChallenge(page, { twofaSecret, label, cUser, metaInboxTarget: target });
       if (!resolved) {
         throw new AutomationError(
           `${label}: Redirected to auth/checkpoint URL: ${nextUrl}`,
@@ -2495,18 +2506,17 @@ async function ensureOnInbox(page, label = 'Automation', {
       }
       nextUrl = page.url();
     }
-    const dismissedAutomatedBehavior = await dismissAutomatedBehaviorNotice(page, label);
-    if (dismissedAutomatedBehavior && !nextUrl.includes('business.facebook.com')) {
-      await page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: effectiveReloadTimeoutMs });
-      await sleep(800);
-      nextUrl = page.url();
-    }
-    if (!nextUrl.includes('business.facebook.com') || (!nextUrl.includes('inbox') && !nextUrl.includes('messages'))) {
+    await throwIfAutomatedBehaviorNotice(page, label, cUser);
+    if (
+      !nextUrl.includes('business.facebook.com') ||
+      (!nextUrl.includes('inbox') && !nextUrl.includes('messages')) ||
+      (target && !metaInboxTargetMatchesUrl(target, nextUrl))
+    ) {
       throw new AutomationError(`${label}: Unexpected URL after reload: ${nextUrl}`, { url: nextUrl });
     }
   }
   await dismissSaveLoginInfo(page, label);
-  await dismissAutomatedBehaviorNotice(page, label);
+  await throwIfAutomatedBehaviorNotice(page, label, cUser);
   await dismissInboxBlockingPrompts(page, label);
   await detectAccountRestricted(page, label, cUser);
   const needNewCookiesDetails = await getNeedNewCookiesDetailsIfPresent(page, label, { cUser });
@@ -4109,6 +4119,8 @@ export async function sendMessage(
     useReplyFlow = true,
     includeSuccessScreenshot = false,
     requestId = null,
+    metaInboxTarget = null,
+    targetInboxUrl = null,
   }
 ) {
   if (!extension || !phoneNumber || !message) {
@@ -4116,6 +4128,7 @@ export async function sendMessage(
   }
 
   const normalizedRequestId = normalizeRequestId(sessionId, requestId);
+  const target = normalizeMetaInboxTarget(metaInboxTarget || { targetInboxUrl });
   const steps = [];
   const logStep = (label, extra = {}) => {
     steps.push({ at: new Date().toISOString(), label, ...extra });
@@ -4147,14 +4160,14 @@ export async function sendMessage(
     try {
       await page.reload({ waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
       await sleep(2000); // Wait for page to fully load
-      await ensureInboxReady(page, 'Send', { twofaSecret });
+      await ensureInboxReady(page, 'Send', { twofaSecret, cUser, metaInboxTarget: target });
       console.log('[Automation] ✓ Page refreshed');
       logStep('send:refresh_ok', { label });
     } catch (error) {
       console.warn(`[Automation] Refresh failed: ${error.message}. Retrying...`);
       await page.reload({ waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
       await sleep(2000);
-      await ensureInboxReady(page, 'Send', { twofaSecret });
+      await ensureInboxReady(page, 'Send', { twofaSecret, cUser, metaInboxTarget: target });
       console.log('[Automation] ✓ Page refreshed (retry)');
       logStep('send:refresh_retry_ok', { label });
     }
@@ -4206,7 +4219,7 @@ export async function sendMessage(
         if (forceInitialRefresh) {
           await refreshForSend('idle');
         } else {
-          await ensureInboxReady(page, 'Send', { twofaSecret });
+          await ensureInboxReady(page, 'Send', { twofaSecret, cUser, metaInboxTarget: target });
           logStep('send:ensure_ready');
         }
       } else if (attempt === 3) {
@@ -4321,6 +4334,8 @@ export async function sendMediaMessage(
     includeSuccessScreenshot = false,
     requestId = null,
     dryRunUpload = false,
+    metaInboxTarget = null,
+    targetInboxUrl = null,
   }
 ) {
   if (!extension || !phoneNumber) {
@@ -4331,6 +4346,7 @@ export async function sendMediaMessage(
   }
 
   const normalizedRequestId = normalizeRequestId(sessionId, requestId);
+  const target = normalizeMetaInboxTarget(metaInboxTarget || { targetInboxUrl });
   const steps = [];
   const logStep = (label, extra = {}) => {
     steps.push({ at: new Date().toISOString(), label, ...extra });
@@ -4343,7 +4359,7 @@ export async function sendMediaMessage(
     console.log(`[Automation] Refreshing page before media send${label ? ` (${label})` : ''}...`);
     await page.reload({ waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
     await sleep(2000);
-    await ensureInboxReady(page, 'SendMedia', { twofaSecret });
+    await ensureInboxReady(page, 'SendMedia', { twofaSecret, cUser, metaInboxTarget: target });
     logStep('send_media:refresh_ok', { label });
   };
 
@@ -4406,7 +4422,7 @@ export async function sendMediaMessage(
           if (forceInitialRefresh) {
             await refreshForSend('idle');
           } else {
-            await ensureInboxReady(page, 'SendMedia', { twofaSecret });
+            await ensureInboxReady(page, 'SendMedia', { twofaSecret, cUser, metaInboxTarget: target });
             logStep('send_media:ensure_ready');
           }
         } else {
@@ -4499,6 +4515,8 @@ export async function checkSessionFlow(
     inboxIndicatorTimeoutMs = 10000,
     requireWhatsappInboxContext = true,
     whatsappContextTimeoutMs = 8000,
+    metaInboxTarget = null,
+    targetInboxUrl = null,
   } = {}
 ) {
   console.log('[Automation] ========================================');
@@ -4520,6 +4538,7 @@ export async function checkSessionFlow(
   const effectiveReloadTimeoutMs = positiveMs(reloadTimeoutMs, RELOAD_TIMEOUT_MS);
   const effectiveSpinnerTimeoutMs = positiveMs(spinnerTimeoutMs, SPINNER_TIMEOUT_MS);
   const effectiveInboxIndicatorTimeoutMs = positiveMs(inboxIndicatorTimeoutMs, 10000);
+  const target = normalizeMetaInboxTarget(metaInboxTarget || { targetInboxUrl });
   const shouldRetry = (error) =>
     error instanceof AutomationError && !isAuthRelatedError(error);
 
@@ -4539,6 +4558,7 @@ export async function checkSessionFlow(
       await ensureInboxReady(page, 'Check', {
         twofaSecret,
         cUser,
+        metaInboxTarget: target,
         reloadTimeoutMs: effectiveReloadTimeoutMs,
         spinnerTimeoutMs: effectiveSpinnerTimeoutMs,
       });
@@ -4558,6 +4578,7 @@ export async function checkSessionFlow(
       await ensureInboxReady(page, 'Check', {
         twofaSecret,
         cUser,
+        metaInboxTarget: target,
         reloadTimeoutMs: effectiveReloadTimeoutMs,
         spinnerTimeoutMs: effectiveSpinnerTimeoutMs,
       });
@@ -4624,6 +4645,7 @@ export async function checkSessionFlow(
         await ensureInboxReady(page, 'Check', {
           twofaSecret,
           cUser,
+          metaInboxTarget: target,
           reloadTimeoutMs: effectiveReloadTimeoutMs,
           spinnerTimeoutMs: effectiveSpinnerTimeoutMs,
         });

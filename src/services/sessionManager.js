@@ -5,7 +5,8 @@
 import { v4 as uuidv4 } from 'uuid';
 import { createBrowser } from './browserFactory.js';
 import { normalizeCookiesInput, parseCookieString, toPlaywrightCookies, toPlaywrightCookiesFromJson } from '../utils/cookies.js';
-import { sendMessage, sendMediaMessage, checkSessionFlow, captureDebugScreenshot, detectNeedNewCookiesPage, dismissAutomatedBehaviorNotice, resolveTwoFactorIfNeeded } from './automation.js';
+import { sendMessage, sendMediaMessage, checkSessionFlow, captureDebugScreenshot, detectNeedNewCookiesPage, throwIfAutomatedBehaviorNotice, resolveTwoFactorIfNeeded } from './automation.js';
+import { DEFAULT_META_INBOX_URL, normalizeMetaInboxTarget } from '../utils/metaInboxTarget.js';
 import { SessionNotFoundError, InvalidInputError, BrowserCrashError, FlowTimeoutError, AutomationError } from '../errors.js';
 import { config } from '../config.js';
 import { sessionStore } from './sessionStore.js';
@@ -18,7 +19,7 @@ import { promisify } from 'util';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const INBOX_URL = 'https://business.facebook.com/latest/inbox';
+const INBOX_URL = DEFAULT_META_INBOX_URL;
 const FACEBOOK_HOME_URL = 'https://www.facebook.com/';
 const PROXY_IP_CHECK_URL = 'https://api.ipify.org?format=json';
 const PROXY_IP_CHECK_TIMEOUT = 15000;
@@ -189,9 +190,9 @@ async function closeBrowserArtifacts(sessionId, { page = null, context = null, b
   };
 }
 
-async function summarizeContextCookies(context) {
+async function summarizeContextCookies(context, inboxUrl = INBOX_URL) {
   try {
-    const cookies = await context.cookies([FACEBOOK_HOME_URL, INBOX_URL]);
+    const cookies = await context.cookies([FACEBOOK_HOME_URL, inboxUrl]);
     const names = Array.from(new Set(cookies.map((cookie) => cookie?.name).filter(Boolean))).sort();
     return {
       count: cookies.length,
@@ -204,6 +205,29 @@ async function summarizeContextCookies(context) {
       error: error?.message || String(error),
     };
   }
+}
+
+function resolveMetaInboxTarget(...sources) {
+  for (const source of sources) {
+    let target = null;
+    try {
+      target = normalizeMetaInboxTarget(source || {});
+    } catch (error) {
+      throw new InvalidInputError(error?.message || 'Invalid Meta inbox target');
+    }
+    if (target) return target;
+  }
+  return null;
+}
+
+function applySessionMetaInboxTarget(sessionId, target) {
+  if (!target) return null;
+  const session = sessions.get(sessionId);
+  if (session) {
+    session.metaInboxTarget = target;
+  }
+  sessionStore.updateMetaInboxTarget(sessionId, target);
+  return target;
 }
 
 // In-memory session registry
@@ -884,6 +908,15 @@ function isCaptchaRequiredError(error) {
   return error instanceof AutomationError && String(error?.details?.type || '').toLowerCase() === 'captcha_required';
 }
 
+function isAutomatedBehaviorCheckpointError(error) {
+  return error instanceof AutomationError &&
+    String(error?.details?.type || '').toLowerCase() === 'automated_behavior_checkpoint';
+}
+
+function isManualActionRequiredError(error) {
+  return isCaptchaRequiredError(error) || isAutomatedBehaviorCheckpointError(error);
+}
+
 function isAccountRestrictedError(error) {
   return error instanceof AutomationError && String(error?.details?.type || '').toLowerCase() === 'account_restricted';
 }
@@ -1142,7 +1175,7 @@ async function runRecoverableSessionFlow({
   try {
     return await initialTask();
   } catch (error) {
-    if (isCaptchaRequiredError(error)) {
+    if (isManualActionRequiredError(error)) {
       markSessionNeedsManualAction(sessionId, error, manualActionFlow);
       throw error;
     }
@@ -1184,7 +1217,7 @@ async function runRecoverableSessionFlow({
         };
       } catch (retryError) {
         lastError = retryError;
-        if (isCaptchaRequiredError(retryError)) {
+        if (isManualActionRequiredError(retryError)) {
           markSessionNeedsManualAction(sessionId, retryError, `${manualActionFlow}_retry`);
           throw retryError;
         }
@@ -1300,25 +1333,46 @@ function settleSessionAfterFlow(sessionId) {
   setIdleTimer(sessionId, effectiveTimeoutMs);
 }
 
+function throwIfSessionNeedsManualAction(sessionId, flow = 'unknown') {
+  const loaded = sessions.get(sessionId);
+  const stored = sessionStore.getBySessionId(sessionId);
+  const status = loaded?.status || stored?.status;
+  if (status !== 'needs_manual_action') return;
+
+  const reason = loaded?.manualAction?.type ||
+    String(stored?.queueBlockReason || '').replace(/^manual_action:/, '') ||
+    'manual_action_required';
+  throw new AutomationError(`Session ${sessionId}: Manual action required`, {
+    type: reason,
+    flow,
+    cachedManualAction: true,
+    sessionId,
+  });
+}
+
 function markSessionNeedsManualAction(sessionId, error, flow = 'unknown') {
   const session = sessions.get(sessionId);
-  if (!session) return;
-  clearSessionTimers(session);
   const manualActionType = String(error?.details?.type || 'manual_action_required');
   const manualActionMessage = error?.message || 'Manual action required';
-  session.status = 'needs_manual_action';
-  session.lastActivity = Date.now();
-  session.manualAction = {
+  const detectedAt = Date.now();
+  const manualAction = {
     type: manualActionType,
     flow,
-    detectedAt: new Date().toISOString(),
+    detectedAt: new Date(detectedAt).toISOString(),
     details: {
       ...(error?.details || {}),
       flow,
     },
     message: manualActionMessage,
   };
-  sessionStore.updateStatus(sessionId, 'needs_manual_action', session.lastActivity);
+  if (session) {
+    clearSessionTimers(session);
+    session.status = 'needs_manual_action';
+    session.lastActivity = detectedAt;
+    session.manualAction = manualAction;
+  }
+  sessionStore.updateStatus(sessionId, 'needs_manual_action', detectedAt);
+  blockSessionForQueuedWork(sessionId, `manual_action:${manualActionType}`);
   const queuedMessageJobs = sessionStore.failQueuedMessageJobsForSession(
     sessionId,
     manualActionMessage,
@@ -1351,11 +1405,21 @@ function markSessionNeedsManualAction(sessionId, error, flow = 'unknown') {
   logStep('session:manual_action_required', {
     sessionId,
     flow,
-    type: session.manualAction.type,
-    message: session.manualAction.message,
+    type: manualAction.type,
+    message: manualAction.message,
     cancelledJobs: queuedMessageJobs,
     cancelledSessionFlowJobs: queuedSessionFlowJobs,
   });
+
+  if (session && manualActionType === 'automated_behavior_checkpoint') {
+    void closeSessionRuntime(sessionId, { nextStatus: 'needs_manual_action', suspendedAt: detectedAt })
+      .catch((closeError) => {
+        console.warn(
+          `[SessionManager] automated behavior runtime close failed ${sessionId}:`,
+          closeError?.message || String(closeError)
+        );
+      });
+  }
 }
 
 async function suspendSession(sessionId) {
@@ -1450,17 +1514,40 @@ export function listQueuedWorkSessionBlocks(now = Date.now()) {
   }));
 }
 
+export function updateSessionMetaInboxTarget(sessionId, source = {}) {
+  const target = resolveMetaInboxTarget(source?.metaInboxTarget, source?.context, source);
+  if (!target) return null;
+  applySessionMetaInboxTarget(sessionId, target);
+  return target;
+}
+
+async function createSessionForRestore(cookies, sessionId, fingerprint, proxy, options = {}) {
+  try {
+    return await createSession(cookies, sessionId, fingerprint, proxy, options);
+  } catch (error) {
+    if (isManualActionRequiredError(error)) {
+      markSessionNeedsManualAction(sessionId, error, 'restore_session');
+    }
+    throw error;
+  }
+}
+
 async function ensureSessionActive(sessionId, options = {}) {
+  throwIfSessionNeedsManualAction(sessionId, 'restore_cached');
+  const incomingTarget = resolveMetaInboxTarget(options?.metaInboxTarget, options?.context);
   let session = sessions.get(sessionId);
   if (session) {
     hydrateStoredRestrictedState(sessionId, session);
+    if (incomingTarget) {
+      applySessionMetaInboxTarget(sessionId, incomingTarget);
+    }
   }
   if (!session) {
     const stored = sessionStore.getBySessionId(sessionId);
     if (!stored) {
       throw new SessionNotFoundError(sessionId);
     }
-    await createSession(
+    await createSessionForRestore(
       stored.cookies,
       sessionId,
       stored.fingerprint,
@@ -1469,6 +1556,7 @@ async function ensureSessionActive(sessionId, options = {}) {
         skipCUserCheck: true,
         cUserOverride: stored.cUser,
         twofaSecret: stored.twofaSecret || null,
+        metaInboxTarget: incomingTarget || stored.metaInboxTarget || null,
         browserPoolOptions: options?.browserPoolOptions || {},
       }
     );
@@ -1485,7 +1573,7 @@ async function ensureSessionActive(sessionId, options = {}) {
   }
 
   const cookiePayload = session.cookieString || session.cookieJson;
-  await createSession(
+  await createSessionForRestore(
     cookiePayload,
     sessionId,
     session.fingerprint,
@@ -1494,6 +1582,7 @@ async function ensureSessionActive(sessionId, options = {}) {
       skipCUserCheck: true,
       cUserOverride: session.cUser,
       twofaSecret: session.twofaSecret || null,
+      metaInboxTarget: incomingTarget || session.metaInboxTarget || null,
       browserPoolOptions: options?.browserPoolOptions || {},
     }
   );
@@ -1756,10 +1845,19 @@ export async function createSession(
     // Use existing sessionId if provided (for recreation), otherwise generate new one
     const sessionId = existingSessionId || uuidv4();
     const cachedRestriction = existingSessionId ? getCachedRestrictedManualAction(sessionId) : null;
+    const storedSession = existingSessionId ? sessionStore.getBySessionId(sessionId) : null;
     const stored = sessionStore.getByCUser(finalCUser);
-    const storedFingerprint = stored ? stored.fingerprint : sessionStore.getFingerprint(finalCUser);
+    const storedFingerprint = existingSessionId && storedSession?.fingerprint
+      ? storedSession.fingerprint
+      : (stored ? stored.fingerprint : sessionStore.getFingerprint(finalCUser));
     const fingerprintToUse = existingFingerprint || storedFingerprint || null;
     const existingSession = existingSessionId ? sessions.get(sessionId) : null;
+    const metaInboxTarget = resolveMetaInboxTarget(
+      options?.metaInboxTarget,
+      options?.context,
+      existingSession?.metaInboxTarget,
+      storedSession?.metaInboxTarget
+    );
     const browserReservationKey = `session:${sessionId}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
     const needsBrowserReservation = !hasLiveBrowser(existingSession);
     let browserSlotReserved = false;
@@ -1828,7 +1926,7 @@ export async function createSession(
       }
       await applyResolutionCookies(context, browserInstance.fingerprint?.viewport);
       logStep('createSession:cookies:applied', { sessionId, cUser: finalCUser, format: normalized.format });
-      const cookieSummary = await summarizeContextCookies(context);
+      const cookieSummary = await summarizeContextCookies(context, metaInboxTarget?.inboxUrl || INBOX_URL);
       logStep('createSession:cookies:verified', {
         sessionId,
         cUser: finalCUser,
@@ -1847,12 +1945,12 @@ export async function createSession(
       await page.waitForTimeout(500);
 
       // Navigate to inbox
-      console.log(`[SessionManager] Navigating to ${INBOX_URL}...`);
+      console.log(`[SessionManager] Navigating to ${metaInboxTarget?.inboxUrl || INBOX_URL}...`);
       await withRetry(
-        () => page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }),
+        () => page.goto(metaInboxTarget?.inboxUrl || INBOX_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }),
         { retries: 2, delayMs: 1000 }
       );
-      logStep('createSession:navigate:done', { sessionId, cUser: finalCUser });
+      logStep('createSession:navigate:done', { sessionId, cUser: finalCUser, metaInboxTarget });
       setProgress(finalCUser, 'create:navigate:done', { sessionId });
 
       // Verify we're on the right page
@@ -1873,12 +1971,13 @@ export async function createSession(
       let authCheck = null;
       for (let attempt = 1; attempt <= 3; attempt += 1) {
         await dismissSaveLoginInfo(page);
-        await dismissAutomatedBehaviorNotice(page, 'CreateSession');
+        await throwIfAutomatedBehaviorNotice(page, 'CreateSession', finalCUser);
         try {
           await resolveTwoFactorIfNeeded(page, {
             twofaSecret: normalizedTwofaSecret,
             label: 'CreateSession',
             cUser: finalCUser,
+            metaInboxTarget,
           });
         } catch (error) {
           if (isAccountRestrictedError(error) && sessionId) {
@@ -1895,8 +1994,11 @@ export async function createSession(
             await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 });
             await page.waitForTimeout(1500);
             await dismissSaveLoginInfo(page);
-            await dismissAutomatedBehaviorNotice(page, 'CreateSession');
+            await throwIfAutomatedBehaviorNotice(page, 'CreateSession', finalCUser);
           } catch (error) {
+            if (isManualActionRequiredError(error)) {
+              throw error;
+            }
             console.warn(`[SessionManager] Auth retry reload failed: ${error.message}`);
           }
         }
@@ -1994,6 +2096,7 @@ export async function createSession(
           : null,
         cUser: finalCUser,
         twofaSecret: normalizedTwofaSecret,
+        metaInboxTarget,
       };
       sessions.set(sessionId, sessionData);
       setIdleTimer(sessionId);
@@ -2006,6 +2109,7 @@ export async function createSession(
         fingerprint: browserInstance.fingerprint,
         proxy: proxyConfig,
         twofaSecret: normalizedTwofaSecret,
+        metaInboxTarget,
         status: sessionData.status,
         lastActivity: sessionData.lastActivity,
       });
@@ -2026,6 +2130,7 @@ export async function createSession(
         ipAddress,
         fingerprint: browserInstance.fingerprint,
         cUser: finalCUser,
+        metaInboxTarget,
       };
     } catch (error) {
       logStep('createSession:error', { sessionId, cUser: finalCUser, error: error?.message || error?.toString() });
@@ -2064,6 +2169,7 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
       : 2;
   const browserPoolLane = String(options?.browserPoolLane || '').trim().toLowerCase();
   const normalizedTwofaSecret = String(options?.twofaSecret || '').trim() || null;
+  const metaInboxTarget = resolveMetaInboxTarget(options?.metaInboxTarget, options?.context);
   const validationTimeoutMs =
     Number.isFinite(Number(options?.validateTimeoutMs)) && Number(options.validateTimeoutMs) > 0
       ? Number(options.validateTimeoutMs)
@@ -2144,18 +2250,19 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
     await applyResolutionCookies(context, browserInstance.fingerprint?.viewport);
 
     await withRetry(
-      () => page.goto(INBOX_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }),
+      () => page.goto(metaInboxTarget?.inboxUrl || INBOX_URL, { waitUntil: 'domcontentloaded', timeout: 60000 }),
       { retries: navigationRetries, delayMs: 1000 }
     );
     await page.waitForTimeout(1500);
     await dismissSaveLoginInfo(page);
-    await dismissAutomatedBehaviorNotice(page, 'ValidateCookies');
+    await throwIfAutomatedBehaviorNotice(page, 'ValidateCookies', cUser);
     try {
       await resolveTwoFactorIfNeeded(page, {
         twofaSecret: normalizedTwofaSecret,
         label: 'ValidateCookies',
         cUser,
         inputTimeoutMs: twofaInputTimeoutMs || undefined,
+        metaInboxTarget,
       });
     } catch (error) {
       throw new InvalidInputError(error.message, error?.details || null);
@@ -2216,6 +2323,7 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
         manualAction: null,
         cUser,
         twofaSecret: normalizedTwofaSecret,
+        metaInboxTarget,
       };
       sessions.set(tempSessionId, sessionData);
       setIdleTimer(tempSessionId);
@@ -2227,13 +2335,14 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
         fingerprint: browserInstance.fingerprint,
         proxy: proxy || null,
         twofaSecret: normalizedTwofaSecret,
+        metaInboxTarget,
         status: 'active',
         lastActivity: sessionData.lastActivity,
       });
       sessionPersisted = true;
-      logStep('validateCookies:persisted', { cUser, sessionId: tempSessionId });
+      logStep('validateCookies:persisted', { cUser, sessionId: tempSessionId, metaInboxTarget });
       setProgress(cUser, 'validate:done', { sessionId: tempSessionId });
-      return { ok: true, cUser, sessionId: tempSessionId, reused: false };
+      return { ok: true, cUser, sessionId: tempSessionId, reused: false, metaInboxTarget };
     }
     return { ok: true, cUser };
   };
@@ -2252,7 +2361,7 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
         'validate.debug_screenshot'
       );
     }
-    if (error instanceof InvalidInputError) {
+    if (error instanceof InvalidInputError || error instanceof AutomationError) {
       throw error;
     }
     if (error instanceof FlowTimeoutError) {
@@ -2336,6 +2445,7 @@ export async function updateSessionCookies(sessionId, cookieInput, options = {})
     const normalized = normalizeCookiesInput(cookieInput);
     const incomingTwofa = String(options?.twofaSecret || '').trim();
     const incomingProxy = normalizeProxyConfig(options?.proxy || null);
+    const incomingTarget = resolveMetaInboxTarget(options?.metaInboxTarget, options?.context);
     if (normalized.format === 'string') {
       if (!normalized.raw || !String(normalized.raw).trim()) {
         throw new InvalidInputError('Cookies are required');
@@ -2373,6 +2483,7 @@ export async function updateSessionCookies(sessionId, cookieInput, options = {})
           skipCUserCheck: true,
           cUserOverride: cUser,
           twofaSecret: incomingTwofa || stored.twofaSecret || null,
+          metaInboxTarget: incomingTarget || stored.metaInboxTarget || null,
         }
       );
       session = sessions.get(sessionId);
@@ -2381,6 +2492,10 @@ export async function updateSessionCookies(sessionId, cookieInput, options = {})
       throw new SessionNotFoundError(sessionId);
     }
     const stored = sessionStore.getBySessionId(sessionId);
+    const metaInboxTarget = incomingTarget || session.metaInboxTarget || stored?.metaInboxTarget || null;
+    if (metaInboxTarget) {
+      applySessionMetaInboxTarget(sessionId, metaInboxTarget);
+    }
     const previousCUser = session.cUser || stored?.cUser || null;
     const currentProxy = normalizeProxyConfig(session.proxy || stored?.proxy || null);
     if (previousCUser && previousCUser !== cUser) {
@@ -2404,6 +2519,7 @@ export async function updateSessionCookies(sessionId, cookieInput, options = {})
           skipCUserCheck: true,
           cUserOverride: cUser,
           twofaSecret: incomingTwofa || session.twofaSecret || stored?.twofaSecret || null,
+          metaInboxTarget,
         }
       );
       session = sessions.get(sessionId);
@@ -2462,6 +2578,7 @@ export async function updateSessionCookies(sessionId, cookieInput, options = {})
           twofaSecret,
           label: 'UpdateSessionCookies',
           cUser,
+          metaInboxTarget,
         });
       } catch (error) {
         if (isAccountRestrictedError(error)) {
@@ -2503,6 +2620,7 @@ export async function updateSessionCookies(sessionId, cookieInput, options = {})
           sessionId,
           cUser,
           twofaSecret,
+          metaInboxTarget,
         });
       } catch (error) {
         logStep('updateSessionCookies:check_failed', {
@@ -2556,6 +2674,7 @@ export async function updateSessionCookies(sessionId, cookieInput, options = {})
       fingerprint: session.fingerprint || stored?.fingerprint || null,
       proxy: incomingProxy || session.proxy || stored?.proxy || null,
       twofaSecret: twofaToStore || null,
+      metaInboxTarget,
       status: getEffectiveSessionStatus(session),
       lastActivity: session.lastActivity,
     });
@@ -2624,6 +2743,7 @@ export async function updateSessionProxy(sessionId, proxyInput) {
               skipCUserCheck: true,
               cUserOverride: cUser || null,
               twofaSecret,
+              metaInboxTarget: active?.metaInboxTarget || stored?.metaInboxTarget || null,
             }
           );
         } catch (error) {
@@ -2739,12 +2859,15 @@ export async function sendMessageForSession(
     includeSuccessScreenshot = false,
     requestId = null,
     priority = null,
+    context = null,
+    metaInboxTarget = null,
   }
 ) {
   const sendPriority = normalizeLockPriority(priority, useReplyFlow ? 'high' : 'normal');
+  const target = resolveMetaInboxTarget(metaInboxTarget, context);
   return withSessionLock(sessionId, async () => {
     throwIfSessionRestricted(sessionId, 'send_cached');
-    const session = await ensureSessionActive(sessionId);
+    const session = await ensureSessionActive(sessionId, { metaInboxTarget: target });
     const now = Date.now();
     const lastActivity = session.lastActivity || 0;
     const forceInitialRefresh =
@@ -2753,8 +2876,9 @@ export async function sendMessageForSession(
       now - lastActivity > config.sendReloadIdleMs;
 
     const executeSendFlow = async (label, forceRefresh) => {
-      const activeSession = await ensureSessionActive(sessionId);
+      const activeSession = await ensureSessionActive(sessionId, { metaInboxTarget: target });
       touchSession(sessionId);
+      const activeTarget = target || activeSession.metaInboxTarget || null;
       const result = await withTimeout(
         sendMessage(activeSession.page, {
           extension,
@@ -2767,6 +2891,7 @@ export async function sendMessageForSession(
           useReplyFlow,
           includeSuccessScreenshot,
           requestId,
+          metaInboxTarget: activeTarget,
         }),
         config.flowTimeoutMs,
         label
@@ -2801,12 +2926,15 @@ export async function sendMediaForSession(
     requestId = null,
     priority = null,
     dryRunUpload = false,
+    context = null,
+    metaInboxTarget = null,
   }
 ) {
   const sendPriority = normalizeLockPriority(priority, useReplyFlow ? 'high' : 'normal');
+  const target = resolveMetaInboxTarget(metaInboxTarget, context);
   return withSessionLock(sessionId, async () => {
     throwIfSessionRestricted(sessionId, 'send_media_cached');
-    const session = await ensureSessionActive(sessionId);
+    const session = await ensureSessionActive(sessionId, { metaInboxTarget: target });
     const now = Date.now();
     const lastActivity = session.lastActivity || 0;
     const forceInitialRefresh =
@@ -2815,8 +2943,9 @@ export async function sendMediaForSession(
       now - lastActivity > config.sendReloadIdleMs;
 
     const executeSendFlow = async (label, forceRefresh) => {
-      const activeSession = await ensureSessionActive(sessionId);
+      const activeSession = await ensureSessionActive(sessionId, { metaInboxTarget: target });
       touchSession(sessionId);
+      const activeTarget = target || activeSession.metaInboxTarget || null;
       const result = await withTimeout(
         sendMediaMessage(activeSession.page, {
           extension,
@@ -2831,6 +2960,7 @@ export async function sendMediaForSession(
           includeSuccessScreenshot,
           requestId,
           dryRunUpload,
+          metaInboxTarget: activeTarget,
         }),
         config.flowTimeoutMs,
         label
@@ -2864,18 +2994,22 @@ export async function checkSessionForSession(
     browserPoolOptions = {},
     skipInitialReload = false,
     checkOptions = {},
+    context = null,
+    metaInboxTarget = null,
   } = {}
 ) {
+  const target = resolveMetaInboxTarget(metaInboxTarget, context);
   return withSessionLock(sessionId, async () => {
     throwIfSessionRestricted(sessionId, 'check_cached');
-    await ensureSessionActive(sessionId, { browserPoolOptions });
+    await ensureSessionActive(sessionId, { browserPoolOptions, metaInboxTarget: target });
     const effectiveFlowTimeoutMs =
       Number.isFinite(Number(flowTimeoutMs)) && Number(flowTimeoutMs) > 0
         ? Number(flowTimeoutMs)
         : config.flowTimeoutMs;
     const executeCheckFlow = async (label) => {
-      const activeSession = await ensureSessionActive(sessionId, { browserPoolOptions });
+      const activeSession = await ensureSessionActive(sessionId, { browserPoolOptions, metaInboxTarget: target });
       touchSession(sessionId);
+      const activeTarget = target || activeSession.metaInboxTarget || null;
       const result = await withTimeout(
         checkSessionFlow(activeSession.page, {
           sessionId,
@@ -2883,6 +3017,7 @@ export async function checkSessionForSession(
           twofaSecret: activeSession.twofaSecret || null,
           requestId,
           skipInitialReload,
+          metaInboxTarget: activeTarget,
           maxAttempts:
             Number.isFinite(Number(flowMaxAttempts)) && Number(flowMaxAttempts) > 0
               ? Number(flowMaxAttempts)
@@ -2961,7 +3096,33 @@ export function getSessionInfo(sessionId) {
         cUser: stored.cUser || null,
         status: 'restricted',
         liveBrowser: false,
+        metaInboxTarget: stored.metaInboxTarget || null,
         manualAction,
+      };
+    }
+    if (stored.status === 'needs_manual_action') {
+      const manualActionType = String(stored.queueBlockReason || '').replace(/^manual_action:/, '') ||
+        'manual_action_required';
+      return {
+        sessionId,
+        createdAt: stored.createdAt,
+        lastActivity: stored.lastActivity,
+        suspendedAt: stored.updatedAt || null,
+        ipAddress: null,
+        cUser: stored.cUser || null,
+        status: 'needs_manual_action',
+        liveBrowser: false,
+        metaInboxTarget: stored.metaInboxTarget || null,
+        manualAction: {
+          type: manualActionType,
+          flow: 'manual_action_cache',
+          detectedAt: new Date(stored.updatedAt || Date.now()).toISOString(),
+          details: {
+            type: manualActionType,
+            cachedManualAction: true,
+          },
+          message: 'Manual action required',
+        },
       };
     }
     return null;
@@ -2976,6 +3137,7 @@ export function getSessionInfo(sessionId) {
     cUser: session.cUser || null,
     status: getEffectiveSessionStatus(session),
     liveBrowser: hasLiveBrowser(session),
+    metaInboxTarget: session.metaInboxTarget || null,
     manualAction: session.manualAction || null,
   };
 }
@@ -3020,7 +3182,8 @@ export async function restoreSessionFromStore(sessionId) {
       sessionId,
     });
   }
-  return createSession(
+  throwIfSessionNeedsManualAction(sessionId, 'restore_cached');
+  return createSessionForRestore(
     stored.cookies,
     sessionId,
     stored.fingerprint,
@@ -3029,6 +3192,7 @@ export async function restoreSessionFromStore(sessionId) {
       skipCUserCheck: true,
       cUserOverride: stored.cUser,
       twofaSecret: stored.twofaSecret || null,
+      metaInboxTarget: stored.metaInboxTarget || null,
     }
   );
 }
@@ -3060,6 +3224,7 @@ async function saveSessionMetadata(sessionId, sessionData, cookieString, proxy =
       fingerprint: sessionData.fingerprint, // Save the fingerprint for recreation
       proxy: proxy || null, // Save proxy config if provided
       twofaSecret: twofaSecret || sessionData.twofaSecret || null,
+      metaInboxTarget: sessionData.metaInboxTarget || null,
     };
 
     await fs.writeFile(SESSIONS_FILE, JSON.stringify(metadata, null, 2));
@@ -3131,7 +3296,7 @@ async function recreateSession(metadata) {
       metadata.sessionId,
       metadata.fingerprint,
       proxyConfig,
-      { twofaSecret: metadata.twofaSecret || null }
+      { twofaSecret: metadata.twofaSecret || null, metaInboxTarget: metadata.metaInboxTarget || null }
     );
     
     console.log(`[SessionManager] ✓ Successfully recreated session ${result.sessionId}`);

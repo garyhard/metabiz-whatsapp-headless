@@ -359,6 +359,8 @@ function buildErrorResult(error, fallbackMessage) {
   if (!errorCode) {
     if (type === 'account_restricted' || message.toLowerCase().includes('account restricted')) {
       errorCode = 'account_restricted';
+    } else if (type === 'automated_behavior_checkpoint') {
+      errorCode = 'automated_behavior_checkpoint';
     } else if (type === 'captcha_required' || message.toLowerCase().includes('captcha checkpoint')) {
       errorCode = 'captcha_required';
     } else if (type === 'need_new_cookies' || message.toLowerCase().includes('need new cookies')) {
@@ -377,7 +379,12 @@ function buildErrorResult(error, fallbackMessage) {
 
 function isRetryableMessageJobError(errorResult) {
   const code = String(errorResult?.errorCode || '').toLowerCase();
-  return !['account_restricted', 'need_new_cookies', 'captcha_required'].includes(code);
+  return ![
+    'account_restricted',
+    'automated_behavior_checkpoint',
+    'need_new_cookies',
+    'captcha_required',
+  ].includes(code);
 }
 
 async function processJob(job) {

@@ -11,6 +11,7 @@ import {
   sendMediaForSession,
   sendMessageForSession,
   restoreSessionFromStore,
+  updateSessionMetaInboxTarget,
 } from '../services/sessionManager.js';
 import { enqueueMessageJob, getMessageJob, getMessageQueueWorkerStatus } from '../services/messageQueue.js';
 import { getSessionFlowQueueWorkerStatus } from '../services/sessionFlowQueue.js';
@@ -388,7 +389,7 @@ router.post('/jobs/cancel', async (req, res) => {
  */
 router.post('/:sessionId/send-message', async (req, res, next) => {
   const { sessionId } = req.params;
-  const { extension, phoneNumber, message, includeSuccessScreenshot, requestId, async } = req.body || {};
+  const { extension, phoneNumber, message, includeSuccessScreenshot, requestId, async, context } = req.body || {};
   const normalizedRequestId = normalizeRequestId(sessionId, requestId);
   const normalizedPriority = 'high';
   try {
@@ -410,6 +411,7 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
     }
 
     const asyncMode = toBoolean(req.query?.async) || toBoolean(async);
+    const metaInboxTarget = updateSessionMetaInboxTarget(sessionId, { context });
     if (asyncMode) {
       const { job, created } = enqueueMessageJob({
         requestId: normalizedRequestId,
@@ -437,6 +439,8 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
       includeSuccessScreenshot: includeSuccessScreenshot === true,
       requestId: normalizedRequestId,
       priority: normalizedPriority,
+      context,
+      metaInboxTarget,
     });
     const screenshotDataUrl = await buildScreenshotDataUrl(result?.screenshot || null);
 
@@ -460,6 +464,7 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
           includeSuccessScreenshot: includeSuccessScreenshot === true,
           requestId: normalizedRequestId,
           priority: normalizedPriority,
+          context,
         });
         const screenshotDataUrl = await buildScreenshotDataUrl(result?.screenshot || null);
         return res.json({
@@ -512,7 +517,7 @@ router.post('/:sessionId/send-message', async (req, res, next) => {
  */
 router.post('/:sessionId/send-media', async (req, res, next) => {
   const { sessionId } = req.params;
-  const { extension, phoneNumber, message = '', media, includeSuccessScreenshot, requestId, async, dryRunUpload } = req.body || {};
+  const { extension, phoneNumber, message = '', media, includeSuccessScreenshot, requestId, async, dryRunUpload, context } = req.body || {};
   const normalizedRequestId = normalizeRequestId(sessionId, requestId);
   const normalizedPriority = 'high';
   try {
@@ -544,6 +549,7 @@ router.post('/:sessionId/send-media', async (req, res, next) => {
     }
 
     const asyncMode = toBoolean(req.query?.async) || toBoolean(async);
+    const metaInboxTarget = updateSessionMetaInboxTarget(sessionId, { context });
     if (asyncMode) {
       const { job, created } = enqueueMessageJob({
         requestId: normalizedRequestId,
@@ -575,6 +581,8 @@ router.post('/:sessionId/send-media', async (req, res, next) => {
       requestId: normalizedRequestId,
       priority: normalizedPriority,
       dryRunUpload: normalizedMedia.media.dryRunUpload === true,
+      context,
+      metaInboxTarget,
     });
     const screenshotDataUrl = await buildScreenshotDataUrl(result?.screenshot || null);
 
@@ -608,6 +616,7 @@ router.post('/:sessionId/send-media', async (req, res, next) => {
           requestId: normalizedRequestId,
           priority: normalizedPriority,
           dryRunUpload: normalizedMedia.media.dryRunUpload === true,
+          context,
         });
         const screenshotDataUrl = await buildScreenshotDataUrl(result?.screenshot || null);
         return res.json({
@@ -661,7 +670,7 @@ router.post('/:sessionId/send-media', async (req, res, next) => {
  */
 router.post('/:sessionId/send-message-blast', async (req, res, next) => {
   const { sessionId } = req.params;
-  const { extension, phoneNumber, message, includeSuccessScreenshot, requestId, metaBlastMessageId, async } = req.body || {};
+  const { extension, phoneNumber, message, includeSuccessScreenshot, requestId, metaBlastMessageId, async, context } = req.body || {};
   const normalizedRequestId = normalizeRequestId(sessionId, requestId);
   const normalizedPriority = 'normal';
   try {
@@ -682,6 +691,7 @@ router.post('/:sessionId/send-message-blast', async (req, res, next) => {
     }
 
     const asyncMode = toBoolean(req.query?.async) || toBoolean(async);
+    const metaInboxTarget = updateSessionMetaInboxTarget(sessionId, { context });
     if (asyncMode) {
       const { job, created } = enqueueMessageJob({
         requestId: normalizedRequestId,
@@ -710,6 +720,8 @@ router.post('/:sessionId/send-message-blast', async (req, res, next) => {
       includeSuccessScreenshot: includeSuccessScreenshot === true,
       requestId: normalizedRequestId,
       priority: normalizedPriority,
+      context,
+      metaInboxTarget,
     });
     const screenshotDataUrl = await buildScreenshotDataUrl(result?.screenshot || null);
 
@@ -733,6 +745,7 @@ router.post('/:sessionId/send-message-blast', async (req, res, next) => {
           includeSuccessScreenshot: includeSuccessScreenshot === true,
           requestId: normalizedRequestId,
           priority: normalizedPriority,
+          context,
         });
         const screenshotDataUrl = await buildScreenshotDataUrl(result?.screenshot || null);
         return res.json({

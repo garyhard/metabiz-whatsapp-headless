@@ -121,6 +121,7 @@ db.exec(`
     queue_blocked_until INTEGER,
     queue_block_reason TEXT,
     queue_blocked_at INTEGER,
+    meta_inbox_target_json TEXT,
     last_activity INTEGER,
     created_at INTEGER,
     updated_at INTEGER
@@ -296,6 +297,12 @@ try {
 
 try {
   db.exec('ALTER TABLE sessions ADD COLUMN queue_blocked_at INTEGER');
+} catch {
+  // Column already exists.
+}
+
+try {
+  db.exec('ALTER TABLE sessions ADD COLUMN meta_inbox_target_json TEXT');
 } catch {
   // Column already exists.
 }
@@ -571,6 +578,7 @@ function migrateSessionsTableDropCUserUnique() {
         queue_blocked_until INTEGER,
         queue_block_reason TEXT,
         queue_blocked_at INTEGER,
+        meta_inbox_target_json TEXT,
         last_activity INTEGER,
         created_at INTEGER,
         updated_at INTEGER
@@ -578,11 +586,13 @@ function migrateSessionsTableDropCUserUnique() {
       INSERT INTO sessions_new (
         session_id, c_user, cookie_format, cookies, fingerprint, proxy, twofa_secret, status,
         restricted, restriction_details_json, restriction_detected_at, queue_blocked_until, queue_block_reason, queue_blocked_at,
+        meta_inbox_target_json,
         last_activity, created_at, updated_at
       )
       SELECT
         session_id, c_user, cookie_format, cookies, fingerprint, proxy, twofa_secret, status,
         0, NULL, NULL, NULL, NULL, NULL,
+        meta_inbox_target_json,
         last_activity, created_at, updated_at
       FROM sessions;
       DROP TABLE sessions;
@@ -1076,6 +1086,7 @@ function normalizeRow(row) {
     queueBlockedUntil: row.queue_blocked_until ? Number(row.queue_blocked_until) : null,
     queueBlockReason: row.queue_block_reason || null,
     queueBlockedAt: row.queue_blocked_at ? Number(row.queue_blocked_at) : null,
+    metaInboxTarget: deserializeSafe(row.meta_inbox_target_json),
     lastActivity: row.last_activity,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -1309,15 +1320,16 @@ export const sessionStore = {
     fingerprint,
     proxy,
     twofaSecret,
+    metaInboxTarget,
     status,
     lastActivity,
   }) {
     const now = Date.now();
     runStatement(`
       INSERT INTO sessions (
-        session_id, c_user, cookie_format, cookies, fingerprint, proxy, twofa_secret, status, last_activity, created_at, updated_at
+        session_id, c_user, cookie_format, cookies, fingerprint, proxy, twofa_secret, meta_inbox_target_json, status, last_activity, created_at, updated_at
       ) VALUES (
-        :session_id, :c_user, :cookie_format, :cookies, :fingerprint, :proxy, :twofa_secret, :status, :last_activity, :created_at, :updated_at
+        :session_id, :c_user, :cookie_format, :cookies, :fingerprint, :proxy, :twofa_secret, :meta_inbox_target_json, :status, :last_activity, :created_at, :updated_at
       )
       ON CONFLICT(session_id) DO UPDATE SET
         c_user = excluded.c_user,
@@ -1326,6 +1338,7 @@ export const sessionStore = {
         fingerprint = excluded.fingerprint,
         proxy = excluded.proxy,
         twofa_secret = excluded.twofa_secret,
+        meta_inbox_target_json = excluded.meta_inbox_target_json,
         status = excluded.status,
         last_activity = excluded.last_activity,
         updated_at = excluded.updated_at
@@ -1337,9 +1350,24 @@ export const sessionStore = {
       ':fingerprint': serialize(fingerprint || {}),
       ':proxy': serialize(proxy || null),
       ':twofa_secret': twofaSecret ? String(twofaSecret) : null,
+      ':meta_inbox_target_json': serialize(metaInboxTarget || null),
       ':status': status || 'active',
       ':last_activity': lastActivity || now,
       ':created_at': now,
+      ':updated_at': now,
+    });
+  },
+
+  updateMetaInboxTarget(sessionId, metaInboxTarget = null) {
+    const now = Date.now();
+    runStatement(`
+      UPDATE sessions
+      SET meta_inbox_target_json = :meta_inbox_target_json,
+          updated_at = :updated_at
+      WHERE session_id = :session_id
+    `, {
+      ':session_id': sessionId,
+      ':meta_inbox_target_json': serialize(metaInboxTarget || null),
       ':updated_at': now,
     });
   },

@@ -42,6 +42,7 @@ router.post('/', async (req, res, next) => {
       flowTimeoutMs,
       recoverableRetryAttempts,
       validateProxyFirst,
+      context,
     } = req.body || {};
 
     const cookiesIsString = typeof cookies === 'string';
@@ -108,6 +109,7 @@ router.post('/', async (req, res, next) => {
         flowTimeoutMs: flowTimeoutMs || null,
         recoverableRetryAttempts: recoverableRetryAttempts || null,
         validateProxyFirst: validateProxyFirst === undefined ? true : toBoolean(validateProxyFirst),
+        context: context && typeof context === 'object' && !Array.isArray(context) ? context : null,
       },
     });
 

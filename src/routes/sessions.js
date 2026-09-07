@@ -392,6 +392,7 @@ router.post('/:sessionId/check', async (req, res, next) => {
       recoverableRetryAttempts: req.body?.recoverableRetryAttempts,
       priority: scheduling.priority,
       browserPoolOptions: { lane: scheduling.browserPoolLane },
+      context: req.body?.context,
     });
     res.json({
       ok: true,
@@ -456,6 +457,7 @@ router.post('/:sessionId/resume-check', async (req, res, next) => {
       recoverableRetryAttempts: req.body?.recoverableRetryAttempts,
       priority: scheduling.priority,
       browserPoolOptions: { lane: scheduling.browserPoolLane },
+      context: req.body?.context,
     });
     const session = getSessionInfo(sessionId);
     res.json({
@@ -550,7 +552,7 @@ router.put('/:sessionId/cookies', async (req, res, next) => {
       });
     }
 
-    await updateSessionCookies(sessionId, cookies, { twofaSecret, proxy: proxyConfig });
+    await updateSessionCookies(sessionId, cookies, { twofaSecret, proxy: proxyConfig, context });
     res.json({
       ok: true,
       message: 'Cookies updated',
