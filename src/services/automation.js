@@ -4045,6 +4045,37 @@ async function collectActiveConversationDiagnostics(page, targetDigits, rawPhone
     const extractPhoneLikeDigits = (text) => Array.from(new Set((text.match(/\+?\d[\d\s().-]{6,}\d/g) || [])
       .map(digits)
       .filter((value) => value.length >= 8)));
+    const rectFor = (el) => {
+      const rect = el.getBoundingClientRect();
+      return {
+        top: Math.round(rect.top),
+        left: Math.round(rect.left),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      };
+    };
+    const looksLikeActiveConversationChrome = (el) => {
+      const rect = el.getBoundingClientRect();
+      const role = String(el.getAttribute('role') || '').toLowerCase();
+      const ariaSelected = String(el.getAttribute('aria-selected') || '').toLowerCase();
+      const ariaCurrent = String(el.getAttribute('aria-current') || '').toLowerCase();
+      const tag = String(el.tagName || '').toLowerCase();
+      const text = normalize(el.textContent || el.innerText || '');
+      if (!text || text.length > 260 || extractPhoneLikeDigits(text).length === 0) return false;
+      if (ariaSelected === 'true' || ariaCurrent === 'true') return true;
+      if (el.closest('[aria-selected="true"], [aria-current="true"]')) return true;
+      if (role === 'heading' || /^h[1-3]$/.test(tag)) return true;
+
+      const inTopThreadHeader = rect.top >= 40 &&
+        rect.top <= Math.min(260, window.innerHeight * 0.32) &&
+        rect.left >= Math.min(260, window.innerWidth * 0.18);
+      if (inTopThreadHeader) return true;
+
+      const inSelectedThreadList = rect.left <= Math.min(620, window.innerWidth * 0.52) &&
+        rect.width <= Math.min(620, window.innerWidth * 0.58) &&
+        rect.height <= 160;
+      return inSelectedThreadList;
+    };
 
     const activeContainers = [];
     const selectors = [
@@ -4065,12 +4096,20 @@ async function collectActiveConversationDiagnostics(page, targetDigits, rawPhone
         if (visible(el)) activeContainers.push(el);
       }
     }
+    for (const el of Array.from(document.querySelectorAll('[aria-selected="true"], [aria-current="true"], [role="heading"], h1, h2, h3, span, div'))) {
+      if (!visible(el)) continue;
+      if (looksLikeActiveConversationChrome(el)) activeContainers.push(el);
+    }
 
     const unique = Array.from(new Set(activeContainers));
     const summaries = unique.map((el) => {
       const text = normalize(el.textContent || el.innerText || '');
       return {
         selector: el.tagName || null,
+        role: el.getAttribute('role') || null,
+        ariaSelected: el.getAttribute('aria-selected') || null,
+        ariaCurrent: el.getAttribute('aria-current') || null,
+        rect: rectFor(el),
         text: text.slice(0, 500),
         phoneDigits: extractPhoneLikeDigits(text),
       };
@@ -4085,6 +4124,7 @@ async function collectActiveConversationDiagnostics(page, targetDigits, rawPhone
       phoneDigits,
       targetMatched: phoneDigits.some(matchesTarget),
       hasPhoneEvidence: phoneDigits.length > 0,
+      proof: phoneDigits.some(matchesTarget) ? 'active_conversation_phone_match' : null,
       summaries: summaries.slice(0, 8),
     };
   }, { targetDigits, rawPhoneDigits }).catch((error) => ({
@@ -4495,11 +4535,14 @@ export async function sendMessage(
         targetDigits: flowResult?.phoneDigits,
         rawPhoneDigits: flowResult?.rawPhoneDigits,
       });
+      const postSendVerified = postSendDiagnostics?.targetMatched === true;
       logStep('send:post_send_verified', {
         method: flowResult?.method,
+        verified: postSendVerified,
         targetMatched: postSendDiagnostics?.targetMatched,
         hasPhoneEvidence: postSendDiagnostics?.hasPhoneEvidence,
         phoneDigits: postSendDiagnostics?.phoneDigits,
+        proof: postSendDiagnostics?.proof,
         url: postSendDiagnostics?.url,
       });
       console.log('[Automation] ========================================');
@@ -4537,6 +4580,8 @@ export async function sendMessage(
         attempt,
         steps,
         screenshots,
+        postSendVerified,
+        postSendDiagnostics,
         screenshotPath: successScreenshot?.path || null,
         screenshotFilename: successScreenshot?.filename || null,
         url: successScreenshot?.url || null,
@@ -4545,6 +4590,8 @@ export async function sendMessage(
         ok: true,
         screenshot: successScreenshot,
         requestId: normalizedRequestId,
+        postSendVerified,
+        postSendDiagnostics,
       };
     } catch (error) {
       lastError = error;
