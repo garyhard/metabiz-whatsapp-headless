@@ -52,6 +52,8 @@ function getAutomationErrorCode(error) {
   if (type === 'account_restricted' || message.includes('account restricted')) return 'account_restricted';
   if (type === 'captcha_required' || message.includes('captcha checkpoint')) return 'captcha_required';
   if (type === 'need_new_cookies' || message.includes('need new cookies')) return 'need_new_cookies';
+  if (type === 'meta_ui_post_send_error') return 'meta_ui_post_send_error';
+  if (type === 'meta_ui_post_send_thread_mismatch') return 'meta_ui_post_send_thread_mismatch';
   return 'automation_error';
 }
 

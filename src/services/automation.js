@@ -312,6 +312,19 @@ const SEARCH_INPUT_HINTS = normalizeList([
   'percakapan',
   'pesan',
 ]);
+const POST_SEND_UI_ERROR_HINTS = uniqueNormalizedList([
+  'something went wrong. please try again.',
+  'something went wrong',
+  'try again later',
+  'could not send',
+  'failed to send',
+  'message failed',
+  'terjadi kesalahan. silakan coba lagi.',
+  'terjadi kesalahan',
+  'coba lagi nanti',
+  'gagal mengirim',
+  'pesan gagal',
+]);
 
 function positiveMs(value, fallback) {
   const parsed = Number(value);
@@ -3961,6 +3974,153 @@ async function clickSendMessage(page) {
   console.log('[Automation] Step 6: ✓ "Send Message" button clicked');
 }
 
+async function detectPostSendUiError(page) {
+  return page.evaluate((hints) => {
+    const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const visible = (el) => {
+      if (!el) return false;
+      const style = window.getComputedStyle(el);
+      if (!style || style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 4 && rect.height > 4;
+    };
+    const likelyToastOrAlert = (el, text) => {
+      const role = normalize(el.getAttribute('role'));
+      const ariaLive = normalize(el.getAttribute('aria-live'));
+      let node = el;
+      let hasFloatingAncestor = false;
+      for (let i = 0; i < 5 && node; i += 1) {
+        const style = window.getComputedStyle(node);
+        const position = normalize(style?.position);
+        if (position === 'fixed' || position === 'sticky') {
+          hasFloatingAncestor = true;
+          break;
+        }
+        node = node.parentElement;
+      }
+      return role === 'alert' ||
+        role === 'status' ||
+        ariaLive === 'assertive' ||
+        ariaLive === 'polite' ||
+        hasFloatingAncestor;
+    };
+
+    const candidates = Array.from(document.querySelectorAll('[role="alert"], [role="status"], [aria-live], div, span'));
+    for (const el of candidates) {
+      if (!visible(el)) continue;
+      const text = normalize(el.textContent || el.innerText || '');
+      if (!text || !hints.some((hint) => text.includes(hint))) continue;
+      if (!likelyToastOrAlert(el, text)) continue;
+
+      return {
+        text,
+        role: el.getAttribute('role') || null,
+        ariaLive: el.getAttribute('aria-live') || null,
+        tagName: el.tagName || null,
+      };
+    }
+    return null;
+  }, POST_SEND_UI_ERROR_HINTS).catch(() => null);
+}
+
+async function collectActiveConversationDiagnostics(page, targetDigits, rawPhoneDigits) {
+  return page.evaluate(({ targetDigits: wantedFull, rawPhoneDigits: wantedRaw }) => {
+    const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const digits = (value) => String(value || '').replace(/[^\d]/g, '');
+    const visible = (el) => {
+      if (!el) return false;
+      const style = window.getComputedStyle(el);
+      if (!style || style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 4 && rect.height > 4;
+    };
+    const matchesTarget = (candidate) => {
+      const value = digits(candidate);
+      if (value.length < 7) return false;
+      return Boolean(
+        (wantedFull && (value.endsWith(wantedFull) || wantedFull.endsWith(value) || value.includes(wantedFull) || wantedFull.includes(value))) ||
+        (wantedRaw && (value.endsWith(wantedRaw) || wantedRaw.endsWith(value) || value.includes(wantedRaw) || wantedRaw.includes(value)))
+      );
+    };
+    const extractPhoneLikeDigits = (text) => Array.from(new Set((text.match(/\+?\d[\d\s().-]{6,}\d/g) || [])
+      .map(digits)
+      .filter((value) => value.length >= 8)));
+
+    const activeContainers = [];
+    const selectors = [
+      '[role="complementary"]',
+      'aside',
+      '[aria-label*="Contact" i]',
+      '[aria-label*="Kontak" i]',
+      '[data-pagelet*="ThreadHeader"]',
+      '[data-pagelet*="InboxThreadHeader"]',
+      '[data-pagelet*="BizInboxThreadHeader"]',
+      '[role="main"] [role="heading"]',
+      '[role="main"] h1',
+      '[role="main"] h2',
+    ];
+
+    for (const selector of selectors) {
+      for (const el of Array.from(document.querySelectorAll(selector))) {
+        if (visible(el)) activeContainers.push(el);
+      }
+    }
+
+    const unique = Array.from(new Set(activeContainers));
+    const summaries = unique.map((el) => {
+      const text = normalize(el.textContent || el.innerText || '');
+      return {
+        selector: el.tagName || null,
+        text: text.slice(0, 500),
+        phoneDigits: extractPhoneLikeDigits(text),
+      };
+    }).filter((item) => item.text || item.phoneDigits.length > 0);
+
+    const phoneDigits = Array.from(new Set(summaries.flatMap((item) => item.phoneDigits)));
+    return {
+      url: window.location.href,
+      title: document.title,
+      targetDigits: wantedFull,
+      rawPhoneDigits: wantedRaw,
+      phoneDigits,
+      targetMatched: phoneDigits.some(matchesTarget),
+      hasPhoneEvidence: phoneDigits.length > 0,
+      summaries: summaries.slice(0, 8),
+    };
+  }, { targetDigits, rawPhoneDigits }).catch((error) => ({
+    error: error?.message || String(error),
+    targetDigits,
+    rawPhoneDigits,
+  }));
+}
+
+async function verifyPostSendResult(page, { targetDigits, rawPhoneDigits }) {
+  await sleep(1200);
+
+  const uiError = await detectPostSendUiError(page);
+  const diagnostics = await collectActiveConversationDiagnostics(page, targetDigits, rawPhoneDigits);
+  if (uiError) {
+    throw new AutomationError(`Step 6: Meta UI reported post-send error: ${uiError.text}`, {
+      type: 'meta_ui_post_send_error',
+      errorCode: 'meta_ui_post_send_error',
+      uiError,
+      diagnostics,
+      url: diagnostics?.url || page.url(),
+    });
+  }
+
+  if (diagnostics?.hasPhoneEvidence && diagnostics.targetMatched === false) {
+    throw new AutomationError('Step 6: Meta UI active conversation does not match target phone after send', {
+      type: 'meta_ui_post_send_thread_mismatch',
+      errorCode: 'meta_ui_post_send_thread_mismatch',
+      diagnostics,
+      url: diagnostics?.url || page.url(),
+    });
+  }
+
+  return diagnostics;
+}
+
 function sanitizeMediaFilename(filename, mimetype) {
   const fallbackExt = IMAGE_MIME_EXTENSIONS[String(mimetype || '').toLowerCase()] || '.jpg';
   const cleaned = String(filename || 'image')
@@ -4271,12 +4431,13 @@ export async function sendMessage(
   };
 
   const runFlow = async () => {
+    const phoneDigits = normalizeDigits(`${extension}${phoneNumber}`);
+    const rawPhoneDigits = normalizeDigits(phoneNumber);
     if (useReplyFlow) {
-      const phoneDigits = normalizeDigits(`${extension}${phoneNumber}`);
       const replied = await tryReplyFlow(page, { phoneDigits, message, twofaSecret });
       if (replied) {
         logStep('send:reply_flow', { phoneDigits });
-        return;
+        return { phoneDigits, rawPhoneDigits, method: 'reply' };
       }
     }
 
@@ -4311,6 +4472,7 @@ export async function sendMessage(
 
     // Give the UI a short moment for send to process
     await sleep(200);
+    return { phoneDigits, rawPhoneDigits, method: 'direct_compose' };
   };
 
   console.log('[Automation] ========================================');
@@ -4328,7 +4490,18 @@ export async function sendMessage(
       } else if (attempt === 3) {
         await refreshForSend('reload retry');
       }
-      await runFlow();
+      const flowResult = await runFlow();
+      const postSendDiagnostics = await verifyPostSendResult(page, {
+        targetDigits: flowResult?.phoneDigits,
+        rawPhoneDigits: flowResult?.rawPhoneDigits,
+      });
+      logStep('send:post_send_verified', {
+        method: flowResult?.method,
+        targetMatched: postSendDiagnostics?.targetMatched,
+        hasPhoneEvidence: postSendDiagnostics?.hasPhoneEvidence,
+        phoneDigits: postSendDiagnostics?.phoneDigits,
+        url: postSendDiagnostics?.url,
+      });
       console.log('[Automation] ========================================');
       console.log('[Automation] ✓ Automation completed successfully');
       console.log('[Automation] ========================================');
