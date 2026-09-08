@@ -4189,6 +4189,8 @@ export async function sendMessage(
     useReplyFlow = true,
     includeSuccessScreenshot = false,
     requestId = null,
+    queueJobId = null,
+    metaBlastMessageId = null,
     metaInboxTarget = null,
     targetInboxUrl = null,
   }
@@ -4200,8 +4202,31 @@ export async function sendMessage(
   const normalizedRequestId = normalizeRequestId(sessionId, requestId);
   const target = normalizeMetaInboxTarget(metaInboxTarget || { targetInboxUrl });
   const steps = [];
+  const screenshots = [];
   const logStep = (label, extra = {}) => {
     steps.push({ at: new Date().toISOString(), label, ...extra });
+  };
+  const captureStepScreenshot = async (label, extra = {}) => {
+    if (!includeSuccessScreenshot) return null;
+
+    const debug = await captureDebugScreenshot(page, `send-${label}`, cUser || 'unknown');
+    const item = {
+      at: new Date().toISOString(),
+      label,
+      path: debug?.path || null,
+      filename: debug?.path ? path.basename(debug.path) : null,
+      url: debug?.url || null,
+      error: debug?.error || null,
+      ...extra,
+    };
+    screenshots.push(item);
+    logStep(`debug:screenshot:${label}`, {
+      filename: item.filename,
+      url: item.url,
+      error: item.error,
+      ...extra,
+    });
+    return item;
   };
 
   console.log('[Automation] ========================================');
@@ -4209,7 +4234,7 @@ export async function sendMessage(
   console.log(`[Automation] Extension: ${extension}`);
   console.log(`[Automation] Phone: ${phoneNumber}`);
   console.log(`[Automation] Message: ${message}`);
-  logStep('send:start', { sessionId, extension, phoneNumber });
+  logStep('send:start', { sessionId, queueJobId, metaBlastMessageId, extension, phoneNumber });
   
   // Verify we're on the right page
   const currentUrl = page.url();
@@ -4233,6 +4258,7 @@ export async function sendMessage(
       await ensureInboxReady(page, 'Send', { twofaSecret, cUser, metaInboxTarget: target });
       console.log('[Automation] ✓ Page refreshed');
       logStep('send:refresh_ok', { label });
+      await captureStepScreenshot('refresh-ok', { refreshLabel: label });
     } catch (error) {
       console.warn(`[Automation] Refresh failed: ${error.message}. Retrying...`);
       await page.reload({ waitUntil: 'domcontentloaded', timeout: RELOAD_TIMEOUT_MS });
@@ -4240,6 +4266,7 @@ export async function sendMessage(
       await ensureInboxReady(page, 'Send', { twofaSecret, cUser, metaInboxTarget: target });
       console.log('[Automation] ✓ Page refreshed (retry)');
       logStep('send:refresh_retry_ok', { label });
+      await captureStepScreenshot('refresh-retry-ok', { refreshLabel: label });
     }
   };
 
@@ -4256,10 +4283,12 @@ export async function sendMessage(
     // Step 1: Open WhatsApp modal
     await openWhatsappModal(page);
     logStep('send:open_modal');
+    await captureStepScreenshot('open-modal');
 
     // Step 2: Click "New WhatsApp number"
     const newNumberResult = await clickNewWhatsappNumber(page);
     logStep('send:new_number', newNumberResult);
+    await captureStepScreenshot('new-number', newNumberResult);
 
     // Step 3: Select extension
     await selectExtension(page, extension);
@@ -4268,14 +4297,17 @@ export async function sendMessage(
     // Step 4: Fill phone number
     await fillPhoneNumber(page, phoneNumber);
     logStep('send:fill_phone');
+    await captureStepScreenshot('fill-phone', { extension, phoneNumber });
 
     // Step 5: Fill message
     await fillMessage(page, message);
     logStep('send:fill_message');
+    await captureStepScreenshot('fill-message');
 
     // Step 6: Click Send message (screenshot will be taken, but click is disabled inside function)
     await clickSendMessage(page);
     logStep('send:click_send');
+    await captureStepScreenshot('click-send');
 
     // Give the UI a short moment for send to process
     await sleep(200);
@@ -4291,6 +4323,7 @@ export async function sendMessage(
         } else {
           await ensureInboxReady(page, 'Send', { twofaSecret, cUser, metaInboxTarget: target });
           logStep('send:ensure_ready');
+          await captureStepScreenshot('ensure-ready');
         }
       } else if (attempt === 3) {
         await refreshForSend('reload retry');
@@ -4307,13 +4340,32 @@ export async function sendMessage(
           url: debug.url || null,
           filename: debug.path ? path.basename(debug.path) : null,
         };
+        screenshots.push({
+          at: new Date().toISOString(),
+          label: 'success',
+          path: successScreenshot.path,
+          filename: successScreenshot.filename,
+          url: successScreenshot.url,
+          error: debug.error || null,
+        });
       }
       logStep('send:ok', { attempt });
       await writeRequestLog(normalizedRequestId, {
         requestId: normalizedRequestId,
+        sessionId,
+        queueJobId,
+        metaBlastMessageId,
+        cUser,
         type: 'send',
+        debugMode: includeSuccessScreenshot === true,
+        metaInboxTarget: target,
+        extension,
+        phoneNumber,
+        attempt,
         steps,
+        screenshots,
         screenshotPath: successScreenshot?.path || null,
+        screenshotFilename: successScreenshot?.filename || null,
         url: successScreenshot?.url || null,
       });
       return {
@@ -4360,14 +4412,32 @@ export async function sendMessage(
     }
     
     console.error('[Automation] ========================================');
-  const debug = await captureDebugScreenshot(page, 'send', cUser || 'unknown');
+    const debug = await captureDebugScreenshot(page, 'send', cUser || 'unknown');
+    screenshots.push({
+      at: new Date().toISOString(),
+      label: 'failure',
+      path: debug.path || null,
+      filename: debug.path ? path.basename(debug.path) : null,
+      url: debug.url || null,
+      error: debug.error || null,
+    });
     const captchaLog = getCaptchaLogDetails(lastError?.details || null);
     await writeRequestLog(normalizedRequestId, {
       requestId: normalizedRequestId,
+      sessionId,
+      queueJobId,
+      metaBlastMessageId,
+      cUser,
       type: 'send',
+      debugMode: includeSuccessScreenshot === true,
+      metaInboxTarget: target,
+      extension,
+      phoneNumber,
       steps,
+      screenshots,
       error: lastError.message,
       screenshotPath: debug.path,
+      screenshotFilename: debug.path ? path.basename(debug.path) : null,
       url: debug.url,
       ...(captchaLog || {}),
     });

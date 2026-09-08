@@ -387,6 +387,16 @@ function isRetryableMessageJobError(errorResult) {
   ].includes(code);
 }
 
+function sendFlowDebugEnabled() {
+  const normalized = String(process.env.META_SEND_FLOW_DEBUG || 'true').trim().toLowerCase();
+  return !['0', 'false', 'no', 'off'].includes(normalized);
+}
+
+function includeFlowDebugForJob(job) {
+  return job.includeSuccessScreenshot === true ||
+    (sendFlowDebugEnabled() && String(job.metaBlastMessageId || '').trim().length > 0);
+}
+
 async function processJob(job) {
   try {
     const sendPayload = {
@@ -394,7 +404,10 @@ async function processJob(job) {
       phoneNumber: job.phoneNumber,
       message: job.message,
       useReplyFlow: job.useReplyFlow,
-      includeSuccessScreenshot: job.includeSuccessScreenshot,
+      includeSuccessScreenshot: includeFlowDebugForJob(job),
+      requestId: job.requestId || null,
+      queueJobId: job.id || null,
+      metaBlastMessageId: job.metaBlastMessageId || null,
       priority: job.priority || (job.useReplyFlow ? 'high' : 'normal'),
     };
     const sendMediaPayload = job.messageType === 'media'
