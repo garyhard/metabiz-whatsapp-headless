@@ -2,7 +2,6 @@
  * Persistent message queue worker backed by sessionStore (SQLite).
  */
 
-import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
 import { sessionStore } from './sessionStore.js';
 import {
@@ -1078,7 +1077,7 @@ export function enqueueMessageJob({
   }
 
   const job = sessionStore.enqueueMessageJob({
-    id: uuidv4(),
+    id: crypto.randomUUID(),
     requestId: normalizedRequestId,
     metaBlastMessageId: metaBlastMessageId ? String(metaBlastMessageId).trim() : null,
     sessionId: String(sessionId),

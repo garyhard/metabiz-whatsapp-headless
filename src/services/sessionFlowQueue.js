@@ -2,7 +2,6 @@
  * Persistent session-flow queue worker backed by sessionStore (SQLite).
  */
 
-import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
 import { sessionStore } from './sessionStore.js';
 import {
@@ -720,7 +719,7 @@ export function enqueueSessionFlowJob({
   }
 
   const job = sessionStore.enqueueSessionFlowJob({
-    id: uuidv4(),
+    id: crypto.randomUUID(),
     requestId: normalizedRequestId,
     jobType: normalizedJobType,
     priority: normalizedPriority,

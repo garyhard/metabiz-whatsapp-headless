@@ -2,7 +2,7 @@
  * Session Manager - manages browser session lifecycle
  */
 
-import { v4 as uuidv4 } from 'uuid';
+import crypto from 'crypto';
 import { createBrowser } from './browserFactory.js';
 import { normalizeCookiesInput, parseCookieString, toPlaywrightCookies, toPlaywrightCookiesFromJson } from '../utils/cookies.js';
 import { sendMessage, sendMediaMessage, checkSessionFlow, captureDebugScreenshot, detectNeedNewCookiesPage, throwIfAutomatedBehaviorNotice, resolveTwoFactorIfNeeded } from './automation.js';
@@ -1843,7 +1843,7 @@ export async function createSession(
       throw new InvalidInputError('c_user cookie is required');
     }
     // Use existing sessionId if provided (for recreation), otherwise generate new one
-    const sessionId = existingSessionId || uuidv4();
+    const sessionId = existingSessionId || crypto.randomUUID();
     const cachedRestriction = existingSessionId ? getCachedRestrictedManualAction(sessionId) : null;
     const storedSession = existingSessionId ? sessionStore.getBySessionId(sessionId) : null;
     const stored = sessionStore.getByCUser(finalCUser);
@@ -2190,7 +2190,7 @@ export async function validateCookies(cookieInput, proxy = null, options = {}) {
     throw new InvalidInputError('c_user cookie is required');
   }
 
-  const tempSessionId = persist ? uuidv4() : `validate-${uuidv4()}`;
+  const tempSessionId = persist ? crypto.randomUUID() : `validate-${crypto.randomUUID()}`;
   const browserReservationKey = persist
     ? `validate:${tempSessionId}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`
     : null;
@@ -2400,7 +2400,7 @@ export async function validateProxy(proxy = null, options = {}) {
     throw new InvalidInputError('Proxy is required');
   }
 
-  const tempSessionId = `proxy-${uuidv4()}`;
+  const tempSessionId = `proxy-${crypto.randomUUID()}`;
   const browserReservationKey = `proxy:${tempSessionId}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
   const browserPoolLane = String(options?.browserPoolLane || '').trim().toLowerCase();
   let browserSlotReserved = false;

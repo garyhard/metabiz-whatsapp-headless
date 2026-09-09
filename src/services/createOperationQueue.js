@@ -2,7 +2,7 @@
  * Dedicated queue worker for Meta create-preflight operations.
  */
 
-import { v4 as uuidv4 } from 'uuid';
+import crypto from 'crypto';
 import { sessionStore } from './sessionStore.js';
 import { validateCookies, validateProxy, checkSessionForSession, destroySession } from './sessionManager.js';
 import { config } from '../config.js';
@@ -570,7 +570,7 @@ export function enqueueCreateOperation({
 
   const normalizedPayload = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
   const operation = sessionStore.enqueueCreateOperation({
-    id: uuidv4(),
+    id: crypto.randomUUID(),
     requestId: normalizedRequestId,
     cUser: cUser ? String(cUser).trim() : null,
     payload: normalizedPayload,
