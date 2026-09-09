@@ -4632,7 +4632,32 @@ export async function sendMessage(
       };
     } catch (error) {
       lastError = error;
-      logStep('send:error', { attempt, error: error?.message || String(error) });
+      const errorDetails = (error?.details && typeof error.details === 'object' && !Array.isArray(error.details))
+        ? error.details
+        : {};
+      const errorDiagnostics = errorDetails?.diagnostics || {};
+      const errorCode = automationErrorCode(error);
+      logStep('send:error', {
+        attempt,
+        error: error?.message || String(error),
+        errorCode: errorCode || null,
+        sendSubmitted: errorDetails?.sendSubmitted === true,
+        targetMatched: errorDiagnostics?.targetMatched,
+        hasPhoneEvidence: errorDiagnostics?.hasPhoneEvidence,
+        phoneDigits: errorDiagnostics?.phoneDigits,
+        proof: errorDiagnostics?.proof,
+        url: errorDiagnostics?.url || errorDetails?.url || null,
+      });
+      if (errorDetails?.sendSubmitted === true) {
+        await captureStepScreenshot('post-submit-error', {
+          attempt,
+          errorCode: errorCode || null,
+          targetMatched: errorDiagnostics?.targetMatched,
+          hasPhoneEvidence: errorDiagnostics?.hasPhoneEvidence,
+          proof: errorDiagnostics?.proof,
+          url: errorDiagnostics?.url || errorDetails?.url || null,
+        });
+      }
       if (shouldRetry(error) && attempt < maxAttempts) {
         const delay = backoffMs[Math.min(attempt - 1, backoffMs.length - 1)];
         console.warn(
