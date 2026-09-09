@@ -21,6 +21,8 @@ const CAPTCHA_DIR = path.join(DEBUG_DIR, 'captcha');
 const MEDIA_UPLOAD_TMP_DIR = path.join(DEBUG_DIR, 'media-uploads');
 const RELOAD_TIMEOUT_MS = 60000;
 const SPINNER_TIMEOUT_MS = 15000;
+const POST_SEND_VERIFY_TIMEOUT_MS = 20000;
+const POST_SEND_VERIFY_INTERVAL_MS = 750;
 const MAX_MEDIA_UPLOAD_BYTES = 5 * 1024 * 1024;
 const IMAGE_MIME_EXTENSIONS = {
   'image/jpeg': '.jpg',
@@ -4134,31 +4136,52 @@ async function collectActiveConversationDiagnostics(page, targetDigits, rawPhone
   }));
 }
 
-async function verifyPostSendResult(page, { targetDigits, rawPhoneDigits }) {
+async function verifyPostSendResult(page, { targetDigits, rawPhoneDigits, timeoutMs = POST_SEND_VERIFY_TIMEOUT_MS }) {
+  const startedAt = Date.now();
+  let lastUiError = null;
+  let lastDiagnostics = null;
+
   await sleep(1200);
 
-  const uiError = await detectPostSendUiError(page);
-  const diagnostics = await collectActiveConversationDiagnostics(page, targetDigits, rawPhoneDigits);
-  if (uiError) {
-    throw new AutomationError(`Step 6: Meta UI reported post-send error: ${uiError.text}`, {
-      type: 'meta_ui_post_send_error',
-      errorCode: 'meta_ui_post_send_error',
-      uiError,
-      diagnostics,
-      url: diagnostics?.url || page.url(),
+  while (Date.now() - startedAt <= timeoutMs) {
+    lastUiError = await detectPostSendUiError(page);
+    lastDiagnostics = await collectActiveConversationDiagnostics(page, targetDigits, rawPhoneDigits);
+
+    if (!lastUiError && lastDiagnostics?.targetMatched === true) {
+      return lastDiagnostics;
+    }
+
+    await sleep(POST_SEND_VERIFY_INTERVAL_MS);
+  }
+
+  const baseDetails = {
+    sendSubmitted: true,
+    diagnostics: lastDiagnostics,
+    url: lastDiagnostics?.url || page.url(),
+  };
+
+  if (lastUiError) {
+    throw new AutomationError(`Step 6: Meta UI reported post-send error after submit: ${lastUiError.text}`, {
+      ...baseDetails,
+      type: 'meta_ui_post_send_error_after_submit',
+      errorCode: 'meta_ui_post_send_error_after_submit',
+      uiError: lastUiError,
     });
   }
 
-  if (diagnostics?.hasPhoneEvidence && diagnostics.targetMatched === false) {
-    throw new AutomationError('Step 6: Meta UI active conversation does not match target phone after send', {
-      type: 'meta_ui_post_send_thread_mismatch',
-      errorCode: 'meta_ui_post_send_thread_mismatch',
-      diagnostics,
-      url: diagnostics?.url || page.url(),
+  if (lastDiagnostics?.hasPhoneEvidence && lastDiagnostics.targetMatched === false) {
+    throw new AutomationError('Step 6: Meta UI active conversation did not confirm target phone after submit; not retrying to avoid duplicate send', {
+      ...baseDetails,
+      type: 'meta_ui_post_send_thread_mismatch_after_submit',
+      errorCode: 'meta_ui_post_send_thread_mismatch_after_submit',
     });
   }
 
-  return diagnostics;
+  throw new AutomationError('Step 6: Meta UI did not provide post-send confirmation after submit; not retrying to avoid duplicate send', {
+    ...baseDetails,
+    type: 'meta_ui_post_send_unverified_after_submit',
+    errorCode: 'meta_ui_post_send_unverified_after_submit',
+  });
 }
 
 function sanitizeMediaFilename(filename, mimetype) {
@@ -4447,8 +4470,22 @@ export async function sendMessage(
   const maxAttempts = 3;
   const backoffMs = [2000, 5000, 10000];
   const retryableMessage = 'Step 1: Could not find "Send a Message on WhatsApp" button';
+  const postSubmitNoRetryErrorCodes = new Set([
+    'meta_ui_post_send_error_after_submit',
+    'meta_ui_post_send_thread_mismatch_after_submit',
+    'meta_ui_post_send_unverified_after_submit',
+  ]);
+  const automationErrorCode = (error) => String(
+    error?.errorCode ||
+    error?.details?.errorCode ||
+    error?.details?.error_code ||
+    error?.details?.type ||
+    ''
+  ).trim().toLowerCase();
   const shouldRetry = (error) =>
-    error instanceof AutomationError && !isAuthRelatedError(error);
+    error instanceof AutomationError &&
+    !isAuthRelatedError(error) &&
+    !postSubmitNoRetryErrorCodes.has(automationErrorCode(error));
 
   const refreshForSend = async (label) => {
     console.log(`[Automation] Refreshing page to ensure clean state${label ? ` (${label})` : ''}...`);

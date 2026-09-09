@@ -356,6 +356,9 @@ function buildErrorResult(error, fallbackMessage) {
   const type = String(details?.type || '').toLowerCase();
   let errorCode = error?.errorCode ? String(error.errorCode) : null;
   if (!errorCode) {
+    errorCode = details?.errorCode || details?.error_code || null;
+  }
+  if (!errorCode) {
     if (type === 'account_restricted' || message.toLowerCase().includes('account restricted')) {
       errorCode = 'account_restricted';
     } else if (type === 'automated_behavior_checkpoint') {
@@ -383,6 +386,9 @@ function isRetryableMessageJobError(errorResult) {
     'automated_behavior_checkpoint',
     'need_new_cookies',
     'captcha_required',
+    'meta_ui_post_send_error_after_submit',
+    'meta_ui_post_send_thread_mismatch_after_submit',
+    'meta_ui_post_send_unverified_after_submit',
   ].includes(code);
 }
 
