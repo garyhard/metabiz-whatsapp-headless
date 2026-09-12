@@ -96,6 +96,18 @@ const CONTINUE_LABELS = normalizeList([
   'selanjutnya',
   'berikutnya',
 ]);
+const WHATSAPP_MESSAGE_SETTINGS_HINTS = normalizeList([
+  'choose whatsapp message settings',
+  'whatsapp message settings',
+  'allow people in',
+  'access whatsapp messages',
+  'turning this on lets people',
+  'respond to message from your whatsapp account',
+  'pilih pengaturan pesan whatsapp',
+  'pengaturan pesan whatsapp',
+  'akses pesan whatsapp',
+  'membalas pesan dari akun whatsapp',
+]);
 const TRUST_DEVICE_LABELS = normalizeList(['trust this device', 'percayai perangkat ini']);
 const ALWAYS_CONFIRM_LABELS = normalizeList([
   "always confirm it's me",
@@ -363,6 +375,44 @@ async function dismissSaveLoginInfo(page, label = 'Automation') {
   return false;
 }
 
+async function dismissWhatsappMessageSettingsDialog(page, label = 'Automation') {
+  try {
+    const dialogs = await page.$$('[role="dialog"], [aria-modal="true"]');
+    for (const dialog of dialogs) {
+      if (!(await isVisible(page, dialog))) continue;
+      const dialogText = normalizeText(
+        await page.evaluate((el) => el.textContent || el.innerText || '', dialog)
+      );
+      if (!dialogText.includes('whatsapp')) continue;
+      if (!WHATSAPP_MESSAGE_SETTINGS_HINTS.some((hint) => dialogText.includes(hint))) continue;
+
+      const clickedContinue = await clickFirstMatchingText(page, CONTINUE_LABELS, {
+        root: dialog,
+        selector: '[role="button"],button,a,[role="link"]',
+      });
+      if (clickedContinue) {
+        await page.waitForTimeout(800);
+        console.log(`[${label}] Dismissed WhatsApp message settings prompt`);
+        return true;
+      }
+
+      const buttons = await dialog.$$('[role="button"], button, a, [role="link"]');
+      for (const btn of buttons) {
+        if (!(await isVisible(page, btn))) continue;
+        const matches = await elementTextMatches(page, btn, CONTINUE_LABELS);
+        if (!matches) continue;
+        await clickElement(page, btn, `${label}: Continue WhatsApp message settings`);
+        await page.waitForTimeout(800);
+        console.log(`[${label}] Dismissed WhatsApp message settings prompt`);
+        return true;
+      }
+    }
+  } catch (error) {
+    console.warn(`[${label}] Failed to dismiss WhatsApp message settings prompt: ${error.message}`);
+  }
+  return false;
+}
+
 export async function throwIfAutomatedBehaviorNotice(page, label = 'Automation', cUser = 'unknown') {
   try {
     const bodyText = normalizeText(await page.evaluate(() => document.body?.innerText || ''));
@@ -396,6 +446,11 @@ export async function throwIfAutomatedBehaviorNotice(page, label = 'Automation',
 async function dismissInboxBlockingPrompts(page, label = 'Automation') {
   let dismissed = false;
   try {
+    const dismissedMessageSettings = await dismissWhatsappMessageSettingsDialog(page, label);
+    if (dismissedMessageSettings) {
+      dismissed = true;
+    }
+
     const bodyText = normalizeText(await page.evaluate(() => document.body?.innerText || ''));
 
     // "Connect to Instagram" card in inbox left pane.
