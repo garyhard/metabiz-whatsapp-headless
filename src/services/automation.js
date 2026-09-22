@@ -11,6 +11,7 @@ import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
 import { automatedBehaviorIndicator, isExplicitTwoFactorUrl } from '../utils/authCheckpoint.js';
 import { DEFAULT_META_INBOX_URL, metaInboxTargetMatchesUrl, normalizeMetaInboxTarget } from '../utils/metaInboxTarget.js';
+import { isMetaSendLimitToast } from '../utils/metaSendLimit.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -4216,10 +4217,11 @@ async function verifyPostSendResult(page, { targetDigits, rawPhoneDigits, timeou
   };
 
   if (lastUiError) {
+    const sendLimit = isMetaSendLimitToast(lastUiError.text);
     throw new AutomationError(`Step 6: Meta UI reported post-send error after submit: ${lastUiError.text}`, {
       ...baseDetails,
-      type: 'meta_ui_post_send_error_after_submit',
-      errorCode: 'meta_ui_post_send_error_after_submit',
+      type: sendLimit ? 'meta_send_limit' : 'meta_ui_post_send_error_after_submit',
+      errorCode: sendLimit ? 'meta_send_limit' : 'meta_ui_post_send_error_after_submit',
       uiError: lastUiError,
     });
   }
@@ -4526,6 +4528,7 @@ export async function sendMessage(
   const backoffMs = [2000, 5000, 10000];
   const retryableMessage = 'Step 1: Could not find "Send a Message on WhatsApp" button';
   const postSubmitNoRetryErrorCodes = new Set([
+    'meta_send_limit',
     'meta_ui_post_send_error_after_submit',
     'meta_ui_post_send_thread_mismatch_after_submit',
     'meta_ui_post_send_unverified_after_submit',

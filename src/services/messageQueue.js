@@ -386,6 +386,7 @@ function isRetryableMessageJobError(errorResult) {
     'automated_behavior_checkpoint',
     'need_new_cookies',
     'captcha_required',
+    'meta_send_limit',
     'meta_ui_post_send_error_after_submit',
     'meta_ui_post_send_thread_mismatch_after_submit',
     'meta_ui_post_send_unverified_after_submit',
